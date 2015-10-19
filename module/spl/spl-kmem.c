@@ -3123,7 +3123,7 @@ kmem_avail(void)
   if (pressure_bytes_signal & PRESSURE_KMEM_AVAIL) { // set from 90% and reap
     dprintf("SPL: got pressure bytes signal in kmem_avail()\n");
     pressure_bytes_signal &= ~(PRESSURE_KMEM_AVAIL);
-    kmem_preempt(KPREEMPT_SYNC);
+    kpreempt(KPREEMPT_SYNC);
     return (-1024*1024*LOW_MEMORY_MULT); // get 128MiB from arc
   }
 
