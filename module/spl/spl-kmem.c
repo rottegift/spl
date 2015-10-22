@@ -4025,26 +4025,38 @@ static void memory_monitor_thread()
 
 			// Figure out if we should reap as well
 			if (zfs_lbolt() - last_reap >= (hz * 60)) {
-				last_reap = zfs_lbolt();
 
 				if (vm_page_free_wanted > 0) {
-				  printf("SPL: memory_monitory_thread vm_page_free_wanted > 0, signalling kmem_avail and reaping, kmem_avail() == %lld\n", kmem_avail());
 				  pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
+				  printf("SPL: memory_monitory_thread vm_page_free_wanted == %u, signalling kmem_avail and reaping\n", vm_page_free_wanted);
 				  kmem_reap();
 				  kpreempt(KPREEMPT_SYNC);
 				  kmem_reap_idspace();
+				  kpreempt(KPREEMPT_SYNC);
+				  last_reap = zfs_lbolt();
 				}
-				    
+
+				if(!spl_minimal_physmem_p()) {
+				  printf("SPL: memory_monitory_thread !spl_minimal_physmem, vm_page_free_wanted %u, vm_page_free_count %u\n",
+					 vm_page_free_wanted, vm_page_free_count);
+				  kmem_reap();
+				  kpreempt(KPREEMPT_SYNC);
+				  kmem_reap_idspace();
+				  kpreempt(KPREEMPT_SYNC);
+				  last_reap = zfs_lbolt();
+				}
+
 				uint64_t nintypct = total_memory * 90ULL / 100ULL;
 
 				if (segkmem_total_mem_allocated >= nintypct) {
 					pressure_bytes_target = MAX(pressure_bytes_target,
 								segkmem_total_mem_allocated - nintypct);
-					printf("SPL: 90%% hit, triggering reap and signalling, kmem_avail() == %lld\n", kmem_avail());
+					printf("SPL: 90%% hit, triggering reap and signalling,  kmem_avail() == %lld\n", kmem_avail());
 					pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
 					kmem_reap();
 					kpreempt(KPREEMPT_SYNC);
 					kmem_reap_idspace();
+					last_reap = zfs_lbolt();
 				} else if (!os_num_pages_wanted && pressure_bytes_target) {
 				  printf("SPL: releasing pressure (was %llu), segkmem_total_mem_allocated=%llu kmem_avail() == %lld\n",
 					 pressure_bytes_target,
@@ -4067,8 +4079,18 @@ static void memory_monitor_thread()
 				}
 #endif
 			}
-
-
+			if (zfs_lbolt() - last_reap > (hz*300)) { // will probably fire every 5 min in reality
+			  uint32_t tenpct_real_pages = (uint32_t)((real_total_memory / 10ULL) / PAGESIZE);
+			  if(vm_page_free_count < tenpct_real_pages) {
+			    printf("SPL: background 90%% real memory check, kmem_avail() == %lld, reaping\n",
+				   kmem_avail());
+			    kmem_reap();
+			    kpreempt(KPREEMPT_SYNC);
+			    kmem_reap_idspace();
+			    kpreempt(KPREEMPT_SYNC);
+			    last_reap = zfs_lbolt();
+			  }
+			}
 		} else {
 			delay(hz/10);
 		}
