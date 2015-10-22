@@ -65,7 +65,7 @@ uint32_t vm_page_free_min_multiplier = 4;
 uint32_t vm_page_free_min_min = 256*1024*1024/4096;
 #define VM_PAGE_FREE_MIN (MAX(vm_page_free_min * vm_page_free_min_multiplier, vm_page_free_min_min))
 int64_t kmem_avail_use_spec = 1;
-uint64_t vm_low_memory_signal_shift = 6; // 64, had been good with 128 (smd)
+uint64_t vm_low_memory_signal_shift = 5; // 32, had been good with 64 and 128 (smd)
 #define LOW_MEMORY_MULT (1 << vm_low_memory_signal_shift)
 extern unsigned int vm_page_free_count; // will tend to vm_page_free_min smd
 extern unsigned int vm_page_speculative_count; // is currently 20k (and tends to 5%? - ca 800M) smd
@@ -4109,7 +4109,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 
 	  if(ks->spl_low_memory_signal_shift.value.ui64 != vm_low_memory_signal_shift) {
 	    uint64_t lowshift = ks->spl_low_memory_signal_shift.value.ui64;
-	    if(4 < lowshift && lowshift < 16) {
+	    if(1 < lowshift && lowshift < 16) {
 	      printf("SPL: low_memory_signal_shift %llu -> %llu\n",
 		     vm_low_memory_signal_shift, lowshift);
 	      vm_low_memory_signal_shift = lowshift;
