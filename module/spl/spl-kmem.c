@@ -4132,6 +4132,7 @@ static void memory_monitor_thread()
 				  kpreempt(KPREEMPT_SYNC);
 				  kmem_reap_idspace();
 				  kpreempt(KPREEMPT_SYNC);
+				  last_reap = zfs_lbolt();
 				}
 			}
 
@@ -4159,6 +4160,7 @@ static void memory_monitor_thread()
 			  kpreempt(KPREEMPT_SYNC);
 			  kmem_reap_idspace();
 			  kpreempt(KPREEMPT_SYNC);
+			  last_reap = zfs_lbolt();
 			  cv_broadcast(&memory_monitor_thread_cv);
 			}
 		}
