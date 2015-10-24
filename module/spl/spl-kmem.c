@@ -3127,25 +3127,25 @@ kmem_avail(void)
 //                             1 << (30 - PAGESHIFT))));
 #endif
 
-  if (pressure_bytes_signal & PRESSURE_KMEM_AVAIL) { // set from 90% and reap
-    dprintf("SPL: got pressure bytes signal in kmem_avail()\n");
+  if (pressure_bytes_signal & PRESSURE_KMEM_AVAIL) { // hello from MMT
+    dprintf("SPL: %s: got pressure bytes signal\n", __func__);
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal &= ~(PRESSURE_KMEM_AVAIL);
     mutex_exit(&pressure_bytes_signal_lock);
     kpreempt(KPREEMPT_SYNC);
-    return (-1024*1024*LOW_MEMORY_MULT); // get 128MiB from arc
+    return (-1024*1024*LOW_MEMORY_MULT); // get bunch of memory back from arc (32MiB)
   }
 
-  if (vm_page_free_wanted > 0) { // xnu wants memory, arc can't have it
+  if (vm_page_free_wanted > 0) { // xnu wants memory, arc must give some up
     printf("SPL: %s page_free_wanted %u, returning %lld\n", __func__,
 	   vm_page_free_wanted, ((int64_t)vm_page_free_wanted) * PAGE_SIZE * -((int64_t)LOW_MEMORY_MULT));
     cv_signal(&memory_monitor_thread_cv);
     kpreempt(KPREEMPT_SYNC);
-    return (((int64_t)vm_page_free_wanted) * PAGE_SIZE * -((int64_t)(LOW_MEMORY_MULT)));  // yes, negative, will shrink bigtime
+    return (((int64_t)vm_page_free_wanted) * PAGE_SIZE * -((int64_t)(LOW_MEMORY_MULT)));  // yes, negative, will shrink by 32 * pages_free_wanted (i.e., 128KiB for each page wanted)
   }
 
-  if (vm_page_free_count < VM_PAGE_FREE_MIN) {
-    cv_signal(&memory_monitor_thread_cv);
+  if (vm_page_free_count < VM_PAGE_FREE_MIN) { // memory is tight
+    cv_signal(&memory_monitor_thread_cv); 
     kpreempt(KPREEMPT_SYNC);
     if(!kmem_avail_use_spec) {
       return (((int64_t)vm_page_free_count) - ((int64_t)VM_PAGE_FREE_MIN));
@@ -5723,14 +5723,7 @@ kmem_num_pages_wanted(void)
 {
   int32_t still_pressure = 0;
 
-  if(pressure_bytes_signal & PRESSURE_KMEM_NUM_PAGES_WANTED) {
-    dprintf("SPL: kmem_num_pages_wanted got signal, returning 128M (want 32k pages)\n");
-    mutex_enter(&pressure_bytes_signal_lock);
-    pressure_bytes_signal &= ~(PRESSURE_KMEM_NUM_PAGES_WANTED);
-    mutex_exit(&pressure_bytes_signal_lock);
-    return 32768;
-  }
-  
+  //case 1: xnu wants memory, tell arc we want a multiple of that back.
   	if (vm_page_free_wanted > 0) {
 	  printf("SPL: %s sees paging vm_page_free_wanted = %u, vm_page_free_count = %u\n",
 		 __func__, vm_page_free_wanted, vm_page_free_count);
@@ -5742,10 +5735,25 @@ kmem_num_pages_wanted(void)
 	  return vm_page_free_wanted * LOW_MEMORY_MULT;  // paging, be aggressive
 	}
 
+	// case 2: MMT wants us to give back memory, tell arc to give back 3500.
+	if(pressure_bytes_signal & PRESSURE_KMEM_NUM_PAGES_WANTED) {
+	  printf("SPL: %s got pressure_bytes_signal, returning vm_page_free_min (%u)\n",
+		 __func__,
+		 vm_page_free_min);
+	  mutex_enter(&pressure_bytes_signal_lock);
+	  pressure_bytes_signal &= ~(PRESSURE_KMEM_NUM_PAGES_WANTED);
+	  mutex_exit(&pressure_bytes_signal_lock);
+	  kpreempt(KPREEMPT_SYNC);
+	  return vm_page_free_min;
+	}
+
+	// case 3: memory is tight but not super-tight
+	//         tell arc to give back twice the difference 
+	//         and let MMT and kmem_avail() try to clean up
 	size_t reducedmin = (vm_page_free_min - SMALL_PRESSURE_INCURSION_PAGES);
 	if (vm_page_free_count <= reducedmin) {
-	  size_t retpages = (reducedmin - vm_page_free_count) * LOW_MEMORY_MULT; 
-	  printf("SPL: %s memory very low %u < %lu, reaping, retpages = %lu\n", // this is common printf
+	  size_t retpages = (reducedmin - vm_page_free_count) * 2;
+	  printf("SPL: %s memory very low %u < %lu, signalling, retpages = %lu\n", // this is common printf
 		 __func__, vm_page_free_count, reducedmin, retpages);
 	  mutex_enter(&pressure_bytes_signal_lock);
 	  pressure_bytes_signal |= PRESSURE_KMEM_AVAIL;
@@ -5758,70 +5766,53 @@ kmem_num_pages_wanted(void)
 	    return(0);
 	}
 
+	// case 4: there is pressure from MMT
 	if (pressure_bytes_target && (pressure_bytes_target < spl_memory_used())) {
+	  // old_i is previous value, i is new value, d is delta
 	  static size_t old_i = 0;
+	  static size_t d;
 
 	  size_t i = (spl_memory_used() - pressure_bytes_target) / PAGE_SIZE;
 
-	  if(i > old_i + 1) {
+	  d = i - old_i; // d is positive where pressure is growing
+
+	  if(d > 1) {
+	    // case 4a: non-trivial amount of new pressure.  feed the delta to arc.
 	    printf("SPL: %s seeing more pressure (%ld, %ld new pages wanted), reset old_i\n",
-		   __func__, i, i - old_i);
-	    size_t f = i-old_i;
+		   __func__, i, d);
 	    old_i = i;
+	    cv_signal(&memory_monitor_thread_cv); // wake MMT, it may reap
 	    kpreempt(KPREEMPT_SYNC);
-	    return(f);
-	  } else if (i > old_i) {
-	    // trivial amount of pressure, don't ask for a page
+	    return(d);
+	  } else if (d > 0) {
+	    // case4b: trivial amount of new pressure, don't bother arc.
 	    dprintf("SPL: %s trivial pressure (%ld, %ld new pages wanted), reset old_i\n",
 		   __func__, i, i - old_i);
 	    old_i = i;
-	    // fall through, may hit return with still_pressure == 0
-	  } else if (i == old_i) { // this branch is very frequently taken
+	    still_pressure = 0;
+	  } else if (d == 0) { 
+	    // case 4c: pressure is unchanged
+	    // this branch is very frequently taken
 	    // should stat count this
-	    still_pressure=LOW_MEMORY_MULT;
-	    cv_signal(&memory_monitor_thread_cv);
+	    dprintf("SPL: %s pressure is unchanged, wake MMT\n",
+		    __func__);
+	    cv_signal(&memory_monitor_thread_cv); // wake MMT, it may update pressure and/or reap
 	    kpreempt(KPREEMPT_SYNC);
-	    // fall through
-	  } else if(i <= old_i - 1) {
-	    // trivial amount of negative pressure
+	    still_pressure=3; // was LOW_MEMORY_MULT, but we do not really
+	                      //have to tell arc anything, as we have fed the deltas in earlier
+	  } else if(d >= -1) {
+	    // case 4d: trivial amount of negative pressure
 	    dprintf("SPL: %s trivial unpressure (%ld, %ld new pages wanted), reset old_i\n",
-		   __func__, i, i - old_i);
+		   __func__, i, d);
 	    // because of parallelsism, i - old_i may be less than -1
-	    // (i have seen -5)
+	    // (i have seen -5) -- is this true still? 24 oct, post MMT rework
 	    old_i = i;
-	    // fall through, may hit return with still_pressure == 0
-	  } else { // i < old_i
-	    printf("SPL: %s i (pressure) has fallen to %ld, resetting old_i from %ld\n",
-		   __func__, i, old_i);
+	    still_pressure = 2; // but really we could make this zero
+	  } else { // d < -2
+	    printf("SPL: %s i (pressure) has fallen to %ld (delta %ld), resetting old_i from %ld\n",
+		   __func__, i, d, old_i);
 	    old_i = i;
-	    still_pressure=LOW_MEMORY_MULT;
-	    cv_signal(&memory_monitor_thread_cv);
-	    kpreempt(KPREEMPT_SYNC);
-	    // return(0); -- fall through
-	  }
-	}
-
-	if (vm_page_free_count < VM_PAGE_FREE_MIN) { // few pages free
-	  if(!kmem_avail_use_spec) {
-	    printf("SPL: %s vm_page_free_count (%u) < VM_PAGE_FREE_MIN (%u)\n",
-		   __func__, vm_page_free_count, VM_PAGE_FREE_MIN);
-	    return (VM_PAGE_FREE_MIN - vm_page_free_count);
-	  } else if((vm_page_free_count + vm_page_speculative_count) < VM_PAGE_FREE_MIN) {
-	    if(vm_page_free_count < vm_page_speculative_count) {
-	      if(vm_page_free_count < (vm_page_free_min * vm_page_free_min_multiplier)) {
-		dprintf("SPL: %s page_free_count %u < %u, returning  %u\n",
-		       __func__, vm_page_free_count, vm_page_free_min * vm_page_free_min_multiplier,
-		       vm_page_free_min * vm_page_free_min_multiplier);
-		mutex_enter(&pressure_bytes_signal_lock);
-		pressure_bytes_signal |= PRESSURE_KMEM_NUM_PAGES_WANTED;
-		mutex_exit(&pressure_bytes_signal_lock);
-		kpreempt(KPREEMPT_SYNC);
-		return(vm_page_free_min * vm_page_free_min_multiplier);
-	      } else {
-		kpreempt(KPREEMPT_SYNC);
-		return(LOW_MEMORY_MULT);
-	      }
-	    }
+	    still_pressure=0;
 	  }
 	}
 
