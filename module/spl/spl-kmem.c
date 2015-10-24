@@ -3127,37 +3127,48 @@ kmem_avail(void)
 //                             1 << (30 - PAGESHIFT))));
 #endif
 
-  if (pressure_bytes_signal & PRESSURE_KMEM_AVAIL) { // hello from MMT
+  if (pressure_bytes_signal & PRESSURE_KMEM_AVAIL) { // hello from MMT or kmem_num_pages_wanted
     dprintf("SPL: %s: got pressure bytes signal\n", __func__);
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal &= ~(PRESSURE_KMEM_AVAIL);
     mutex_exit(&pressure_bytes_signal_lock);
-    kpreempt(KPREEMPT_SYNC);
     return (-1024*1024*LOW_MEMORY_MULT); // get bunch of memory back from arc (32MiB)
   }
 
-  if (vm_page_free_wanted > 0) { // xnu wants memory, arc must give some up
+  if (vm_page_free_wanted > 0) { // xnu wants memory, arc must give some up, and we tell kmem_num_pages_wanted and MMT
     printf("SPL: %s page_free_wanted %u, returning %lld\n", __func__,
 	   vm_page_free_wanted, ((int64_t)vm_page_free_wanted) * PAGE_SIZE * -((int64_t)LOW_MEMORY_MULT));
+    mutex_enter(&pressure_bytes_signal_lock);
+    pressure_bytes_signal |= PRESSURE_KMEM_NUM_PAGES_WANTED;
+    mutex_exit(&pressure_bytes_signal_lock);
     cv_signal(&memory_monitor_thread_cv);
-    kpreempt(KPREEMPT_SYNC);
     return (((int64_t)vm_page_free_wanted) * PAGE_SIZE * -((int64_t)(LOW_MEMORY_MULT)));  // yes, negative, will shrink by 32 * pages_free_wanted (i.e., 128KiB for each page wanted)
   }
 
-  if (vm_page_free_count < VM_PAGE_FREE_MIN) { // memory is tight
-    cv_signal(&memory_monitor_thread_cv); 
-    kpreempt(KPREEMPT_SYNC);
-    if(!kmem_avail_use_spec) {
-      return (((int64_t)vm_page_free_count) - ((int64_t)VM_PAGE_FREE_MIN));
-    } else if((vm_page_free_count + vm_page_speculative_count) < VM_PAGE_FREE_MIN) {
-      return (((int64_t)vm_page_free_count)  - ((int64_t)VM_PAGE_FREE_MIN));
+  if(kmem_avail_use_spec) {
+    size_t fsp = vm_page_free_count + vm_page_speculative_count;
+    if(fsp < VM_PAGE_FREE_MIN) {
+      // we will automatically be negative
+      // free_count tends towards 3500, 13MiB
+      // speculative_count can be up to 50000ish (up to 5% of memory in theory, ca 800MiB)
+      // VM_PAGE_FREE_MIN is 256MiB by default
+      // if we return the whole delta, arc collapses
+      // so we can use the vm_page_free_min_multiplier (4) which is part of VM_PAGE_FREE_MIN to reduce the delta
+      return ((int64_t)fsp - (int64_t)(VM_PAGE_FREE_MIN / vm_page_free_min_multiplier)) * (int64_t)PAGESIZE;
+    } else {
+      // we are 0 or positive
+      return (int64_t)fsp * (int64_t)PAGESIZE;
+    }
+  } else {
+    size_t fp = vm_page_free_count;
+    if(fp < VM_PAGE_FREE_MIN) {
+      // we are automatically negative, see above
+      return ((int64_t)fp - (int64_t)(VM_PAGE_FREE_MIN / vm_page_free_min_multiplier)) * (int64_t)PAGESIZE;
+    } else {
+      // we are 0 or positive
+      return (int64_t)fp * (int64_t)PAGESIZE;
     }
   }
-
-  if(kmem_avail_use_spec)
-    return (((int64_t)vm_page_free_count + (int64_t)vm_page_speculative_count) * PAGE_SIZE);
-  else
-    return (((int64_t)vm_page_free_count) * PAGE_SIZE);
 }
 
 // TRUE if we have more than a critical minimum of memory
