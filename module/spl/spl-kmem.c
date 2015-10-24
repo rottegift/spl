@@ -62,8 +62,8 @@
 // proxy to the machine experiencing memory pressure.
 extern unsigned int vm_page_free_wanted; // 0 by default smd
 extern unsigned int vm_page_free_min; // 3500 by default smd kern.vm_page_free_min
-uint32_t vm_page_free_min_multiplier = 4;
-uint32_t vm_page_free_min_min = 256*1024*1024/4096;
+uint32_t vm_page_free_min_multiplier = 8;
+uint32_t vm_page_free_min_min = 32*1024*1024/4096;
 #define VM_PAGE_FREE_MIN (MAX(vm_page_free_min * vm_page_free_min_multiplier, vm_page_free_min_min))
 int64_t kmem_avail_use_spec = 1;
 uint64_t vm_low_memory_signal_shift = 5; // 32, had been good with 64 and 128 (smd)
@@ -3151,9 +3151,10 @@ kmem_avail(void)
       // we will automatically be negative
       // free_count tends towards 3500, 13MiB
       // speculative_count can be up to 50000ish (up to 5% of memory in theory, ca 800MiB)
-      // VM_PAGE_FREE_MIN is 256MiB by default
+      // VM_PAGE_FREE_MIN is 32MiB by default
       // if we return the whole delta, arc collapses
-      // so we can use the vm_page_free_min_multiplier (4) which is part of VM_PAGE_FREE_MIN to reduce the delta
+      // so we can use the vm_page_free_min_multiplier (8), which is part of VM_PAGE_FREE_MIN,
+      //     to reduce the delta
       return ((int64_t)fsp - (int64_t)(VM_PAGE_FREE_MIN / vm_page_free_min_multiplier)) * (int64_t)PAGESIZE;
     } else {
       // we are 0 or positive
