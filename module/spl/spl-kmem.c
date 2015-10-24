@@ -5868,124 +5868,6 @@ kmem_used(void)
   return (kmem_size() - my_i64_abs(kmem_avail()));
 }
 
-static inline uint64_t
-my_log2(uint64_t n)
-{
-  uint64_t i = n;
-  uint64_t j = 0;
-
-  while(i >>= 1) ++j;
-  return j;
-}
-
-static inline uint64_t
-spl_random64(uint64_t range)
-{
-  uint64_t r;
-
-  (void) random_get_bytes((void *)&r, sizeof (uint64_t));
-
-  return (r % range);
-}
-
-static inline unsigned int
-spl_random32(unsigned int range)
-{
-  unsigned int r;
-
-  (void) random_get_bytes((void *)&r, sizeof (unsigned int));
-
-  return (r % range);
-}
-
-static inline uint64_t
-am_i_reap_or_not(uint64_t free, uint64_t minmem, uint64_t maxmem)
-{
-  uint64_t range = 0;
-  uint64_t i = 0;
-
-  if (free < minmem) {
-    return FALSE;
-  } else if (free >= maxmem) {
-    return TRUE;
-  } else {
-    // reap with probability integer_log2 (free-minmem)/256 expt -1
-    i = (free - minmem) >> 8;
-    if(i == 0) return TRUE;
-    range = my_log2(maxmem - minmem);
-    return (spl_random64(range) > my_log2(i));
-  }
-}
-
-#ifdef COMPLICATED_SPL_VM_POOL_LOW
-// a lot of this logic is now in MMT memory_monitor_thread
-int
-spl_vm_pool_low(void)
-{
-
-  // 3500 is normal vm_page_free_min, which is 13MiB
-  // 8% of memory on 16GiB box ~ 1.28GiB - physmem/12 - this was really aggressively empty
-  // 2% of memory on 16GiB box - 320MiB - physmem/50 - on new arc.c from illumos, this didn't get back memory
-  uint64_t  eight_percent = (physmem / 12); // physmem  is in pages
-
-  if (vm_page_free_wanted > 0 || vm_page_free_count < VM_PAGE_FREE_MIN) {
-    return 1;  // we're paging, so we're low -- this will throttle arc
-  }
-
-  if (vmem_size(heap_arena, VMEM_ALLOC) > 0 && \
-      am_i_reap_or_not(vmem_size(heap_arena, VMEM_FREE),
-		       vmem_size(heap_arena, (VMEM_ALLOC | VMEM_FREE)),
-		       vmem_size(heap_arena, (VMEM_ALLOC | VMEM_FREE) / 92 * 100))) {
-    printf("SPL: am_i_reap_or_not true for heap_arena free %lu, alloc %lu, reaping\n",
-	   vmem_size(heap_arena, VMEM_FREE),
-	   vmem_size(heap_arena, (VMEM_ALLOC|VMEM_FREE)));
-    kmem_reap();
-    kmem_reap_idspace();
-    return 1;
-  }
-    
-
-  if (vm_page_free_count < eight_percent) { // less than say 1.3GiB but not paging
-    //printf("SPL: pool low: vm_page_free_count=%u eight_percent=%u\n (reaping)", vm_page_free_count, eight_percent);
-    if (am_i_reap_or_not(vm_page_free_count, VM_PAGE_FREE_MIN, eight_percent)) {
-      kmem_reap();
-      kmem_reap_idspace();
-      return (spl_random64(VM_PAGE_FREE_MIN * 4) > vm_page_free_count); // 14000 (54MiB) vs free_count
-    }
-  }
-
-	if (pressure_bytes_target && (pressure_bytes_target < spl_memory_used())) {
-		return 1;
-	}
-
-	if ( vm_page_free_count < VM_PAGE_FREE_MIN ) { // 20 sept: this gets called OFTEN
-	  // 21 oct, not called so much
-		uint64_t newtarget;
-		newtarget = kmem_used() -
-			((VM_PAGE_FREE_MIN - vm_page_free_count) * PAGE_SIZE*MULT);
-		if (!pressure_bytes_target || (newtarget < pressure_bytes_target)) {
-		        mutex_enter(&pressure_bytes_target_lock);
-			pressure_bytes_target = newtarget;
-			mutex_exit(&pressure_bytes_target_lock);
-			printf("SPL pool low: new target %llu (smd: reaping) vm_page_free_wanted = %u vm_page_free_count = %u VM_PAGE_FREE_MIN = %u\n", newtarget, vm_page_free_wanted, vm_page_free_count, VM_PAGE_FREE_MIN);
-			cv_signal(&memory_monitor_thread_cv);
-			return 1;
-		}
-		return 1;
-	}
-
-	uint64_t nintypct = total_memory * 90ULL / 100ULL;
-	if (segkmem_total_mem_allocated >= nintypct) {
-		return 1;
-	}
-
-	mutex_enter(&pressure_bytes_target_lock);
-	pressure_bytes_target = 0;
-	mutex_exit(&pressure_bytes_target_lock);
-
-	return 0;
-}
-#else // COMPLICATED_SPL_VM_POOL_LOW
 // this is used in arc_reclaim_needed.  if 1, reclaim is needed.
 // returning 1 has the effect of throttling ARC, so be careful.
 int
@@ -5993,19 +5875,18 @@ spl_vm_pool_low(void)
 {
 
   if(vm_page_free_wanted > 0 || vm_page_free_count < VM_PAGE_FREE_MIN) {
-    cv_signal(&memory_monitor_thread_cv);
+    cv_signal(&memory_monitor_thread_cv); // wake MMT to shrink
     return 1;
   }
 
   if(pressure_bytes_target > 0 && pressure_bytes_target < spl_memory_used()) {
-    cv_signal(&memory_monitor_thread_cv);
+    cv_signal(&memory_monitor_thread_cv); // wake MMT to update
     return 1;
   }
 
   return 0;
   
 }
-#endif // COMPLICATED_SPL_VM_POOL_LOW
 
 //===============================================================
 // String handling
