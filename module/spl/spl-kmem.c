@@ -5758,10 +5758,10 @@ kmem_num_pages_wanted(void)
 	    return(0);
 	}
 
-	if (pressure_bytes_target && (pressure_bytes_target < kmem_used())) {
+	if (pressure_bytes_target && (pressure_bytes_target < spl_memory_used())) {
 	  static size_t old_i = 0;
 
-	  size_t i = (kmem_used() - pressure_bytes_target) / PAGE_SIZE;
+	  size_t i = (spl_memory_used() - pressure_bytes_target) / PAGE_SIZE;
 
 	  if(i > old_i + 1) {
 	    printf("SPL: %s seeing more pressure (%ld, %ld new pages wanted), reset old_i\n",
@@ -5952,7 +5952,7 @@ spl_vm_pool_low(void)
     }
   }
 
-	if (pressure_bytes_target && (pressure_bytes_target < kmem_used())) {
+	if (pressure_bytes_target && (pressure_bytes_target < spl_memory_used())) {
 		return 1;
 	}
 
