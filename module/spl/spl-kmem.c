@@ -4006,6 +4006,22 @@ kmem_cache_fini(int pass, int use_large_pages)
 	}
 }
 
+// return the inverse of how much memory is actually free
+// this replaces kmem_used() in memory_monitor_thread() because
+// that in turn relies on kmem_avail() which is used to signal arc and
+// therefore may be artificially low
+// do we care about speculative memory?  that can be 5% (200MB on 16GB system)
+// initially, this is straightforward system used memory
+// so under nonnegligible load this would typically be in the 16Gbyte range
+// this will probably have to be total_memory instead (which will be in the 12.5Gbyte range)
+// (which will never trigger the 90% test)
+static inline uint64_t spl_memory_used()
+{
+  uint64_t f = (uint64_t)vm_page_free_count * (uint64_t)PAGESIZE;
+
+  return(/*real_*/total_memory - f);
+}
+
 static void memory_monitor_thread()
 {
   callb_cpr_t cpr;
@@ -4034,24 +4050,22 @@ static void memory_monitor_thread()
 
 		if ((!shutting_down) && kr == KERN_SUCCESS) {
 
-            // My original intent was to execute the reap synchronously
-            // to limit the rate at which this thread spins. Turns out
-            // that kmem_reap() has a semaphoring mechanism that prevents
-            // concurrent reap activity.
-            //
-            // So we will let that mechanism work as I suspect its part of
-            // kmems locking strategy.
+		  // the call to kmem_used() calls kmem_avail() so there is annoying
+		  // logical circularity.  fix.
+		  // additionally, vm_page_speculative_count can be high (thoretically up to 5% of RAM)
+		  // (practically somewhere in 10s of thousands of pages)
 			uint64_t newtarget;
-			newtarget = kmem_used() -
+			newtarget = spl_memory_used() -
 			  (os_num_pages_wanted * PAGESIZE * MULT);
 
 			if (!pressure_bytes_target || (newtarget < pressure_bytes_target)) {
 				pressure_bytes_target = newtarget;
-				printf("SPL: MMT pressure: new target %llu (diff: %u), vm_page_free_count == %u, vm_page_speculative_count == %u\n",
+				printf("SPL: MMT pressure: new target %llu (diff: %u), vm_page_free_count == %u, vm_page_speculative_count == %u, pages_reclaimed = %u\n",
 				       newtarget,
 				       os_num_pages_wanted,
 				       vm_page_free_count,
-				       vm_page_speculative_count);
+				       vm_page_speculative_count,
+				       pages_reclaimed);
 			}
 
 			// we may have been awakened early by a cv_signal(&memory_monitor_thread_cv);
@@ -4063,9 +4077,10 @@ static void memory_monitor_thread()
 			  mutex_enter(&pressure_bytes_signal_lock);
 			  pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
 			  mutex_exit(&pressure_bytes_signal_lock);
-			  printf("SPL: MMT vm_page_free_wanted == %u, signalling kmem_available and reaping, last reap delta %llu\n",
+			  printf("SPL: MMT vm_page_free_wanted == %u, signalling kmem_available and reaping, last reap delta %llu, pages_reclaimed = %u\n",
 				 vm_page_free_wanted,
-				 zfs_lbolt() - last_reap);
+				 zfs_lbolt() - last_reap,
+				 pages_reclaimed);
 			  kmem_reap();
 			  kpreempt(KPREEMPT_SYNC);
 			  kmem_reap_idspace();
@@ -4075,10 +4090,11 @@ static void memory_monitor_thread()
 			// !spl_minimal_physmem_p_logic()  happens a lot with delta 0 and 1
 			// so wait until delta is at least 2
 			if(!spl_minimal_physmem_p_logic() && (zfs_lbolt() - last_reap > 1)) {
-			  printf("SPL: MMT !spl_minimal_physmem, vm_page_free_wanted %u, vm_page_free_count %u, last reap delta %llu\n",
+			  printf("SPL: MMT !spl_minimal_physmem, vm_page_free_wanted %u, vm_page_free_count %u, last reap delta %llu, pages_reclaimed %u\n",
 				 vm_page_free_wanted,
 				 vm_page_free_count,
-				 zfs_lbolt() - last_reap);
+				 zfs_lbolt() - last_reap,
+				 pages_reclaimed);
 			  mutex_enter(&pressure_bytes_signal_lock);
 			  pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
 			  mutex_exit(&pressure_bytes_signal_lock);
@@ -4114,8 +4130,10 @@ static void memory_monitor_thread()
 				if (segkmem_total_mem_allocated >= nintypct) {
 					pressure_bytes_target = MAX(pressure_bytes_target,
 								segkmem_total_mem_allocated - nintypct);
-					printf("SPL: MMT pressure: 90%% hit, triggering reap and signalling,  vm_page_free_count = %u",
-					       vm_page_free_count);
+					printf("SPL: MMT pressure: 90%% hit, triggering reap and signalling,  vm_page_free_count = %u, vm_page_speculative_count = %u, pages_reclaimed = %u",
+					       vm_page_free_count,
+					       vm_page_speculative_count,
+					       pages_reclaimed);
 					mutex_enter(&pressure_bytes_signal_lock);
 					pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
 					mutex_exit(&pressure_bytes_signal_lock);
@@ -4125,9 +4143,11 @@ static void memory_monitor_thread()
 					kpreempt(KPREEMPT_SYNC);
 					last_reap = zfs_lbolt();
 				} else if(pressure_bytes_target > 0) {
-				  printf("SPL: MMT pressure based periodic reaping, pressure_bytes_target == %llu, vm_page_free_count == %u\n",
+				  printf("SPL: MMT pressure based periodic reaping, pressure_bytes_target == %llu, vm_page_free_count == %u, vm_page_speculative_count == %u, pages_reclaimed = %u\n",
 					 pressure_bytes_target,
-					 vm_page_free_count);
+					 vm_page_free_count,
+					 vm_page_speculative_count,
+					 pages_reclaimed);
 				  kmem_reap();
 				  kpreempt(KPREEMPT_SYNC);
 				  kmem_reap_idspace();
