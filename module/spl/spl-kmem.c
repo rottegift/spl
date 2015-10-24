@@ -5991,14 +5991,17 @@ spl_vm_pool_low(void)
 {
 
   if(vm_page_free_wanted > 0 || vm_page_free_count < VM_PAGE_FREE_MIN) {
+    cv_signal(&memory_monitor_thread_cv);
     return 1;
   }
 
   if(pressure_bytes_target > 0 && pressure_bytes_target < spl_memory_used()) {
+    cv_signal(&memory_monitor_thread_cv);
     return 1;
   }
 
   return 0;
+  
 }
 #endif // COMPLICATED_SPL_VM_POOL_LOW
 
