@@ -5780,16 +5780,16 @@ kmem_num_pages_wanted(void)
 	// case 4: there is pressure from MMT
 	if (pressure_bytes_target && (pressure_bytes_target < spl_memory_used())) {
 	  // old_i is previous value, i is new value, d is delta
-	  static size_t old_i = 0;
-	  static size_t d;
+	  static int64_t old_i = 0;
+	  int64_t d = 0;
 
-	  size_t i = (spl_memory_used() - pressure_bytes_target) / PAGE_SIZE;
+	  int64_t i = (spl_memory_used() - pressure_bytes_target) / PAGE_SIZE;
 
 	  d = i - old_i; // d is positive where pressure is growing
 
 	  if(d > 1) {
 	    // case 4a: non-trivial amount of new pressure.  feed the delta to arc.
-	    printf("SPL: %s seeing more pressure (%ld, %ld new pages wanted), reset old_i\n",
+	    printf("SPL: %s seeing more pressure (%lld, %lld new pages wanted), reset old_i\n",
 		   __func__, i, d);
 	    old_i = i;
 	    cv_signal(&memory_monitor_thread_cv); // wake MMT, it may reap
@@ -5797,8 +5797,8 @@ kmem_num_pages_wanted(void)
 	    return(d);
 	  } else if (d > 0) {
 	    // case4b: trivial amount of new pressure, don't bother arc.
-	    dprintf("SPL: %s trivial pressure (%ld, %ld new pages wanted), reset old_i\n",
-		   __func__, i, i - old_i);
+	    dprintf("SPL: %s trivial pressure (%lld, %lld new pages wanted), reset old_i\n",
+		   __func__, i, d);
 	    old_i = i;
 	    still_pressure = 0;
 	  } else if (d == 0) { 
@@ -5813,14 +5813,14 @@ kmem_num_pages_wanted(void)
 	                      //have to tell arc anything, as we have fed the deltas in earlier
 	  } else if(d >= -1) {
 	    // case 4d: trivial amount of negative pressure
-	    dprintf("SPL: %s trivial unpressure (%ld, %ld new pages wanted), reset old_i\n",
+	    dprintf("SPL: %s trivial unpressure (%lld, %lld new pages wanted), reset old_i\n",
 		   __func__, i, d);
 	    // because of parallelsism, i - old_i may be less than -1
 	    // (i have seen -5) -- is this true still? 24 oct, post MMT rework
 	    old_i = i;
 	    still_pressure = 2; // but really we could make this zero
 	  } else { // d < -2
-	    printf("SPL: %s i (pressure) has fallen to %ld (delta %ld), resetting old_i from %ld\n",
+	    printf("SPL: %s i (pressure) has fallen to %lld (delta %lld), resetting old_i from %lld\n",
 		   __func__, i, d, old_i);
 	    old_i = i;
 	    still_pressure=0;
