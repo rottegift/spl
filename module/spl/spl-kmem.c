@@ -123,6 +123,7 @@ extern uint64_t		zfs_active_rwlock;
 // Set the memory target wanted when we detect pressure, this
 // will get cleared once we are under it.
 uint64_t            pressure_bytes_target = 0;
+kmutex_t	    pressure_bytes_target_lock;
 // signalling kmem_avail() and kmem_num_pages_wanted()
 #define PRESSURE_KMEM_AVAIL 1<<0
 #define PRESSURE_KMEM_NUM_PAGES_WANTED 1<<1
@@ -4015,7 +4016,8 @@ kmem_cache_fini(int pass, int use_large_pages)
 // so under nonnegligible load this would typically be in the 16Gbyte range
 // this will probably have to be total_memory instead (which will be in the 12.5Gbyte range)
 // (which will never trigger the 90% test)
-static inline uint64_t spl_memory_used()
+static inline uint64_t
+spl_memory_used()
 {
   uint64_t f = (uint64_t)vm_page_free_count * (uint64_t)PAGESIZE;
 
@@ -4059,7 +4061,9 @@ static void memory_monitor_thread()
 			  (os_num_pages_wanted * PAGESIZE * MULT);
 
 			if (!pressure_bytes_target || (newtarget < pressure_bytes_target)) {
+			        mutex_enter(&pressure_bytes_target_lock);
 				pressure_bytes_target = newtarget;
+				mutex_exit(&pressure_bytes_target_lock);
 				printf("SPL: MMT pressure: new target %llu (diff: %u), vm_page_free_count == %u, vm_page_speculative_count == %u, pages_reclaimed = %u\n",
 				       newtarget,
 				       os_num_pages_wanted,
@@ -4116,7 +4120,9 @@ static void memory_monitor_thread()
 			    mutex_enter(&pressure_bytes_signal_lock);
 			    pressure_bytes_signal = 0;
 			    mutex_exit(&pressure_bytes_signal_lock);
+			    mutex_enter(&pressure_bytes_target_lock);
 			    pressure_bytes_target = 0;
+			    mutex_exit(&pressure_bytes_target_lock);
 			    kpreempt(KPREEMPT_SYNC);
 			    cv_broadcast(&memory_monitor_thread_cv); // wake waiters up
 			  }
@@ -4128,8 +4134,10 @@ static void memory_monitor_thread()
 				uint64_t nintypct = total_memory * 90ULL / 100ULL;
 
 				if (segkmem_total_mem_allocated >= nintypct) {
+				        mutex_enter(&pressure_bytes_target_lock);
 					pressure_bytes_target = MAX(pressure_bytes_target,
 								segkmem_total_mem_allocated - nintypct);
+					mutex_exit(&pressure_bytes_target_lock);
 					printf("SPL: MMT pressure: 90%% hit, triggering reap and signalling,  vm_page_free_count = %u, vm_page_speculative_count = %u, pages_reclaimed = %u",
 					       vm_page_free_count,
 					       vm_page_speculative_count,
@@ -4239,8 +4247,10 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			 ks->spl_simulate_pressure.value.ui64*1024*1024,
 			 pressure_bytes_target,
 			 kmem_used());
+		        mutex_enter(&pressure_bytes_target_lock);
 			pressure_bytes_target = kmem_used() -
 				(ks->spl_simulate_pressure.value.ui64 * 1024 * 1024);
+			mutex_exit(&pressure_bytes_target_lock);
 			if (ks->spl_simulate_pressure.value.ui64 == 666) {
 			  printf("SPL: simulate pressure 666, dumping stack\n");
 			  spl_backtrace("SPL: simulate_pressure 666");
@@ -4248,6 +4258,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			  kmem_reap();
 			  kpreempt(KPREEMPT_SYNC);
 			  kmem_reap_idspace();
+			  kpreempt(KPREEMPT_SYNC);
 			}
 		}
 	} else {
@@ -4282,6 +4293,7 @@ spl_kmem_init(uint64_t total_memory)
 
 	// Initialise the pressure signal lock
 	mutex_init(&pressure_bytes_signal_lock, "pressure_bytes_signal_lock", MUTEX_DEFAULT, NULL);
+	mutex_init(&pressure_bytes_target_lock, "pressure_bytes_target_lock", MUTEX_DEFAULT, NULL);
 	
 	// Initialise the kstat lock
 	mutex_init(&kmem_cache_lock, "kmem_cache_lock", MUTEX_DEFAULT, NULL); // XNU
@@ -4639,7 +4651,8 @@ spl_kmem_thread_fini(void)
 	mutex_exit(&memory_monitor_lock);
 	cv_destroy(&memory_monitor_thread_cv);
 	mutex_destroy(&memory_monitor_lock);
-	
+	mutex_destroy(&pressure_bytes_signal_lock);
+	mutex_destroy(&pressure_bytes_target_lock);
 
 	printf("SPL: bsd_untimeout\n");
 	bsd_untimeout(kmem_update,  0);
@@ -5719,8 +5732,6 @@ kmem_num_pages_wanted(void)
   }
   
   	if (vm_page_free_wanted > 0) {
-	  //if (pressure_bytes_target > (vm_page_free_wanted * PAGE_SIZE * MULT))
-	  //  pressure_bytes_target -= (vm_page_free_wanted * PAGE_SIZE * MULT);
 	  printf("SPL: %s sees paging vm_page_free_wanted = %u, vm_page_free_count = %u\n",
 		 __func__, vm_page_free_wanted, vm_page_free_count);
 	  mutex_enter(&pressure_bytes_signal_lock);
@@ -5903,7 +5914,9 @@ am_i_reap_or_not(uint64_t free, uint64_t minmem, uint64_t maxmem)
     return (spl_random64(range) > my_log2(i));
   }
 }
-  
+
+#ifdef COMPLICATED_SPL_VM_POOL_LOW
+// a lot of this logic is now in MMT memory_monitor_thread
 int
 spl_vm_pool_low(void)
 {
@@ -5944,14 +5957,16 @@ spl_vm_pool_low(void)
 	}
 
 	if ( vm_page_free_count < VM_PAGE_FREE_MIN ) { // 20 sept: this gets called OFTEN
+	  // 21 oct, not called so much
 		uint64_t newtarget;
 		newtarget = kmem_used() -
 			((VM_PAGE_FREE_MIN - vm_page_free_count) * PAGE_SIZE*MULT);
 		if (!pressure_bytes_target || (newtarget < pressure_bytes_target)) {
+		        mutex_enter(&pressure_bytes_target_lock);
 			pressure_bytes_target = newtarget;
+			mutex_exit(&pressure_bytes_target_lock);
 			printf("SPL pool low: new target %llu (smd: reaping) vm_page_free_wanted = %u vm_page_free_count = %u VM_PAGE_FREE_MIN = %u\n", newtarget, vm_page_free_wanted, vm_page_free_count, VM_PAGE_FREE_MIN);
-			kmem_reap();
-			kmem_reap_idspace();
+			cv_signal(&memory_monitor_thread_cv);
 			return 1;
 		}
 		return 1;
@@ -5962,10 +5977,30 @@ spl_vm_pool_low(void)
 		return 1;
 	}
 
+	mutex_enter(&pressure_bytes_target_lock);
 	pressure_bytes_target = 0;
+	mutex_exit(&pressure_bytes_target_lock);
 
 	return 0;
 }
+#else // COMPLICATED_SPL_VM_POOL_LOW
+// this is used in arc_reclaim_needed.  if 1, reclaim is needed.
+// returning 1 has the effect of throttling ARC, so be careful.
+int
+spl_vm_pool_low(void)
+{
+
+  if(vm_page_free_wanted > 0 || vm_page_free_count < VM_PAGE_FREE_MIN) {
+    return 1;
+  }
+
+  if(pressure_bytes_target > 0 && pressure_bytes_target < spl_memory_used()) {
+    return 1;
+  }
+
+  return 0;
+}
+#endif // COMPLICATED_SPL_VM_POOL_LOW
 
 //===============================================================
 // String handling
