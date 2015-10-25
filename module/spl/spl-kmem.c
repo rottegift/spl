@@ -3155,9 +3155,11 @@ kmem_avail(void)
   if(kmem_avail_use_spec) {
     size_t fsp = vm_page_free_count + vm_page_speculative_count;
     if(fsp < VM_PAGE_FREE_MIN) {
-      // we will automatically be negative
       // free_count tends towards 3500, 13MiB
       // speculative_count can be up to 50000ish (up to 5% of memory in theory, ca 800MiB)
+      // if we have lots of speculative memory, don't pressurize arc with a negative
+      if(vm_page_speculative_count > vm_page_free_count)
+	return(0);
       // VM_PAGE_FREE_MIN is 64MiB by default
       // if we return the whole delta, arc collapses
       // so we can use the vm_page_free_min_multiplier (8) which is part of VM_PAGE_FREE_MIN to reduce
@@ -3168,7 +3170,7 @@ kmem_avail(void)
 	      (uint64_t)MIN((VM_PAGE_FREE_MIN - fsp),(VM_PAGE_FREE_MIN/vm_page_free_min_multiplier)));
     } else {
       // fsp > 64MB, but that could be mainly spec (i.e. free is often 13MiB!), so pressure-deflate spec
-      return (int64_t)(fsp - (vm_page_speculative_count/4)) * (int64_t)PAGESIZE;
+      return (int64_t)(fsp - (vm_page_speculative_count >> 2)) * (int64_t)PAGESIZE;
     }
   } else {
     size_t fp = vm_page_free_count;
