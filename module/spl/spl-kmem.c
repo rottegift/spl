@@ -4120,7 +4120,7 @@ static void memory_monitor_thread()
 		  // (practically somewhere in 10s of thousands of pages)
 			uint64_t newtarget;
 			newtarget = spl_memory_used() -
-			  (os_num_pages_wanted * PAGESIZE * MULT);
+			  ((uint64_t)os_num_pages_wanted * (uint64_t)PAGESIZE * (uint64_t)MULT);
 
 			if (!pressure_bytes_target || (newtarget < pressure_bytes_target)) {
 			        mutex_enter(&pressure_bytes_target_lock);
@@ -5780,6 +5780,13 @@ kmem_cache_scan(kmem_cache_t *cp)
 // Status
 //===============================================================
 
+
+// kmem_num_pages_wanted is used in arc_reclaim_thread to set to_free
+// to_free is how much we try to claim back via adjusting/shrinking/reclaiming
+// in particular, to_free is MAX(kmem_num_pages_wanted(), (arc_c>>arc_shrink_shift)-kmem_avail())
+// however, kmem_pages_wanted does not trigger a reclaim nor a throttle
+// in #ifdef sun code, kmem_num_pages_wanted()*PAGESIZE is ptob(needfree)
+// (needfree appears to be for emergency signalling)
 size_t
 kmem_num_pages_wanted(void)
 {
@@ -5797,7 +5804,8 @@ kmem_num_pages_wanted(void)
 	  return vm_page_free_wanted * LOW_MEMORY_MULT;  // paging, be aggressive
 	}
 
-	// case 2: MMT wants us to give back memory, tell arc to give back 3500.
+	// case 2: MMT wants us to give back memory,
+	//         tell arc to give back vm_page_free_min (==3500 == 13MiB).
 	if(pressure_bytes_signal & PRESSURE_KMEM_NUM_PAGES_WANTED) {
 	  printf("SPL: %s got pressure_bytes_signal, returning vm_page_free_min (%u)\n",
 		 __func__,
@@ -5809,6 +5817,7 @@ kmem_num_pages_wanted(void)
 	  return vm_page_free_min;
 	}
 
+#if 0 // non-emergency stuff into kmem_avail()
 	// case 3: memory is tight but not super-tight
 	//         tell arc to give back twice the difference 
 	//         and let MMT and kmem_avail() try to clean up
@@ -5827,7 +5836,9 @@ kmem_num_pages_wanted(void)
 	  else
 	    return(0);
 	}
+#endif
 
+#if 0 // we let kmem_avail() handle pressure from MMT and case 4 is rarely called since kmem_avail() rework
 	// case 4: there is pressure from MMT
 	if (pressure_bytes_target && (pressure_bytes_target < spl_memory_used())) {
 	  // old_i is previous value, i is new value, d is delta
@@ -5891,6 +5902,9 @@ kmem_num_pages_wanted(void)
 	}
 
 	return (still_pressure);
+#else
+	return(0);
+#endif
 }
 
 size_t
