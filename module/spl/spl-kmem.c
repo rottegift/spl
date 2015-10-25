@@ -3118,6 +3118,19 @@ kmem_cache_stat(kmem_cache_t *cp, char *name)
     return (value);
 }
 
+// helper function for pressure_bytes_wanted
+// initially, this is straightforward system used memory
+// so under nonnegligible load this would typically be in the 16Gbyte range
+// this will probably have to be total_memory instead (which will be in the 12.5Gbyte range)
+// (which will never trigger the 90% test)
+static inline uint64_t
+spl_memory_used()
+{
+  uint64_t f = (uint64_t)vm_page_free_count * (uint64_t)PAGESIZE;
+
+  return(/*real_*/total_memory - f);
+}
+
 /*
  * Return an estimate of currently available kernel heap memory.
  * On 32-bit systems, physical memory may exceed virtual memory,
@@ -3152,37 +3165,73 @@ kmem_avail(void)
     return (((int64_t)vm_page_free_wanted) * PAGE_SIZE * -((int64_t)(LOW_MEMORY_MULT)));  // yes, negative, will shrink by 32 * pages_free_wanted (i.e., 128KiB for each page wanted)
   }
 
+  // deal with pressure
+  if(pressure_bytes_target && pressure_bytes_target < spl_memory_used()) {
+    // we have pressure!
+    mutex_enter(&pressure_bytes_target_lock);
+    int64_t pressure_delta = spl_memory_used() - pressure_bytes_target;
+
+    if(kmem_avail_use_spec) {
+      size_t fsp = vm_page_free_count + vm_page_speculative_count;
+
+      //  pressure and less than VM_PAGE_FREE_MIN headroom?
+      //  deflate by 8MiB or pressure_bytes_delta, whichever is smaller
+      if(fsp < VM_PAGE_FREE_MIN) {
+	printf("SPL: %s pressure wants %lld bytes, and low memory headroom (%lu < %u)\n",
+	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN);
+	int64_t askbytes = MIN((8 * 1024 * 1024), pressure_delta);
+	pressure_bytes_target += askbytes;
+	mutex_exit(&pressure_bytes_target_lock);
+	return(-askbytes); // trigger arc_reclaim and/or throttle
+      }
+    } else {
+      // !spec
+      // pressure and less than VM_PAGE_FREE_MIN headroom?
+      // deflate by 8MiB or pressure_bytes_delta, whichever is smaller
+      if(vm_page_free_count < VM_PAGE_FREE_MIN) {
+	printf("SPL: %s pressure wants %lld bytes, and no-spec low memory headroom (%u < %u)\n",
+	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN);
+	int64_t askbytes = MIN((8 * 1024 * 1024), pressure_delta);
+	pressure_bytes_target += askbytes;
+	mutex_exit(&pressure_bytes_target_lock);
+	return(-askbytes); // trigger arc_reclaim and/or throttle
+      }
+    }
+
+    // pressure but plenty of headroom?
+    // let arc grow by a megabyte while MMT tries to reduce pressure
+    mutex_exit(&pressure_bytes_target_lock);
+    return(1024*1024);
+  }
+
+  // no pressure
   if(kmem_avail_use_spec) {
     size_t fsp = vm_page_free_count + vm_page_speculative_count;
+    // do we have lots of headroom?
     if(fsp < VM_PAGE_FREE_MIN) {
-      // free_count tends towards 3500, 13MiB
-      // speculative_count can be up to 50000ish (up to 5% of memory in theory, ca 800MiB)
-      // if we have lots of speculative memory, don't pressurize arc with a negative
-      if(vm_page_speculative_count > vm_page_free_count)
-	return(0);
-      // VM_PAGE_FREE_MIN is 64MiB by default
-      // if we return the whole delta, arc collapses
-      // so we can use the vm_page_free_min_multiplier (8) which is part of VM_PAGE_FREE_MIN to reduce
-      //     the delta to by 8MiB (2048 pages) at a time.
-      // the returned value must be negative
-      // in MiB, here we are -(MIN 64-free,8) where free < 64.
-      return (-(uint64_t)PAGESIZE * \
-	      (uint64_t)MIN((VM_PAGE_FREE_MIN - fsp),(VM_PAGE_FREE_MIN/vm_page_free_min_multiplier)));
+      // no
+      if(vm_page_free_count > vm_page_speculative_count) {
+	// slowly increase arc
+	return((int64_t)PAGESIZE);
+      } else {
+	// pressurize speculative memory by a megabyte
+	return(1024*1024);
+      }
     } else {
-      // fsp > 64MB, but that could be mainly spec (i.e. free is often 13MiB!), so pressure-deflate spec
-      return (int64_t)(fsp - (vm_page_speculative_count >> 2)) * (int64_t)PAGESIZE;
+      return((int64_t)fsp * PAGESIZE);
     }
-  } else {
-    size_t fp = vm_page_free_count;
-    if(fp < VM_PAGE_FREE_MIN) {
-      // we are automatically negative, see above
-      return (-(uint64_t)PAGESIZE * \
-	      (uint64_t)MIN((VM_PAGE_FREE_MIN - fp),(VM_PAGE_FREE_MIN/vm_page_free_min_multiplier)));
+  } else { // !kmem_avail_use_spec
+    if(vm_page_free_count < VM_PAGE_FREE_MIN) {
+      return((int64_t)PAGESIZE);
     } else {
-      // we don't consider spec, so we let ourselves go in and out of pressure on xnu cache/vm
-      return (int64_t)fp * (int64_t)PAGESIZE;
+      return((int64_t)vm_page_free_count * PAGESIZE);
     }
   }
+
+  // fallthrough, should not get here
+  printf("SPL: %s fallthrough!\n", __func__);
+  return(0);
+
 }
 
 // TRUE if we have more than a critical minimum of memory
@@ -4036,18 +4085,6 @@ kmem_cache_fini(int pass, int use_large_pages)
 // this replaces kmem_used() in memory_monitor_thread() because
 // that in turn relies on kmem_avail() which is used to signal arc and
 // therefore may be artificially low
-// do we care about speculative memory?  that can be 5% (200MB on 16GB system)
-// initially, this is straightforward system used memory
-// so under nonnegligible load this would typically be in the 16Gbyte range
-// this will probably have to be total_memory instead (which will be in the 12.5Gbyte range)
-// (which will never trigger the 90% test)
-static inline uint64_t
-spl_memory_used()
-{
-  uint64_t f = (uint64_t)vm_page_free_count * (uint64_t)PAGESIZE;
-
-  return(/*real_*/total_memory - f);
-}
 
 static void memory_monitor_thread()
 {
