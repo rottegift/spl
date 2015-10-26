@@ -3152,17 +3152,33 @@ kmem_avail(void)
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal &= ~(PRESSURE_KMEM_AVAIL);
     mutex_exit(&pressure_bytes_signal_lock);
+    mutex_enter(&pressure_bytes_target_lock);
+    if(pressure_bytes_target) {
+      pressure_bytes_target -= 1024*1024*LOW_MEMORY_MULT; // pressure for later
+    } else {
+      pressure_bytes_target = spl_memory_used() - 1024*1024*LOW_MEMORY_MULT;
+    }
+    mutex_exit(&pressure_bytes_target_lock);
     return (-1024*1024*LOW_MEMORY_MULT); // get bunch of memory back from arc (32MiB)
   }
 
-  if (vm_page_free_wanted > 0) { // xnu wants memory, arc must give some up, and we tell kmem_num_pages_wanted and MMT
-    printf("SPL: %s page_free_wanted %u, returning %lld\n", __func__,
-	   vm_page_free_wanted, ((int64_t)vm_page_free_wanted) * PAGE_SIZE * -((int64_t)LOW_MEMORY_MULT));
+  if (vm_page_free_wanted > 0) { // this is an emergency, react heavily
+    // retval is negative, 32KiB * pages wanted by xnu
+    int64_t retval = -((int64_t)vm_page_free_wanted * PAGE_SIZE * LOW_MEMORY_MULT);
+    printf("SPL: %s page_free_wanted %u, returning %lld\n",
+	   __func__, vm_page_free_wanted, retval);
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal |= PRESSURE_KMEM_NUM_PAGES_WANTED;
     mutex_exit(&pressure_bytes_signal_lock);
+    mutex_enter(&pressure_bytes_target_lock);
+    if(pressure_bytes_target) {
+      pressure_bytes_target += retval;  // retval is negative
+    } else {
+      pressure_bytes_target = spl_memory_used() + retval; // retval is ngative
+    }
+    mutex_exit(&pressure_bytes_target_lock);
     cv_signal(&memory_monitor_thread_cv);
-    return (((int64_t)vm_page_free_wanted) * PAGE_SIZE * -((int64_t)(LOW_MEMORY_MULT)));  // yes, negative, will shrink by 32 * pages_free_wanted (i.e., 128KiB for each page wanted)
+    return (retval);
   }
 
   // deal with pressure
@@ -4086,7 +4102,8 @@ kmem_cache_fini(int pass, int use_large_pages)
 // that in turn relies on kmem_avail() which is used to signal arc and
 // therefore may be artificially low
 
-static void memory_monitor_thread()
+static void
+memory_monitor_thread()
 {
   callb_cpr_t cpr;
 	kern_return_t kr;
@@ -4108,7 +4125,7 @@ static void memory_monitor_thread()
 	  CALLB_CPR_SAFE_END(&cpr, &memory_monitor_lock);
 	  
 		kr = mach_vm_pressure_monitor(TRUE, nsecs_monitored,
-									  &pages_reclaimed, &os_num_pages_wanted);
+					      &pages_reclaimed, &os_num_pages_wanted);
 
 		spl_stats.spl_monitor_thread_wake_count.value.ui64++;
 
@@ -4155,7 +4172,7 @@ static void memory_monitor_thread()
 			  mutex_enter(&pressure_bytes_signal_lock);
 			  pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
 			  mutex_exit(&pressure_bytes_signal_lock);
-			  printf("SPL: MMT vm_page_free_wanted == %u, signalling kmem_available and reaping, last reap delta %llu, pages_reclaimed = %u\n",
+			  printf("SPL: MMT vm_page_free_wanted == %u, last reap delta %llu, pages_reclaimed = %u, signalling both and reaping\n",
 				 vm_page_free_wanted,
 				 zfs_lbolt() - last_reap,
 				 pages_reclaimed);
@@ -4168,7 +4185,7 @@ static void memory_monitor_thread()
 			// !spl_minimal_physmem_p_logic()  happens a lot with delta 0 and 1
 			// so wait until delta is at least 2 (which makes it happen infrequently)
 			if(!spl_minimal_physmem_p_logic() && (zfs_lbolt() - last_reap > 1)) {
-			  printf("SPL: MMT !spl_minimal_physmem, vm_page_free_wanted %u, vm_page_free_count %u, last reap delta %llu, pages_reclaimed %u\n",
+			  printf("SPL: MMT !spl_minimal_physmem, vm_page_free_wanted %u, vm_page_free_count %u, last reap delta %llu, pages_reclaimed %u, signalling kmem_avail and reaping\n",
 				 vm_page_free_wanted,
 				 vm_page_free_count,
 				 zfs_lbolt() - last_reap,
