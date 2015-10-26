@@ -3227,10 +3227,12 @@ kmem_avail(void)
     if(fsp < VM_PAGE_FREE_MIN) {
       // no
       if(vm_page_free_count > vm_page_speculative_count) {
-	// slowly increase arc
-	return((int64_t)PAGESIZE);
+	// return small positive
+	return(2*1024*1024);
+      } else if ((vm_page_speculative_count >> 1) > 1){
+	// pressurize speculative memory by at least 10MiB, and up to 1/2 of spec
+	return(MAX(10LL*1024*1024,(int64_t)(vm_page_speculative_count >> 1)*PAGESIZE));
       } else {
-	// pressurize speculative memory by a megabyte
 	return(1024*1024);
       }
     } else {
@@ -3238,7 +3240,7 @@ kmem_avail(void)
     }
   } else { // !kmem_avail_use_spec
     if(vm_page_free_count < VM_PAGE_FREE_MIN) {
-      return((int64_t)PAGESIZE);
+      return(2*1024*1024);
     } else {
       return((int64_t)vm_page_free_count * PAGESIZE);
     }
