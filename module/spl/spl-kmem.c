@@ -4735,13 +4735,17 @@ spl_kmem_thread_fini(void)
 
 	printf("SPL: stop memory monitor\n");
 	mutex_enter(&memory_monitor_lock);
+	printf("SPL: stop memory monitor mutex acquired\n");
 	cv_signal(&memory_monitor_thread_cv);
+	printf("SPL: stop memory monitor cv signalled\n");
 	memory_monitor_thread_exit = TRUE;
 	thread_wakeup((event_t) &vm_page_free_wanted);
+	printf("SPL: stop memory monitor thread_wakeup vm_page_free_wanted\n");
 	while(memory_monitor_thread_exit) {
 	  cv_signal(&memory_monitor_thread_cv);
 	  cv_wait(&memory_monitor_thread_cv, &memory_monitor_lock);
 	}
+	printf("SPL: stop memory monitor while loop ended\n");
 	mutex_exit(&memory_monitor_lock);
 	cv_destroy(&memory_monitor_thread_cv);
 	mutex_destroy(&memory_monitor_lock);
