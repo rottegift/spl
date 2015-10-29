@@ -4170,7 +4170,7 @@ memory_monitor_thread()
 		  mutex_enter(&pressure_bytes_signal_lock);
 		  if(pressure_bytes_signal & PRESSURE_KMEM_MANUAL_PRESSURE) {
 		    pressure_bytes_signal &= ~PRESSURE_KMEM_MANUAL_PRESSURE;
-		    if(pressure_bytes_target < spl_memory_available()) {
+		    if(pressure_bytes_target < spl_memory_used()) {
 		      pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
 		    }
 		    mutex_exit(&pressure_bytes_signal_lock);
