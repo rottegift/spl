@@ -4399,6 +4399,9 @@ spl_kmem_init(uint64_t total_memory)
 	sysctl_register_oid(&sysctl__spl);
 	sysctl_register_oid(&sysctl__spl_kext_version);
 
+	// Initialize the MMT lock
+	mutex_init(&memory_monitor_lock, "memory_monitor_lock", MUTEX_DEFAULT, NULL);
+	
 	// Initialise the pressure signal lock
 	mutex_init(&pressure_bytes_signal_lock, "pressure_bytes_signal_lock", MUTEX_DEFAULT, NULL);
 	mutex_init(&pressure_bytes_target_lock, "pressure_bytes_target_lock", MUTEX_DEFAULT, NULL);
