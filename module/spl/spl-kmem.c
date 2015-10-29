@@ -4298,8 +4298,11 @@ memory_monitor_thread()
 	}
 
 	memory_monitor_thread_exit = FALSE;
+	printf("SPL: MMT reset memory to FALSE and exiting: cv_broadcasting\n");
 	cv_broadcast(&memory_monitor_thread_cv);
+	printf("SPL: MMT exiting: doing CALLB_CPR_EXIT\n");
 	CALLB_CPR_EXIT(&cpr); // drops memory_monitor_lock
+	printf("SPL: MMT exiting: setting shutting_down to 2 and thread_exit()\n");
 	shutting_down = 2;
 	thread_exit();
 }
@@ -4398,13 +4401,6 @@ spl_kmem_init(uint64_t total_memory)
 
 	sysctl_register_oid(&sysctl__spl);
 	sysctl_register_oid(&sysctl__spl_kext_version);
-
-	// Initialize the MMT lock
-	mutex_init(&memory_monitor_lock, "memory_monitor_lock", MUTEX_DEFAULT, NULL);
-	
-	// Initialise the pressure signal lock
-	mutex_init(&pressure_bytes_signal_lock, "pressure_bytes_signal_lock", MUTEX_DEFAULT, NULL);
-	mutex_init(&pressure_bytes_target_lock, "pressure_bytes_target_lock", MUTEX_DEFAULT, NULL);
 	
 	// Initialise the kstat lock
 	mutex_init(&kmem_cache_lock, "kmem_cache_lock", MUTEX_DEFAULT, NULL); // XNU
@@ -4734,6 +4730,13 @@ void
 spl_kmem_thread_init(void)
 {
     kmem_move_init();
+
+    // Initialize the MMT lock
+    mutex_init(&memory_monitor_lock, "memory_monitor_lock", MUTEX_DEFAULT, NULL);
+    // Initialise the pressure signal lock
+    mutex_init(&pressure_bytes_signal_lock, "pressure_bytes_signal_lock", MUTEX_DEFAULT, NULL);
+    mutex_init(&pressure_bytes_target_lock, "pressure_bytes_target_lock", MUTEX_DEFAULT, NULL);
+
     kmem_taskq = taskq_create("kmem_taskq", 1, minclsyspri,
                                        300, INT_MAX, TASKQ_PREPOPULATE);
     memory_monitor_thread_exit = FALSE;
@@ -4752,18 +4755,16 @@ spl_kmem_thread_fini(void)
 
 	printf("SPL: stop memory monitor\n");
 	mutex_enter(&memory_monitor_lock);
-	printf("SPL: stop memory monitor mutex acquired\n");
-	cv_signal(&memory_monitor_thread_cv);
-	printf("SPL: stop memory monitor cv signalled\n");
+	printf("SPL: stop memory monitor, lock acquired, setting exit variable and waiting\n");
 	memory_monitor_thread_exit = TRUE;
-	thread_wakeup((event_t) &vm_page_free_wanted);
-	printf("SPL: stop memory monitor thread_wakeup vm_page_free_wanted\n");
 	while(memory_monitor_thread_exit) {
 	  cv_signal(&memory_monitor_thread_cv);
 	  cv_wait(&memory_monitor_thread_cv, &memory_monitor_lock);
 	}
-	printf("SPL: stop memory monitor while loop ended\n");
 	mutex_exit(&memory_monitor_lock);
+	printf("SPL: stop memory monitor while loop done, mutex dropped\n");
+
+	printf("SPL: destroying MMT cv, lock, and pressure_bytes_signal/target locks\n");
 	cv_destroy(&memory_monitor_thread_cv);
 	mutex_destroy(&memory_monitor_lock);
 	mutex_destroy(&pressure_bytes_signal_lock);
@@ -4781,6 +4782,7 @@ spl_kmem_thread_fini(void)
 	kmem_taskq = 0;
 
 	// Find a better way to wait for memory_monitor_thread to quit.
+	printf("SPL: waiting on MMT to set shutting_down to 2\n");
 	while(shutting_down != 2) delay(hz>>4);
 
 	// FIXME - maybe it should tear down for symmetry
