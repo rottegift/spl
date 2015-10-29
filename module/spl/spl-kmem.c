@@ -132,8 +132,9 @@ extern uint64_t		zfs_active_rwlock;
 uint64_t            pressure_bytes_target = 0;
 kmutex_t	    pressure_bytes_target_lock;
 // signalling kmem_avail() and kmem_num_pages_wanted()
-#define PRESSURE_KMEM_AVAIL 1<<0
-#define PRESSURE_KMEM_NUM_PAGES_WANTED 1<<1
+#define PRESSURE_KMEM_AVAIL (1<<0)
+#define PRESSURE_KMEM_NUM_PAGES_WANTED (1<<1)
+#define PRESSURE_KMEM_MANUAL_PRESSURE (1<<2)
 static uint64_t	    pressure_bytes_signal = 0;
 static kmutex_t     pressure_bytes_signal_lock;
 
@@ -518,6 +519,7 @@ typedef struct spl_stats {
   kstat_named_t spl_low_memory_signal_shift;
   kstat_named_t spl_kmem_avail;
   kstat_named_t spl_kmem_used;
+  kstat_named_t spl_spl_memory_used;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -533,6 +535,7 @@ static spl_stats_t spl_stats = {
     {"low_memory_signal_shift", KSTAT_DATA_UINT64},
     {"kmem_avail", KSTAT_DATA_INT64},
     {"kmem_used", KSTAT_DATA_UINT64},
+    {"spl_memory_used", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -3118,7 +3121,7 @@ kmem_cache_stat(kmem_cache_t *cp, char *name)
     return (value);
 }
 
-// helper function for pressure_bytes_wanted
+// helper function for pressure_bytes_target
 // initially, this is straightforward system used memory
 // so under nonnegligible load this would typically be in the 16Gbyte range
 // this will probably have to be total_memory instead (which will be in the 12.5Gbyte range)
@@ -3150,7 +3153,7 @@ kmem_avail(void)
   if (pressure_bytes_signal & PRESSURE_KMEM_AVAIL) { // hello from MMT or kmem_num_pages_wanted
     dprintf("SPL: %s: got pressure bytes signal\n", __func__);
     mutex_enter(&pressure_bytes_signal_lock);
-    pressure_bytes_signal &= ~(PRESSURE_KMEM_AVAIL);
+    pressure_bytes_signal &= ~PRESSURE_KMEM_AVAIL;
     mutex_exit(&pressure_bytes_signal_lock);
     mutex_enter(&pressure_bytes_target_lock);
     if(pressure_bytes_target) {
@@ -4144,14 +4147,14 @@ memory_monitor_thread()
 
 		  if (!pressure_bytes_target) {
 		    pressure_bytes_target = newtarget;
-		    printf("SPL: MMT pressure_bytes_wanted: increased from 0 to %llu (os_num_pages_wanted: %u), vm_page_free_count == %u, vm_page_speculative_count == %u, pages_reclaimed == %u\n",
+		    printf("SPL: MMT pressure_bytes_target: increased from 0 to %llu (os_num_pages_wanted: %u), vm_page_free_count == %u, vm_page_speculative_count == %u, pages_reclaimed == %u\n",
 			   pressure_bytes_target,
 			   os_num_pages_wanted,
 			   vm_page_free_count,
 			   vm_page_speculative_count,
 			   pages_reclaimed);
 		  } else if(pressure_bytes_target > newtarget) {
-		    printf("SPL: MMT pressure_bytes_wanted: decreased from %llu to %llu (os_num_pages_wanted: %u), vm_page_free_count == %u, vm_page_speculative_count == %u, pages_reclaimed == %u\n",
+		    printf("SPL: MMT pressure_bytes_target: decreased from %llu to %llu (os_num_pages_wanted: %u), vm_page_free_count == %u, vm_page_speculative_count == %u, pages_reclaimed == %u\n",
 			   pressure_bytes_target,
 			   newtarget,
 			   os_num_pages_wanted,
@@ -4164,10 +4167,16 @@ memory_monitor_thread()
 		  // do nothing (here) if pressure_bytes_target < newtarget
 		  mutex_exit(&pressure_bytes_target_lock);
 
-		  // we may have been awakened early by a cv_signal(&memory_monitor_thread_cv);
-			// in that case we should reap even if last_reap is recent
-
-			// we may need to wrap this in a test to make sure it's not reaping tooo often
+		  mutex_enter(&pressure_bytes_signal_lock);
+		  if(pressure_bytes_signal & PRESSURE_KMEM_MANUAL_PRESSURE) {
+		    pressure_bytes_signal &= ~PRESSURE_KMEM_MANUAL_PRESSURE;
+		    if(pressure_bytes_target < spl_memory_available()) {
+		      pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
+		    }
+		    mutex_exit(&pressure_bytes_signal_lock);
+		  } else {
+		    mutex_exit(&pressure_bytes_signal_lock);
+		  }
 
 			if(vm_page_free_wanted > 0) {
 			  // signal kmem_avail() and kmem_num_pages_wanted(), as this is an emergency
@@ -4337,22 +4346,26 @@ spl_kstat_update(kstat_t *ksp, int rw)
 	  }
 
 		if (ks->spl_simulate_pressure.value.ui64 != pressure_bytes_target) {
-		  printf("SPL: pressure_bytes_target_sysctl %llu, previous pressure %llu, kmem_used() %lu\n",
+		  printf("SPL: pressure_bytes_target_sysctl %llu, previous pressure %llu, spl_memory_used() %llu\n",
 			 ks->spl_simulate_pressure.value.ui64*1024*1024,
 			 pressure_bytes_target,
-			 kmem_used());
+			 spl_memory_used());
 		        mutex_enter(&pressure_bytes_target_lock);
-			pressure_bytes_target = kmem_used() -
-				(ks->spl_simulate_pressure.value.ui64 * 1024 * 1024);
+			if(!pressure_bytes_target) {
+			  pressure_bytes_target = spl_memory_used() -
+			    (ks->spl_simulate_pressure.value.ui64 * 1024 * 1024);
+			} else {
+			  pressure_bytes_target -=
+			    (ks->spl_simulate_pressure.value.ui64 * 1024 * 1024);
+			}
 			mutex_exit(&pressure_bytes_target_lock);
+			mutex_enter(&pressure_bytes_signal_lock);
+			pressure_bytes_signal |= PRESSURE_KMEM_MANUAL_PRESSURE;
+			mutex_exit(&pressure_bytes_signal_lock);
+			cv_signal(&memory_monitor_thread_cv);
 			if (ks->spl_simulate_pressure.value.ui64 == 666) {
 			  printf("SPL: simulate pressure 666, dumping stack\n");
 			  spl_backtrace("SPL: simulate_pressure 666");
-			} else {
-			  kmem_reap();
-			  kpreempt(KPREEMPT_SYNC);
-			  kmem_reap_idspace();
-			  kpreempt(KPREEMPT_SYNC);
 			}
 		}
 	} else {
@@ -4367,6 +4380,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_low_memory_signal_shift.value.ui64 = vm_low_memory_signal_shift;
 		ks->spl_kmem_avail.value.i64 = kmem_avail();
 		ks->spl_kmem_used.value.ui64 = kmem_used();
+		ks->spl_spl_memory_used.value.ui64 = spl_memory_used();
 	}
 
 	return (0);
