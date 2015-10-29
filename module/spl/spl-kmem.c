@@ -4125,15 +4125,7 @@ memory_monitor_thread()
 
 	while (!memory_monitor_thread_exit) {
 
-	  // block until signalled, or after 0.1 second
-	  CALLB_CPR_SAFE_BEGIN(&cpr);
-	  (void) cv_timedwait(&memory_monitor_thread_cv,
-			      &memory_monitor_lock, ddi_get_lbolt() + (hz/10));
-	  CALLB_CPR_SAFE_END(&cpr, &memory_monitor_lock);
-
 	  mutex_exit(&memory_monitor_lock);
-
-	  mutex_enter(&memory_monitor_lock);
 	  
 		kr = mach_vm_pressure_monitor(TRUE, nsecs_monitored,
 					      &pages_reclaimed, &os_num_pages_wanted);
@@ -4142,7 +4134,6 @@ memory_monitor_thread()
 		spl_stats.spl_monitor_thread_wake_count.value.ui64++;
 
 		if ((!shutting_down) && kr == KERN_SUCCESS) {
-
 		  mutex_enter(&pressure_bytes_target_lock);
 		  uint64_t newtarget;
 		  newtarget = spl_memory_used() -
@@ -4297,8 +4288,15 @@ memory_monitor_thread()
 			  last_reap = zfs_lbolt();
 			  cv_broadcast(&memory_monitor_thread_cv);
 			}
-		}
-	}
+		} //! shutting down
+				
+		// block until signalled, or after 0.1 second
+		mutex_enter(&memory_monitor_lock);
+		CALLB_CPR_SAFE_BEGIN(&cpr);
+		(void) cv_timedwait(&memory_monitor_thread_cv,
+				    &memory_monitor_lock, ddi_get_lbolt() + (hz/10));
+		CALLB_CPR_SAFE_END(&cpr, &memory_monitor_lock);
+	} // while
 
 	memory_monitor_thread_exit = FALSE;
 	printf("SPL: MMT reset memory to FALSE and exiting: cv_broadcasting\n");
