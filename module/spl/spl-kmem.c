@@ -4126,6 +4126,7 @@ memory_monitor_thread()
 	while (!memory_monitor_thread_exit) {
 
 	  mutex_exit(&memory_monitor_lock);
+	  kpreempt(KPREEMPT_SYNC);
 
 	  // block until signalled, or after 0.1 second
 	  mutex_enter(&memory_monitor_lock);
