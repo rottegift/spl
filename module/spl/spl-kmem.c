@@ -4758,6 +4758,7 @@ spl_kmem_thread_fini(void)
 	mutex_enter(&memory_monitor_lock);
 	printf("SPL: stop memory monitor, lock acquired, setting exit variable and waiting\n");
 	memory_monitor_thread_exit = TRUE;
+	mutex_exit(&memory_monitor_lock);
 	while(memory_monitor_thread_exit) {
 	  cv_signal(&memory_monitor_thread_cv);
 	  cv_wait(&memory_monitor_thread_cv, &memory_monitor_lock);
