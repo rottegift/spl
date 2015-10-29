@@ -4124,10 +4124,16 @@ memory_monitor_thread()
 	printf("SPL: MMT beginning !memory_monitor_thread_exit loop\n");
 
 	while (!memory_monitor_thread_exit) {
+
+	  mutex_exit(&memory_monitor_lock);
+
+	  // block until signalled, or after 0.1 second
 	  CALLB_CPR_SAFE_BEGIN(&cpr);
 	  (void) cv_timedwait(&memory_monitor_thread_cv,
 			      &memory_monitor_lock, ddi_get_lbolt() + (hz/10));
 	  CALLB_CPR_SAFE_END(&cpr, &memory_monitor_lock);
+
+	  mutex_enter(&memory_monitor_lock);
 	  
 		kr = mach_vm_pressure_monitor(TRUE, nsecs_monitored,
 					      &pages_reclaimed, &os_num_pages_wanted);
