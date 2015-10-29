@@ -4125,28 +4125,24 @@ memory_monitor_thread()
 
 	while (!memory_monitor_thread_exit) {
 
-	  mutex_exit(&memory_monitor_lock);
-	  kpreempt(KPREEMPT_SYNC);
-
 	  // block until signalled, or after 0.1 second
-	  mutex_enter(&memory_monitor_lock);
 	  CALLB_CPR_SAFE_BEGIN(&cpr);
 	  (void) cv_timedwait(&memory_monitor_thread_cv,
 			      &memory_monitor_lock, ddi_get_lbolt() + (hz/10));
 	  CALLB_CPR_SAFE_END(&cpr, &memory_monitor_lock);
 
+	  mutex_exit(&memory_monitor_lock);
+
+	  mutex_enter(&memory_monitor_lock);
 	  
 		kr = mach_vm_pressure_monitor(TRUE, nsecs_monitored,
 					      &pages_reclaimed, &os_num_pages_wanted);
-
+		
+		
 		spl_stats.spl_monitor_thread_wake_count.value.ui64++;
 
 		if ((!shutting_down) && kr == KERN_SUCCESS) {
 
-		  // the call to kmem_used() calls kmem_avail() so there is annoying
-		  // logical circularity.  fix.
-		  // additionally, vm_page_speculative_count can be high (thoretically up to 5% of RAM)
-		  // (practically somewhere in 10s of thousands of pages)
 		  mutex_enter(&pressure_bytes_target_lock);
 		  uint64_t newtarget;
 		  newtarget = spl_memory_used() -
