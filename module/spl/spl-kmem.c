@@ -4351,7 +4351,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			 pressure_bytes_target,
 			 spl_memory_used());
 		        mutex_enter(&pressure_bytes_target_lock);
-			if(!pressure_bytes_target) {
+			if(!pressure_bytes_target || pressure_bytes_target >= spl_memory_used()) {
 			  pressure_bytes_target = spl_memory_used() -
 			    (ks->spl_simulate_pressure.value.ui64 * 1024 * 1024);
 			} else {
