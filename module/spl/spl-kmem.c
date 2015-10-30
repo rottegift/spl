@@ -4146,11 +4146,11 @@ reap_thread()
       mutex_exit(&reap_now_lock);
     }
     mutex_enter(&reap_thread_lock);
-    printf("SPL: reap_now calling cv_timedwait\n");
+    dprintf("SPL: reap_now calling cv_timedwait\n");
     CALLB_CPR_SAFE_BEGIN(&cpr);
     (void)cv_timedwait(&reap_thread_cv, &reap_thread_lock, ddi_get_lbolt() + (10 * hz));
     CALLB_CPR_SAFE_END(&cpr, &reap_thread_lock);
-    printf("SPL: reap now back from cv_timedwait\n");
+    dprintf("SPL: reap now back from cv_timedwait\n");
   }
   reap_thread_exit = FALSE;
   printf("SPL: reap_thread_exit set to FALSE and exiting: cv_broadcasting\n");
@@ -4179,8 +4179,12 @@ spl_mach_pressure_monitor_thread()
   while(!spl_mach_pressure_monitor_thread_exit) {
     mutex_exit(&spl_mach_pressure_monitor_thread_lock);
 
+    printf("SPL: %s calling mach_vm_pressure_monitor - may block for some time\n", __func__);
+
     kr = mach_vm_pressure_monitor(TRUE, nsecs_monitored,
 				  &pages_reclaimed, &os_num_pages_wanted);
+
+    printf("SPL: %s back from mach_vm_pressure_montor - unblocked\n", __func__);
 
     spl_stats.spl_spl_mach_pressure_monitor_wake_count.value.ui64++;
 
@@ -4233,13 +4237,13 @@ spl_mach_pressure_monitor_thread()
     } // else: KERN_SUCCESS
 
     mutex_enter(&spl_mach_pressure_monitor_thread_lock);
-    printf("SPL: %s calling cv_timedwait\n", __func__);
+    dprintf("SPL: %s calling cv_timedwait\n", __func__);
     CALLB_CPR_SAFE_BEGIN(&cpr);
     (void)cv_timedwait(&spl_mach_pressure_monitor_thread_cv,
 		       &spl_mach_pressure_monitor_thread_lock,
 		       ddi_get_lbolt() + hz);
     CALLB_CPR_SAFE_END(&cpr, &spl_mach_pressure_monitor_thread_lock);
-    printf("SPL: %s back from cv_timedwait\n", __func__);
+    dprintf("SPL: %s back from cv_timedwait\n", __func__);
   } // while
   spl_mach_pressure_monitor_thread_exit = FALSE;
   printf("SPL: %s exiting: cv_broadcasting\n", __func__);
@@ -4399,11 +4403,11 @@ memory_monitor_thread()
 				
 		// block until signalled, or after 1 second
 		mutex_enter(&memory_monitor_lock);
-		printf("SPL: MMT calling cv_timedwait\n");
+		dprintf("SPL: MMT calling cv_timedwait\n");
 		CALLB_CPR_SAFE_BEGIN(&cpr);
 		(void)cv_timedwait(&memory_monitor_thread_cv,
 				   &memory_monitor_lock, ddi_get_lbolt() + hz);
-		printf("SPL: MMT back from cv_timedwait\n");
+		dprintf("SPL: MMT back from cv_timedwait\n");
 		CALLB_CPR_SAFE_END(&cpr, &memory_monitor_lock);
 	} // while
 
