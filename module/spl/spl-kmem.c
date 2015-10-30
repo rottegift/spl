@@ -526,6 +526,7 @@ typedef struct spl_stats {
     kstat_named_t spl_monitor_thread_wake_count;
   kstat_named_t spl_reap_thread_wake_count;
   kstat_named_t spl_reap_thread_reaped_count;
+  kstat_named_t spl_reap_thread_miss;
   kstat_named_t spl_spl_mach_pressure_monitor_wake_count;
     kstat_named_t spl_simulate_pressure;
   kstat_named_t spl_vm_page_free_min_multiplier;
@@ -545,6 +546,7 @@ static spl_stats_t spl_stats = {
     {"monitor_thread_wake_count", KSTAT_DATA_UINT64},
     {"reap_thread_wake_count", KSTAT_DATA_UINT64},
     {"reap_thread_reaped_count", KSTAT_DATA_UINT64},
+    {"reap_thread_miss", KSTAT_DATA_UINT64},
     {"spl_mach_pressure_wake_count", KSTAT_DATA_UINT64},
     {"simulate_pressure", KSTAT_DATA_UINT64},
     {"vm_page_free_multiplier", KSTAT_DATA_UINT64},
@@ -4123,6 +4125,8 @@ static void
 reap_thread()
 {
   callb_cpr_t cpr;
+  uint64_t last_reap = zfs_lbolt();
+  uint64_t previous_segkmem_total_mem_allocated = segkmem_total_mem_allocated;
 
   CALLB_CPR_INIT(&cpr, &reap_thread_lock, callb_generic_cpr, FTAG);
 
@@ -4136,16 +4140,33 @@ reap_thread()
     spl_stats.spl_reap_thread_wake_count.value.ui64++;
 
     mutex_enter(&reap_now_lock);
-    if(reap_now) {
+    uint64_t om = segkmem_total_mem_allocated;
+    if(reap_now && om > previous_segkmem_total_mem_allocated) {
       reap_now = 0;
       mutex_exit(&reap_now_lock);
+      printf("SPL: reap thread, segkmem_total_mem_allocated delta %llu after %llu seconds\n",
+	     om - previous_segkmem_total_mem_allocated, zfs_lbolt() - last_reap);
+      previous_segkmem_total_mem_allocated = om;
+      last_reap = zfs_lbolt();
       kmem_reap();
       kmem_reap_idspace();
       spl_stats.spl_reap_thread_reaped_count.value.ui64++;
-      dprintf("SPL: reap thread reaped, cv_broadcasting\n");
-      cv_broadcast(&reap_thread_cv);
-    } else {
+    } else if(reap_now && zfs_lbolt() - last_reap > (hz*10)) {
+      reap_now = 0;
       mutex_exit(&reap_now_lock);
+      printf("SPL: reap thread, last reap %llu seconds ago\n",
+	     zfs_lbolt() - last_reap);
+      last_reap = zfs_lbolt();
+      previous_segkmem_total_mem_allocated = segkmem_total_mem_allocated;
+      kmem_reap();
+      kmem_reap_idspace();
+      spl_stats.spl_reap_thread_reaped_count.value.ui64++;
+    } else {
+      reap_now = 0;
+      mutex_exit(&reap_now_lock);
+      if(previous_segkmem_total_mem_allocated > om)
+	previous_segkmem_total_mem_allocated = om;
+      spl_stats.spl_reap_thread_miss.value.ui64++;
     }
     mutex_enter(&reap_thread_lock);
     dprintf("SPL: reap_now calling cv_timedwait\n");
