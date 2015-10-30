@@ -4452,7 +4452,7 @@ memory_monitor_thread()
 		dprintf("SPL: MMT calling cv_timedwait\n");
 		CALLB_CPR_SAFE_BEGIN(&cpr);
 		(void)cv_timedwait(&memory_monitor_thread_cv,
-				   &memory_monitor_lock, ddi_get_lbolt() + hz);
+				   &memory_monitor_lock, ddi_get_lbolt() + (hz / 10));
 		dprintf("SPL: MMT back from cv_timedwait\n");
 		CALLB_CPR_SAFE_END(&cpr, &memory_monitor_lock);
 	} // while
