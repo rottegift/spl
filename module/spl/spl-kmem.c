@@ -4264,7 +4264,7 @@ spl_mach_pressure_monitor_thread()
     CALLB_CPR_SAFE_BEGIN(&cpr);
     (void)cv_timedwait(&spl_mach_pressure_monitor_thread_cv,
 		       &spl_mach_pressure_monitor_thread_lock,
-		       ddi_get_lbolt() + hz);
+		       ddi_get_lbolt() + (hz / 10));
     CALLB_CPR_SAFE_END(&cpr, &spl_mach_pressure_monitor_thread_lock);
     dprintf("SPL: %s back from cv_timedwait\n", __func__);
   } // while
