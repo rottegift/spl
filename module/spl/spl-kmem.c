@@ -4181,7 +4181,7 @@ spl_mach_pressure_monitor_thread()
   while(!spl_mach_pressure_monitor_thread_exit) {
     mutex_exit(&spl_mach_pressure_monitor_thread_lock);
 
-    printf("SPL: %s calling mach_vm_pressure_monitor - may block for some time\n", __func__);
+    dprintf("SPL: %s calling mach_vm_pressure_monitor - may block for some time\n", __func__);
 
     kr = mach_vm_pressure_monitor(TRUE, nsecs_monitored,
 				  &pages_reclaimed, &os_num_pages_wanted);
