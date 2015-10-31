@@ -4293,6 +4293,7 @@ memory_monitor_thread()
   callb_cpr_t cpr;
 
 	uint64_t last_reap = zfs_lbolt();
+	uint64_t last_release = zfs_lbolt();
 
 	CALLB_CPR_INIT(&cpr, &memory_monitor_lock, callb_generic_cpr, FTAG);
 
@@ -4381,23 +4382,25 @@ memory_monitor_thread()
 			  last_reap = zfs_lbolt();
 			}
 
-			// has it been a second?  check to release pressure
+			// has it been five seconds since we last released pressure?  check to release pressure
 			// don't release if we are waiting on PRESSURE_KMEM_AVAIL to work
-			if(zfs_lbolt() - last_reap >= hz) {
+			if((zfs_lbolt() - last_release) >= (5*hz)) {
 			  mutex_enter(&spl_os_pages_are_wanted_lock);
 			  if (!spl_os_pages_are_wanted && pressure_bytes_target &&
 			      !(pressure_bytes_signal & PRESSURE_KMEM_AVAIL)) {
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
-			    printf("SPL: MMT releasing pressure (was %llu), segkmem_total_mem_allocated=%llu vm_page_free_count = %u\n",
+			    printf("SPL: MMT releasing pressure (was %llu), segkmem_total_mem_allocated=%llu vm_page_free_count = %u pressure_bytes_signal = %lld\n",
 				   pressure_bytes_target,
 				   segkmem_total_mem_allocated,
-				   vm_page_free_count);
+				   vm_page_free_count,
+				   pressure_bytes_signal);
 			    mutex_enter(&pressure_bytes_signal_lock);
 			    pressure_bytes_signal = 0;
 			    mutex_exit(&pressure_bytes_signal_lock);
 			    mutex_enter(&pressure_bytes_target_lock);
 			    pressure_bytes_target = 0;
 			    mutex_exit(&pressure_bytes_target_lock);
+			    last_release = zfs_lbolt();
 			    cv_broadcast(&memory_monitor_thread_cv); // wake waiters up
 			  } else {
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
@@ -4405,7 +4408,7 @@ memory_monitor_thread()
 			}
 
 			// has it been a minute?  check 90% ceiling, reap if still pressure
-			if (zfs_lbolt() - last_reap >= (hz * 60)) {
+			if ((zfs_lbolt() - last_reap) >= (hz * 60)) {
 
 				uint64_t nintypct = total_memory * 90ULL / 100ULL;
 
@@ -4439,7 +4442,7 @@ memory_monitor_thread()
 			}
 
 			// has it been five minutes?  reap if the system has less than 20% real memory free
-			if (zfs_lbolt() - last_reap > (hz*300)) {
+			if ((zfs_lbolt() - last_reap) > (hz*300)) {
 			  uint32_t twentypct_real_pages = (uint32_t)((real_total_memory / 20ULL) / PAGESIZE);
 			  if(vm_page_free_count < twentypct_real_pages) {
 			    printf("SPL: MMT background 80%% real memory check, vm_page_free_wanted = %u, vm_page_free_count == %u, periodic reaping\n",
@@ -4456,7 +4459,7 @@ memory_monitor_thread()
 			// has it been an hour?  reap anyway
 			// reaping at frequencies higher than this takes longer and
 			// leads to worse fragmentation
-			if (zfs_lbolt() - last_reap > (hz*3600)) {
+			if ((zfs_lbolt() - last_reap) > (hz*3600)) {
 			  printf("SPL: MMT it's been an hour since the last reap, vm_page_free_count == %u\n",
 				 vm_page_free_count);
 			  mutex_enter(&reap_now_lock);
