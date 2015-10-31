@@ -3217,7 +3217,7 @@ kmem_avail(void)
 
       //  pressure and less than VM_PAGE_FREE_MIN headroom or a lot of pressure?
       if(fsp < VM_PAGE_FREE_MIN || pressure_delta > 256*1024*1024) {
-	printf("SPL: %s pr essure wants %lld bytes, headroom (%lu < %u)\n",
+	printf("SPL: %s pressure wants %lld bytes, headroom (%lu free vs %u ceiling)\n",
 	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN);
 	int64_t askbytes;
 	if(pressure_delta < 128*1024*1024) {
@@ -3233,7 +3233,7 @@ kmem_avail(void)
       // !spec
       // pressure and less than VM_PAGE_FREE_MIN headroom or a lot of pressure?
       if(vm_page_free_count < VM_PAGE_FREE_MIN || pressure_delta > 256*1024*1024) {
-	printf("SPL: %s pressure wants %lld bytes, and no-spec low memory headroom (%u < %u)\n",
+	printf("SPL: %s pressure wants %lld bytes, headroom (%u used vs %u ceiling)\n",
 	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN);
 	int64_t askbytes;
 	if(pressure_delta < 128*1024*1024) {
