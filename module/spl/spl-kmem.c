@@ -4392,25 +4392,20 @@ memory_monitor_thread()
 			// and if we do not want pages
 			if(zfs_lbolt() >= next_release) {
 			  next_release = zfs_lbolt() + (5*hz);
-			  mutex_enter(&pressure_bytes_signal_lock);
-			  mutex_enter(&pressure_bytes_target_lock);
 			  mutex_enter(&spl_os_pages_are_wanted_lock);
-			  if (!spl_os_pages_are_wanted && pressure_bytes_target &&
+			  if (!spl_os_pages_are_wanted &&
+			      pressure_bytes_target && pressure_bytes_target >= spl_memory_used() &&
 			      !(pressure_bytes_signal & PRESSURE_KMEM_AVAIL) &&
 			      vm_page_free_wanted == 0) {
-			    pressure_bytes_target = 0;
-			    pressure_bytes_signal = 0;
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
+			    mutex_enter(&pressure_bytes_target_lock);
+			    pressure_bytes_target = 0;
 			    mutex_exit(&pressure_bytes_target_lock);
-			    mutex_exit(&pressure_bytes_signal_lock);
 			    printf("SPL: MMT released pressure, pressure_bytes_signal = %lld\n",
 				   pressure_bytes_signal);
 			    mutex_enter(&pressure_bytes_signal_lock);
 			    pressure_bytes_signal = 0;
 			    mutex_exit(&pressure_bytes_signal_lock);
-			    mutex_enter(&pressure_bytes_target_lock);
-			    pressure_bytes_target = 0;
-			    mutex_exit(&pressure_bytes_target_lock);
 			  } else {
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
 			  }
