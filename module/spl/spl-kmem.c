@@ -3223,7 +3223,7 @@ kmem_avail(void)
 	if(pressure_delta < 128*1024*1024) {
 	  askbytes = MIN((8 * 1024 * 1024), pressure_delta);
 	} else {
-	  askbytes = pressure_bytes_target / 4;
+	  askbytes = pressure_delta / 4;
 	}
 	pressure_bytes_target += askbytes;
 	mutex_exit(&pressure_bytes_target_lock);
@@ -3239,7 +3239,7 @@ kmem_avail(void)
 	if(pressure_delta < 128*1024*1024) {
 	  askbytes = MIN((8 * 1024 * 1024), pressure_delta);
 	} else {
-	  askbytes = pressure_bytes_target / 4;
+	  askbytes = pressure_delta / 4;
 	}
 	pressure_bytes_target += askbytes;
 	mutex_exit(&pressure_bytes_target_lock);
