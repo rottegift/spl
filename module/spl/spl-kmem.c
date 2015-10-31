@@ -3170,8 +3170,8 @@ kmem_avail(void)
 //                             1 << (30 - PAGESHIFT))));
 #endif
 
-  if (pressure_bytes_signal & PRESSURE_KMEM_AVAIL) { // hello from MMT or kmem_num_pages_wanted
-    dprintf("SPL: %s: got pressure bytes signal\n", __func__);
+  if (pressure_bytes_signal & (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_MANUAL_PRESSURE)) {
+    // this is set by MMT or by kmem_numm_pages_wanted() or by sysctl simulate pressure
     int64_t retval;
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal &= ~PRESSURE_KMEM_AVAIL;
@@ -3183,14 +3183,14 @@ kmem_avail(void)
       retval = -1024*1024*LOW_MEMORY_MULT;
     }
     mutex_exit(&pressure_bytes_target_lock);
+    printf("SPL: %s got pressure_bytes_signal, returning %lld\n",
+	   __func__, retval);
     return (retval);
   }
 
   if (vm_page_free_wanted > 0) { // this is an emergency, react heavily
     // retval is negative, 32KiB * pages wanted by xnu
     int64_t retval = -((int64_t)vm_page_free_wanted * PAGE_SIZE * LOW_MEMORY_MULT);
-    printf("SPL: %s page_free_wanted %u, returning %lld\n",
-	   __func__, vm_page_free_wanted, retval);
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal |= PRESSURE_KMEM_NUM_PAGES_WANTED;
     mutex_exit(&pressure_bytes_signal_lock);
@@ -3201,6 +3201,8 @@ kmem_avail(void)
       pressure_bytes_target = spl_memory_used() + retval; // retval is negative
     }
     mutex_exit(&pressure_bytes_target_lock);
+    printf("SPL: %s page_free_wanted %u, returning %lld\n",
+	   __func__, vm_page_free_wanted, retval);
     return (retval);
   }
 
@@ -4389,15 +4391,19 @@ memory_monitor_thread()
 			// periodically release pressure if PRESSURE_KMEM_AVAIL is not set
 			// and if we do not want pages
 			if(zfs_lbolt() >= next_release) {
+			  next_release = zfs_lbolt() + (5*hz);
+			  mutex_enter(&pressure_bytes_signal_lock);
+			  mutex_enter(&pressure_bytes_target_lock);
 			  mutex_enter(&spl_os_pages_are_wanted_lock);
 			  if (!spl_os_pages_are_wanted && pressure_bytes_target &&
 			      !(pressure_bytes_signal & PRESSURE_KMEM_AVAIL) &&
 			      vm_page_free_wanted == 0) {
+			    pressure_bytes_target = 0;
+			    pressure_bytes_signal = 0;
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
-			    printf("SPL: MMT releasing pressure (was %llu), segkmem_total_mem_allocated=%llu vm_page_free_count = %u pressure_bytes_signal = %lld\n",
-				   pressure_bytes_target,
-				   segkmem_total_mem_allocated,
-				   vm_page_free_count,
+			    mutex_exit(&pressure_bytes_target_lock);
+			    mutex_exit(&pressure_bytes_signal_lock);
+			    printf("SPL: MMT released pressure, pressure_bytes_signal = %lld\n",
 				   pressure_bytes_signal);
 			    mutex_enter(&pressure_bytes_signal_lock);
 			    pressure_bytes_signal = 0;
@@ -4405,11 +4411,9 @@ memory_monitor_thread()
 			    mutex_enter(&pressure_bytes_target_lock);
 			    pressure_bytes_target = 0;
 			    mutex_exit(&pressure_bytes_target_lock);
-			    cv_broadcast(&memory_monitor_thread_cv); // wake waiters up
 			  } else {
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
 			  }
-			  next_release = zfs_lbolt() + (5*hz);
 			}
 
 			// has it been a minute?  check 90% ceiling, reap if still pressure
@@ -4535,9 +4539,9 @@ spl_kstat_update(kstat_t *ksp, int rw)
 	  if(ks->spl_vm_page_free_min_min.value.ui64 != (uint64_t)vm_page_free_min_min) {
 	    printf("SPL: vm_page_free_min_min was %u, now %u, headroom now %u\n",
 		   vm_page_free_min_min,
-		   (uint32_t)ks->spl_vm_page_free_min_min.value.ui32,
-		   MAX(vm_page_free_min*vm_page_free_min_multiplier, (uint32_t)ks->spl_vm_page_free_min_min.value.ui32));
-	    vm_page_free_min_min = (uint32_t)ks->spl_vm_page_free_min_min.value.ui32;
+		   (uint32_t)ks->spl_vm_page_free_min_min.value.ui64,
+		   MAX(vm_page_free_min*vm_page_free_min_multiplier, (uint32_t)ks->spl_vm_page_free_min_min.value.ui64));
+	    vm_page_free_min_min = (uint32_t)ks->spl_vm_page_free_min_min.value.ui64;
 	  }
 
 		if (ks->spl_simulate_pressure.value.ui64 != pressure_bytes_target) {
@@ -6109,6 +6113,7 @@ kmem_num_pages_wanted(void)
 	  return vm_page_free_min;
 	}
 
+	// default: 
 	return(0);
 }
 
