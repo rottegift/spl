@@ -4382,10 +4382,11 @@ memory_monitor_thread()
 			}
 
 			// has it been a second?  check to release pressure
-
+			// don't release if we are waiting on PRESSURE_KMEM_AVAIL to work
 			if(zfs_lbolt() - last_reap >= hz) {
 			  mutex_enter(&spl_os_pages_are_wanted_lock);
-			  if (!spl_os_pages_are_wanted && pressure_bytes_target) {
+			  if (!spl_os_pages_are_wanted && pressure_bytes_target &&
+			      !(pressure_bytes_signal & PRESSURE_KMEM_AVAIL)) {
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
 			    printf("SPL: MMT releasing pressure (was %llu), segkmem_total_mem_allocated=%llu vm_page_free_count = %u\n",
 				   pressure_bytes_target,
