@@ -3215,10 +3215,9 @@ kmem_avail(void)
     if(kmem_avail_use_spec) {
       size_t fsp = vm_page_free_count + vm_page_speculative_count;
 
-      //  pressure and less than VM_PAGE_FREE_MIN headroom?
-      //  deflate by 8MiB or pressure_bytes_delta, whichever is smaller
-      if(fsp < VM_PAGE_FREE_MIN) {
-	printf("SPL: %s pressure wants %lld bytes, and low memory headroom (%lu < %u)\n",
+      //  pressure and less than VM_PAGE_FREE_MIN headroom or a lot of pressure?
+      if(fsp < VM_PAGE_FREE_MIN || pressure_delta > 256*1024*1024) {
+	printf("SPL: %s pr essure wants %lld bytes, headroom (%lu < %u)\n",
 	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN);
 	int64_t askbytes;
 	if(pressure_delta < 128*1024*1024) {
@@ -3232,9 +3231,8 @@ kmem_avail(void)
       }
     } else {
       // !spec
-      // pressure and less than VM_PAGE_FREE_MIN headroom?
-      // deflate by 8MiB or pressure_bytes_delta, whichever is smaller
-      if(vm_page_free_count < VM_PAGE_FREE_MIN) {
+      // pressure and less than VM_PAGE_FREE_MIN headroom or a lot of pressure?
+      if(vm_page_free_count < VM_PAGE_FREE_MIN || pressure_delta > 256*1024*1024) {
 	printf("SPL: %s pressure wants %lld bytes, and no-spec low memory headroom (%u < %u)\n",
 	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN);
 	int64_t askbytes;
@@ -4225,7 +4223,7 @@ spl_mach_pressure_monitor_thread()
     spl_stats.spl_spl_mach_pressure_monitor_wake_count.value.ui64++;
 
     if(kr != KERN_SUCCESS) {
-      dprintf("SPL: %s: mach_vm_pressure_monitor returned returned non-success\n", __func__);
+      printf("SPL: %s: mach_vm_pressure_monitor returned returned non-success\n", __func__);
     } else {
       if(os_num_pages_wanted < 1) {
 	mutex_enter(&spl_os_pages_are_wanted_lock);
