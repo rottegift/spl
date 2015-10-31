@@ -4293,7 +4293,7 @@ memory_monitor_thread()
   callb_cpr_t cpr;
 
 	uint64_t last_reap = zfs_lbolt();
-	uint64_t last_release = zfs_lbolt();
+	uint64_t next_release = zfs_lbolt() + (5*hz);
 
 	CALLB_CPR_INIT(&cpr, &memory_monitor_lock, callb_generic_cpr, FTAG);
 
@@ -4316,11 +4316,13 @@ memory_monitor_thread()
 		      pressure_bytes_signal |= (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_NUM_PAGES_WANTED);
 		    }
 		    mutex_exit(&pressure_bytes_signal_lock);
+		    next_release = zfs_lbolt() + (60*hz); // give it time to pass through the arc
 		  } else {
 		    mutex_exit(&pressure_bytes_signal_lock);
 		  }
 
 			if(vm_page_free_wanted > 0) {
+			  next_release = zfs_lbolt() + (30*hz);
 			  // signal kmem_avail() and kmem_num_pages_wanted(), as this is an emergency
 			  // but we might have been cv_signalled right back from each of them
 			  mutex_enter(&pressure_bytes_target_lock);
@@ -4364,6 +4366,7 @@ memory_monitor_thread()
 			  cv_signal(&reap_thread_cv);
 			  last_reap = zfs_lbolt();
 			}
+
 			// !spl_minimal_physmem_p_logic()  happens a lot with delta 0 and 1
 			// so wait until delta is at least 2 (which makes it happen infrequently)
 			if(!spl_minimal_physmem_p_logic() && (zfs_lbolt() - last_reap > 1)) {
@@ -4380,14 +4383,16 @@ memory_monitor_thread()
 			  mutex_exit(&reap_now_lock);
 			  cv_signal(&reap_thread_cv);
 			  last_reap = zfs_lbolt();
+			  next_release = last_reap + (5*hz);
 			}
 
-			// has it been five seconds since we last released pressure?  check to release pressure
-			// don't release if we are waiting on PRESSURE_KMEM_AVAIL to work
-			if((zfs_lbolt() - last_release) >= (5*hz)) {
+			// periodically release pressure if PRESSURE_KMEM_AVAIL is not set
+			// and if we do not want pages
+			if(zfs_lbolt() >= next_release) {
 			  mutex_enter(&spl_os_pages_are_wanted_lock);
 			  if (!spl_os_pages_are_wanted && pressure_bytes_target &&
-			      !(pressure_bytes_signal & PRESSURE_KMEM_AVAIL)) {
+			      !(pressure_bytes_signal & PRESSURE_KMEM_AVAIL) &&
+			      vm_page_free_wanted == 0) {
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
 			    printf("SPL: MMT releasing pressure (was %llu), segkmem_total_mem_allocated=%llu vm_page_free_count = %u pressure_bytes_signal = %lld\n",
 				   pressure_bytes_target,
@@ -4400,11 +4405,11 @@ memory_monitor_thread()
 			    mutex_enter(&pressure_bytes_target_lock);
 			    pressure_bytes_target = 0;
 			    mutex_exit(&pressure_bytes_target_lock);
-			    last_release = zfs_lbolt();
 			    cv_broadcast(&memory_monitor_thread_cv); // wake waiters up
 			  } else {
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
 			  }
+			  next_release = zfs_lbolt() + (5*hz);
 			}
 
 			// has it been a minute?  check 90% ceiling, reap if still pressure
@@ -4428,6 +4433,7 @@ memory_monitor_thread()
 					mutex_exit(&reap_now_lock);
 					cv_signal(&reap_thread_cv);
 					last_reap = zfs_lbolt();
+					next_release = last_reap + (5*hz);
 				} else if(pressure_bytes_target > 0 && pressure_bytes_target < spl_memory_used()) {
 				  printf("SPL: MMT pressure based periodic reaping, pressure_bytes_target == %llu, vm_page_free_count == %u, vm_page_speculative_count == %u\n",
 					 pressure_bytes_target,
@@ -4438,6 +4444,7 @@ memory_monitor_thread()
 				  mutex_exit(&reap_now_lock);
 				  cv_signal(&reap_thread_cv);
 				  last_reap = zfs_lbolt();
+				  next_release = last_reap + (5*hz);
 				}
 			}
 
@@ -4452,6 +4459,7 @@ memory_monitor_thread()
 			    reap_now = 1;
 			    mutex_exit(&reap_now_lock);
 			    last_reap = zfs_lbolt();
+			    next_release = last_reap + (5*hz);
 			    cv_broadcast(&memory_monitor_thread_cv);
 			  }
 			}
@@ -4466,6 +4474,7 @@ memory_monitor_thread()
 			  reap_now = 1;
 			  mutex_exit(&reap_now_lock);
 			  last_reap = zfs_lbolt();
+			  next_release = last_reap + (5*hz);
 			  cv_broadcast(&memory_monitor_thread_cv);
 			}
 		} //! shutting down
