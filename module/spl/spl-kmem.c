@@ -3172,17 +3172,18 @@ kmem_avail(void)
 
   if (pressure_bytes_signal & PRESSURE_KMEM_AVAIL) { // hello from MMT or kmem_num_pages_wanted
     dprintf("SPL: %s: got pressure bytes signal\n", __func__);
+    int64_t retval;
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal &= ~PRESSURE_KMEM_AVAIL;
     mutex_exit(&pressure_bytes_signal_lock);
     mutex_enter(&pressure_bytes_target_lock);
-    if(pressure_bytes_target) {
-      pressure_bytes_target -= 1024*1024*LOW_MEMORY_MULT; // pressure for later
+    if(pressure_bytes_target && pressure_bytes_target < spl_memory_used()) {
+      retval = pressure_bytes_target - spl_memory_used(); // automatically negative
     } else {
-      pressure_bytes_target = spl_memory_used() - 1024*1024*LOW_MEMORY_MULT;
+      retval = -1024*1024*LOW_MEMORY_MULT;
     }
     mutex_exit(&pressure_bytes_target_lock);
-    return (-1024*1024*LOW_MEMORY_MULT); // get bunch of memory back from arc (32MiB)
+    return (retval);
   }
 
   if (vm_page_free_wanted > 0) { // this is an emergency, react heavily
@@ -4321,6 +4322,14 @@ memory_monitor_thread()
 			if(vm_page_free_wanted > 0) {
 			  // signal kmem_avail() and kmem_num_pages_wanted(), as this is an emergency
 			  // but we might have been cv_signalled right back from each of them
+			  mutex_enter(&pressure_bytes_target_lock);
+			  int64_t t = ((int64_t)vm_page_free_wanted * PAGESIZE * LOW_MEMORY_MULT);
+			  if(pressure_bytes_target && pressure_bytes_target < spl_memory_used()) {
+			    pressure_bytes_target -= t;
+			  } else {
+			    pressure_bytes_target = spl_memory_used() - t;
+			  }
+			  mutex_exit(&pressure_bytes_target_lock);
 			  mutex_enter(&pressure_bytes_signal_lock);
 			  if(pressure_bytes_signal == 0) {
 			    pressure_bytes_signal |=
