@@ -3217,7 +3217,12 @@ kmem_avail(void)
       if(fsp < VM_PAGE_FREE_MIN) {
 	printf("SPL: %s pressure wants %lld bytes, and low memory headroom (%lu < %u)\n",
 	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN);
-	int64_t askbytes = MIN((8 * 1024 * 1024), pressure_delta);
+	int64_t askbytes;
+	if(pressure_delta < 128*1024*1024) {
+	  askbytes = MIN((8 * 1024 * 1024), pressure_delta);
+	} else {
+	  askbytes = pressure_bytes_target / 4;
+	}
 	pressure_bytes_target += askbytes;
 	mutex_exit(&pressure_bytes_target_lock);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
@@ -3229,7 +3234,12 @@ kmem_avail(void)
       if(vm_page_free_count < VM_PAGE_FREE_MIN) {
 	printf("SPL: %s pressure wants %lld bytes, and no-spec low memory headroom (%u < %u)\n",
 	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN);
-	int64_t askbytes = MIN((8 * 1024 * 1024), pressure_delta);
+	int64_t askbytes;
+	if(pressure_delta < 128*1024*1024) {
+	  askbytes = MIN((8 * 1024 * 1024), pressure_delta);
+	} else {
+	  askbytes = pressure_bytes_target / 4;
+	}
 	pressure_bytes_target += askbytes;
 	mutex_exit(&pressure_bytes_target_lock);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
@@ -4144,8 +4154,8 @@ reap_thread()
     if(reap_now && om > previous_segkmem_total_mem_allocated) {
       reap_now = 0;
       mutex_exit(&reap_now_lock);
-      printf("SPL: reap thread, segkmem_total_mem_allocated delta %llu after %llu seconds\n",
-	     om - previous_segkmem_total_mem_allocated, zfs_lbolt() - last_reap);
+      printf("SPL: reap thread, segkmem_total_mem_allocated delta %llu since %llu seconds ago\n",
+	     om - previous_segkmem_total_mem_allocated, (zfs_lbolt() - last_reap)/hz);
       previous_segkmem_total_mem_allocated = om;
       last_reap = zfs_lbolt();
       kmem_reap();
@@ -4155,7 +4165,7 @@ reap_thread()
       reap_now = 0;
       mutex_exit(&reap_now_lock);
       printf("SPL: reap thread, last reap %llu seconds ago\n",
-	     zfs_lbolt() - last_reap);
+	     (zfs_lbolt() - last_reap)/hz);
       last_reap = zfs_lbolt();
       previous_segkmem_total_mem_allocated = segkmem_total_mem_allocated;
       kmem_reap();
