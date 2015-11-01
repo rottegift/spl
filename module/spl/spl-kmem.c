@@ -3172,7 +3172,7 @@ spl_adjust_pressure(int64_t amount)
 	   __func__, p, amount, pressure_bytes_target);
     return(pressure_bytes_target);
   } else if((p + amount) > spl_memory_used())
-    pressure_bytes_target = spl_memory_used();
+    pressure_bytes_target = 0;
   else
     pressure_bytes_target += amount;
   mutex_exit(&pressure_bytes_target_lock);
