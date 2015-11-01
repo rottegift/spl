@@ -3176,7 +3176,7 @@ spl_adjust_pressure(int64_t amount)
   else
     pressure_bytes_target += amount;
   mutex_exit(&pressure_bytes_target_lock);
-  dprintf("SPL: %s(%lld), pressure_bytes_target now %lld\n",
+  printf("SPL: %s(%lld), pressure_bytes_target now %lld\n",
 	 __func__, amount, pressure_bytes_target);
   return(pressure_bytes_target);
 }
@@ -3271,10 +3271,8 @@ kmem_avail(void)
 	return(-askbytes); // trigger arc_reclaim and/or throttle
       }
     }
-    // pressure but plenty of headroom?
-    // let arc grow by a megabyte while MMT tries to reduce pressure
+    // little pressure but plenty of headroom?
     mutex_exit(&pressure_bytes_target_lock);
-    spl_adjust_pressure(-1024*1024);
     return(1024*1024);
   }
 
@@ -4435,10 +4433,11 @@ memory_monitor_thread()
 			      vm_page_free_wanted == 0) {
 			    mutex_exit(&spl_os_pages_are_wanted_lock);
 			    mutex_enter(&pressure_bytes_target_lock);
+			    uint64_t op = pressure_bytes_target;
 			    pressure_bytes_target = 0;
 			    mutex_exit(&pressure_bytes_target_lock);
-			    printf("SPL: MMT released pressure, pressure_bytes_signal = %llu\n",
-				   pressure_bytes_signal);
+			    printf("SPL: MMT released pressure (was %lld), pressure_bytes_signal = %llu\n",
+				   op, pressure_bytes_signal);
 			    mutex_enter(&pressure_bytes_signal_lock);
 			    pressure_bytes_signal = 0;
 			    mutex_exit(&pressure_bytes_signal_lock);
@@ -4471,10 +4470,12 @@ memory_monitor_thread()
 					last_reap = zfs_lbolt();
 					next_release = last_reap + (5*hz);
 				} else if(pressure_bytes_target > 0 && pressure_bytes_target < spl_memory_used()) {
-				  printf("SPL: MMT pressure based periodic reaping, pressure_bytes_target == %llu, vm_page_free_count == %u, vm_page_speculative_count == %u\n",
-					 pressure_bytes_target,
+				  int64_t delta = spl_memory_used() - pressure_bytes_delta;
+				  printf("SPL: MMT pressure based periodic reaping, pressure_bytes delta == %lld, vm_page_free_count == %u, vm_page_speculative_count == %u, pressure_bytes_signal %lld\n",
+					 delta,
 					 vm_page_free_count,
-					 vm_page_speculative_count);
+					 vm_page_speculative_count,
+					 pressure_bytes_signal);
 				  mutex_enter(&reap_now_lock);
 				  reap_now = 1;
 				  mutex_exit(&reap_now_lock);
