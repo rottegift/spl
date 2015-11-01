@@ -548,7 +548,7 @@ static spl_stats_t spl_stats = {
     {"reap_thread_reaped_count", KSTAT_DATA_UINT64},
     {"reap_thread_miss", KSTAT_DATA_UINT64},
     {"spl_mach_pressure_wake_count", KSTAT_DATA_UINT64},
-    {"simulate_pressure", KSTAT_DATA_UINT64},
+    {"simulate_pressure", KSTAT_DATA_INT64},
     {"vm_page_free_multiplier", KSTAT_DATA_UINT64},
     {"vm_page_free_min_min", KSTAT_DATA_UINT64},
     {"kmem_avail_use_spec", KSTAT_DATA_INT64},
@@ -3183,7 +3183,7 @@ kmem_avail(void)
 #endif
 
   if (pressure_bytes_signal & (PRESSURE_KMEM_AVAIL | PRESSURE_KMEM_MANUAL_PRESSURE)) {
-    // this is set by MMT or by kmem_numm_pages_wanted() or by sysctl simulate pressure
+    // this is set by MMT or by kmem_num_pages_wanted() or by sysctl simulate pressure
     int64_t retval;
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal &= ~PRESSURE_KMEM_AVAIL;
@@ -4539,25 +4539,25 @@ spl_kstat_update(kstat_t *ksp, int rw)
 	    vm_page_free_min_min = (uint32_t)ks->spl_vm_page_free_min_min.value.ui64;
 	  }
 
-		if (ks->spl_simulate_pressure.value.ui64 != pressure_bytes_target) {
-		  printf("SPL: pressure_bytes_target_sysctl %llu, previous pressure %llu, spl_memory_used() %llu\n",
-			 ks->spl_simulate_pressure.value.ui64*1024*1024,
+		if (ks->spl_simulate_pressure.value.i64 != pressure_bytes_target) {
+		  printf("SPL: pressure_bytes_target_sysctl %lld, previous pressure %llu, spl_memory_used() %llu\n",
+			 ks->spl_simulate_pressure.value.i64*1024*1024,
 			 pressure_bytes_target,
 			 spl_memory_used());
 		        mutex_enter(&pressure_bytes_target_lock);
 			if(!pressure_bytes_target || pressure_bytes_target >= spl_memory_used()) {
 			  pressure_bytes_target = spl_memory_used() -
-			    (ks->spl_simulate_pressure.value.ui64 * 1024 * 1024);
+			    (ks->spl_simulate_pressure.value.i64 * 1024 * 1024);
 			} else {
 			  pressure_bytes_target -=
-			    (ks->spl_simulate_pressure.value.ui64 * 1024 * 1024);
+			    (ks->spl_simulate_pressure.value.i64 * 1024 * 1024);
 			}
 			mutex_exit(&pressure_bytes_target_lock);
 			mutex_enter(&pressure_bytes_signal_lock);
 			pressure_bytes_signal |= PRESSURE_KMEM_MANUAL_PRESSURE;
 			mutex_exit(&pressure_bytes_signal_lock);
 			cv_signal(&memory_monitor_thread_cv);
-			if (ks->spl_simulate_pressure.value.ui64 == 666) {
+			if (ks->spl_simulate_pressure.value.i64 == 666) {
 			  printf("SPL: simulate pressure 666, dumping stack\n");
 			  spl_backtrace("SPL: simulate_pressure 666");
 			}
@@ -4567,7 +4567,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_active_threads.value.ui64 = zfs_threads;
 		ks->spl_active_mutex.value.ui64 = zfs_active_mutex;
 		ks->spl_active_rwlock.value.ui64 = zfs_active_rwlock;
-		ks->spl_simulate_pressure.value.ui64 = pressure_bytes_target;
+		ks->spl_simulate_pressure.value.i64 = (int64_t)pressure_bytes_target;
 		ks->spl_vm_page_free_min_multiplier.value.ui64 = (uint64_t)vm_page_free_min_multiplier;
 		ks->spl_vm_page_free_min_min.value.ui64 = (uint64_t)vm_page_free_min_min;
 		ks->spl_kmem_avail_use_spec.value.i64 = (int64_t)kmem_avail_use_spec;
