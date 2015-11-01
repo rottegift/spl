@@ -3213,6 +3213,7 @@ kmem_avail(void)
     printf("SPL: %s got pressure_bytes_signal, returning %lld\n",
 	   __func__, retval);
     cv_signal(&memory_monitor_thread_cv);
+    spl_adjust_pressure(-retval);
     return (retval);
   }
 
@@ -3225,6 +3226,7 @@ kmem_avail(void)
     printf("SPL: %s page_free_wanted %u, returning %lld\n",
 	   __func__, vm_page_free_wanted, retval);
     cv_signal(&memory_monitor_thread_cv);
+    spl_adjust_pressure(-retval);
     return (retval);
   }
 
@@ -3247,6 +3249,7 @@ kmem_avail(void)
 	mutex_exit(&pressure_bytes_target_lock);
 	printf("SPL: %s pressure wanted %lld bytes, headroom %lu (ceiling %u), returning %lld\n",
 	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN, -askbytes);
+	spl_adjust_pressure(askbytes);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
       }
     } else {
@@ -3262,16 +3265,19 @@ kmem_avail(void)
 	mutex_exit(&pressure_bytes_target_lock);
 	printf("SPL: %s pressure wanted %lld bytes, headroom %u (%u ceililng), returning %lld\n",
 	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN, -askbytes);
+	spl_adjust_pressure(askbytes);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
       }
     }
     // pressure but plenty of headroom?
     // let arc grow by a megabyte while MMT tries to reduce pressure
     mutex_exit(&pressure_bytes_target_lock);
+    spl_adjust_pressure(-1024*1024);
     return(1024*1024);
   }
 
   // no pressure
+  // so no spl_adjust_pressure(-[value_of_return]) below
   if(kmem_avail_use_spec) {
     size_t fsp = vm_page_free_count + vm_page_speculative_count;
     // do we have lots of headroom?
