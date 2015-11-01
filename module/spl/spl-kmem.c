@@ -3167,7 +3167,7 @@ spl_adjust_pressure(int64_t amount)
   int64_t used = spl_memory_used();
 
   if(newp >= used || newp <= 0) {
-    printf("SPL: warning: %s(%lld) newp %lld used %lld, will zero pressure_bytes_target\n",
+    dprintf("SPL: warning: %s(%lld) newp %lld used %lld, will zero pressure_bytes_target\n",
 	   __func__, amount, newp, used);
     pressure_bytes_target = 0;
   } else if(delta < 0) {
@@ -3179,21 +3179,21 @@ spl_adjust_pressure(int64_t amount)
       printf("SPL: ERROR: %s(%lld) results in huge delta %lld\n", __func__, amount, delta);
       pressure_bytes_target = 0;
     } else if(delta > -8*1024*1024) {
-      printf("SPL: warning: %s(%lld), dropping small negative delta(%lld)\n",
+      dprintf("SPL: warning: %s(%lld), dropping small negative delta(%lld)\n",
 	     __func__, amount, delta);
     } else {
-      printf("SPL: OK: %s(%lld), pressure now %lld\n",
+      dprintf("SPL: OK: %s(%lld), pressure now %lld\n",
 	     __func__, amount, newp);
       pressure_bytes_target = newp;
     }
   } else if(delta > 0) {
     // 0 < newp < used
     if(newp < 64*1024*1024) {
-      printf("SPL: warning: %s(%lld) small positive newp %lld, setting pressure_bytes_target to zero\n",
+      dprintf("SPL: warning: %s(%lld) small positive newp %lld, setting pressure_bytes_target to zero\n",
 	     __func__, amount, newp);
       pressure_bytes_target = 0;
     } else {
-      printf("SPL: OK: %s(%lld), pressure now %lld\n",
+      dprintf("SPL: OK: %s(%lld), pressure now %lld\n",
 	     __func__, amount, newp);
       pressure_bytes_target = newp;
     }
