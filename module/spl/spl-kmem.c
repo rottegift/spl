@@ -3214,11 +3214,8 @@ kmem_avail(void)
 
     if(kmem_avail_use_spec) {
       size_t fsp = vm_page_free_count + vm_page_speculative_count;
-
       //  pressure and less than VM_PAGE_FREE_MIN headroom or a lot of pressure?
-      if(fsp < VM_PAGE_FREE_MIN || pressure_delta > 256*1024*1024) {
-	printf("SPL: %s pressure wants %lld bytes, headroom (%lu free vs %u ceiling)\n",
-	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN);
+      if(fsp < VM_PAGE_FREE_MIN || pressure_delta > 128*1024*1024) {
 	int64_t askbytes;
 	if(pressure_delta < 128*1024*1024) {
 	  askbytes = MIN((8 * 1024 * 1024), pressure_delta);
@@ -3227,14 +3224,14 @@ kmem_avail(void)
 	}
 	pressure_bytes_target += askbytes;
 	mutex_exit(&pressure_bytes_target_lock);
+	printf("SPL: %s pressure wanted %lld bytes, headroom %lu (ceiling %u), returning %lld\n",
+	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN, -askbytes);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
       }
     } else {
       // !spec
       // pressure and less than VM_PAGE_FREE_MIN headroom or a lot of pressure?
-      if(vm_page_free_count < VM_PAGE_FREE_MIN || pressure_delta > 256*1024*1024) {
-	printf("SPL: %s pressure wants %lld bytes, headroom (%u used vs %u ceiling)\n",
-	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN);
+      if(vm_page_free_count < VM_PAGE_FREE_MIN || pressure_delta > 128*1024*1024) {
 	int64_t askbytes;
 	if(pressure_delta < 128*1024*1024) {
 	  askbytes = MIN((8 * 1024 * 1024), pressure_delta);
@@ -3243,6 +3240,8 @@ kmem_avail(void)
 	}
 	pressure_bytes_target += askbytes;
 	mutex_exit(&pressure_bytes_target_lock);
+	printf("SPL: %s pressure wanted %lld bytes, headroom %u (%u ceililng), returning %lld\n",
+	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN, -askbytes);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
       }
     }
