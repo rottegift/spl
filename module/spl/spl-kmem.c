@@ -3171,7 +3171,7 @@ spl_adjust_pressure(int64_t amount)
     printf("SPL: %s underflow - pressure_bytes_target was %llu, amount %lld, now %llu\n",
 	   __func__, p, amount, pressure_bytes_target);
     return(pressure_bytes_target);
-  } else if((p + amount) > spl_memory_used())
+  } else if((p + amount) >= spl_memory_used())
     pressure_bytes_target = 0;
   else
     pressure_bytes_target += amount;
@@ -4334,12 +4334,12 @@ memory_monitor_thread()
 		if (!shutting_down) {
 
 		  mutex_enter(&pressure_bytes_target_lock);
-		  if(pressure_bytes_target > spl_memory_used()) {
+		  if(pressure_bytes_target >= spl_memory_used()) {
 		    uint64_t s = spl_memory_used();
 		    uint64_t o = pressure_bytes_target;
 		    pressure_bytes_target = 0;
 		    mutex_exit(&pressure_bytes_target_lock);
-		    printf("SPL: MMT: pressure_bytes_target %llu > spl_memory_used() %llu\n",
+		    printf("SPL: MMT: pressure_bytes_target %llu >= spl_memory_used() %llu\n",
 			   o, s);
 		  } else {
 		    mutex_exit(&pressure_bytes_target_lock);
