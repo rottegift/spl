@@ -3213,7 +3213,7 @@ kmem_avail(void)
     printf("SPL: %s got pressure_bytes_signal, returning %lld\n",
 	   __func__, retval);
     cv_signal(&memory_monitor_thread_cv);
-    spl_adjust_pressure(-retval);
+    //spl_adjust_pressure(-retval);
     return (retval);
   }
 
