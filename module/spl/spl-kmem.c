@@ -3159,7 +3159,7 @@ int64_t
 spl_adjust_pressure(int64_t amount)
 {
   mutex_enter(&pressure_bytes_target_lock);
-  pressure_bytes_signal += amount;
+  pressure_bytes_target += amount;
   mutex_exit(&pressure_bytes_target_lock);
   dprintf("SPL: %s(%lld), pressure_bytes_target now %lld\n",
 	 __func__, amount, pressure_bytes_target);
