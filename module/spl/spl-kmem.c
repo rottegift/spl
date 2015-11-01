@@ -3154,6 +3154,18 @@ spl_memory_used()
   return(/*real_*/total_memory - f);
 }
 
+// callback from arc to ack kmem_avail()'s signal
+int64_t
+spl_adjust_pressure(int64_t amount)
+{
+  mutex_enter(&pressure_bytes_target_lock);
+  pressure_bytes_signal += amount;
+  mutex_exit(&pressure_bytes_target_lock);
+  printf("SPL: %s(%lld), pressure_bytes_target now %lld\n",
+	 __func__, amount, pressure_bytes_target);
+  return(pressure_bytes_target);
+}
+
 /*
  * Return an estimate of currently available kernel heap memory.
  * On 32-bit systems, physical memory may exceed virtual memory,
@@ -3194,13 +3206,6 @@ kmem_avail(void)
     mutex_enter(&pressure_bytes_signal_lock);
     pressure_bytes_signal |= PRESSURE_KMEM_NUM_PAGES_WANTED;
     mutex_exit(&pressure_bytes_signal_lock);
-    mutex_enter(&pressure_bytes_target_lock);
-    if(pressure_bytes_target) {
-      pressure_bytes_target += retval;  // retval is negative
-    } else {
-      pressure_bytes_target = spl_memory_used() + retval; // retval is negative
-    }
-    mutex_exit(&pressure_bytes_target_lock);
     printf("SPL: %s page_free_wanted %u, returning %lld\n",
 	   __func__, vm_page_free_wanted, retval);
     return (retval);
@@ -3222,7 +3227,6 @@ kmem_avail(void)
 	} else {
 	  askbytes = pressure_delta / 4;
 	}
-	pressure_bytes_target += askbytes;
 	mutex_exit(&pressure_bytes_target_lock);
 	printf("SPL: %s pressure wanted %lld bytes, headroom %lu (ceiling %u), returning %lld\n",
 	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN, -askbytes);
@@ -3238,14 +3242,12 @@ kmem_avail(void)
 	} else {
 	  askbytes = pressure_delta / 4;
 	}
-	pressure_bytes_target += askbytes;
 	mutex_exit(&pressure_bytes_target_lock);
 	printf("SPL: %s pressure wanted %lld bytes, headroom %u (%u ceililng), returning %lld\n",
 	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN, -askbytes);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
       }
     }
-
     // pressure but plenty of headroom?
     // let arc grow by a megabyte while MMT tries to reduce pressure
     mutex_exit(&pressure_bytes_target_lock);
