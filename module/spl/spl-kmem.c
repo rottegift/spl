@@ -4638,8 +4638,12 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_kmem_avail.value.i64 = kmem_avail();
 		ks->spl_kmem_used.value.ui64 = kmem_used();
 		ks->spl_spl_memory_used.value.ui64 = spl_memory_used();
-		ks->spl_pressure_differential.value.i64 = \
-		  (int64_t)spl_memory_used() - (int64_t)pressure_bytes_target;
+		if(pressure_bytes_target && pressure_bytes_target != spl_memory_used()) {
+		  ks->spl_pressure_differential.value.i64 =
+		    (int64_t)spl_memory_used - (int64_t)pressure_bytes_target;
+		} else {
+		  ks->spl_pressure_differential.value.i64 = 0;
+		}
 	}
 
 	return (0);
