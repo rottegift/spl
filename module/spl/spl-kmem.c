@@ -536,6 +536,7 @@ typedef struct spl_stats {
   kstat_named_t spl_kmem_avail;
   kstat_named_t spl_kmem_used;
   kstat_named_t spl_spl_memory_used;
+  kstat_named_t spl_pressure_differential;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -556,6 +557,7 @@ static spl_stats_t spl_stats = {
     {"kmem_avail", KSTAT_DATA_INT64},
     {"kmem_used", KSTAT_DATA_UINT64},
     {"spl_memory_used", KSTAT_DATA_UINT64},
+    {"spl_pressure_differential", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -3197,6 +3199,7 @@ kmem_avail(void)
     mutex_exit(&pressure_bytes_target_lock);
     printf("SPL: %s got pressure_bytes_signal, returning %lld\n",
 	   __func__, retval);
+    cv_signal(&memory_monitor_thread_cv);
     return (retval);
   }
 
@@ -3208,6 +3211,7 @@ kmem_avail(void)
     mutex_exit(&pressure_bytes_signal_lock);
     printf("SPL: %s page_free_wanted %u, returning %lld\n",
 	   __func__, vm_page_free_wanted, retval);
+    cv_signal(&memory_monitor_thread_cv);
     return (retval);
   }
 
@@ -4575,6 +4579,8 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_kmem_avail.value.i64 = kmem_avail();
 		ks->spl_kmem_used.value.ui64 = kmem_used();
 		ks->spl_spl_memory_used.value.ui64 = spl_memory_used();
+		ks->spl_pressure_differential.value.i64 = \
+		  (int64_t)spl_memory_used() - (int64_t)pressure_bytes_target;
 	}
 
 	return (0);
