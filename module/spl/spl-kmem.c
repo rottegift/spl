@@ -3164,8 +3164,8 @@ spl_adjust_pressure(int64_t amount)
   int64_t p = pressure_bytes_target;
   if((p + amount) < 0)
     pressure_bytes_target = 1;
-  else if((p + amount) > spl_memory_avail())
-    pressure_bytes_target = spl_memory_avail();
+  else if((p + amount) > spl_memory_used())
+    pressure_bytes_target = spl_memory_used();
   else
     pressure_bytes_target += amount;
   mutex_exit(&pressure_bytes_target_lock);
@@ -4319,6 +4319,18 @@ memory_monitor_thread()
 		spl_stats.spl_monitor_thread_wake_count.value.ui64++;
 
 		if (!shutting_down) {
+
+		  mutex_enter(&pressure_bytes_target_lock);
+		  if(pressure_bytes_target > spl_memory_used()) {
+		    uint64_t s = spl_memory_used();
+		    uint64_t o = pressure_bytes_target;
+		    pressure_bytes_target = 0;
+		    mutex_exit(&pressure_bytes_target_lock);
+		    printf("SPL: MMT: pressure_bytes_target %llu > spl_memory_used() %llu\n",
+			   o, s);
+		  } else {
+		    mutex_exit(&pressure_bytes_target_lock);
+		  }
 
 		  mutex_enter(&pressure_bytes_signal_lock);
 		  if(pressure_bytes_signal & PRESSURE_KMEM_MANUAL_PRESSURE) {
