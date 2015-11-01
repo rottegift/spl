@@ -3213,6 +3213,9 @@ kmem_avail(void)
     printf("SPL: %s got pressure_bytes_signal, returning %lld\n",
 	   __func__, retval);
     cv_signal(&memory_monitor_thread_cv);
+    //this causes MMT to wake up and if there's no pressure, immediately undo
+    //the manual pressure, so don't call spl_adjust_pressure; let it accumulate via
+    //the arc callback(s)
     //spl_adjust_pressure(-retval);
     return (retval);
   }
@@ -3225,7 +3228,6 @@ kmem_avail(void)
     mutex_exit(&pressure_bytes_signal_lock);
     printf("SPL: %s page_free_wanted %u, returning %lld\n",
 	   __func__, vm_page_free_wanted, retval);
-    cv_signal(&memory_monitor_thread_cv);
     spl_adjust_pressure(-retval);
     return (retval);
   }
