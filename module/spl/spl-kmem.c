@@ -4400,7 +4400,7 @@ memory_monitor_thread()
 			    mutex_enter(&pressure_bytes_target_lock);
 			    pressure_bytes_target = 0;
 			    mutex_exit(&pressure_bytes_target_lock);
-			    printf("SPL: MMT released pressure, pressure_bytes_signal = %lld\n",
+			    printf("SPL: MMT released pressure, pressure_bytes_signal = %llu\n",
 				   pressure_bytes_signal);
 			    mutex_enter(&pressure_bytes_signal_lock);
 			    pressure_bytes_signal = 0;
