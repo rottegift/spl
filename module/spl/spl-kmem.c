@@ -4248,7 +4248,7 @@ spl_mach_pressure_monitor_thread()
 		 vm_page_free_count,
 		 vm_page_speculative_count,
 		 pages_reclaimed);
-	  //cv_signal(&memory_monitor_thread_cv);
+	  cv_signal(&memory_monitor_thread_cv);
 	} else if(pressure_bytes_target > newtarget) {
 	  uint64_t oldtarget = pressure_bytes_target;
 	  pressure_bytes_target = newtarget;
@@ -4261,7 +4261,7 @@ spl_mach_pressure_monitor_thread()
 		 vm_page_free_count,
 		 vm_page_speculative_count,
 		 pages_reclaimed);
-	  //cv_signal(&memory_monitor_thread_cv);
+	  cv_signal(&memory_monitor_thread_cv);
 	} else {
 	  // if pressure_bytes_target == newtarget
 	  // or if pressure_bytes_target < newtarget
@@ -4555,7 +4555,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			mutex_enter(&pressure_bytes_signal_lock);
 			pressure_bytes_signal |= PRESSURE_KMEM_MANUAL_PRESSURE;
 			mutex_exit(&pressure_bytes_signal_lock);
-			//cv_signal(&memory_monitor_thread_cv);
+			cv_signal(&memory_monitor_thread_cv);
 			if (ks->spl_simulate_pressure.value.ui64 == 666) {
 			  printf("SPL: simulate pressure 666, dumping stack\n");
 			  spl_backtrace("SPL: simulate_pressure 666");
