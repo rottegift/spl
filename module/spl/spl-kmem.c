@@ -3167,7 +3167,7 @@ spl_adjust_pressure(int64_t amount)
       pressure_bytes_target = spl_memory_used() - amount;
     else
       pressure_bytes_target = 1;
-    mutex_exit(&pressure_bytes_target);
+    mutex_exit(&pressure_bytes_target_lock);
     printf("SPL: %s underflow - pressure_bytes_target was %llu, amount %lld, now %llu\n",
 	   __func__, p, amount, pressure_bytes_target);
     return(pressure_bytes_target);
