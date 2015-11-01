@@ -3162,22 +3162,47 @@ spl_adjust_pressure(int64_t amount)
 {
   mutex_enter(&pressure_bytes_target_lock);
   int64_t p = pressure_bytes_target;
-  if((p + amount) < 0) {
-    if(spl_memory_used() - amount < p)
-      pressure_bytes_target = spl_memory_used() - amount;
-    else
-      pressure_bytes_target = 1;
-    mutex_exit(&pressure_bytes_target_lock);
-    printf("SPL: %s underflow - pressure_bytes_target was %llu, amount %lld, now %llu\n",
-	   __func__, p, amount, pressure_bytes_target);
-    return(pressure_bytes_target);
-  } else if((p + amount) >= spl_memory_used())
+  int64_t newp = p + amount;
+  int64_t delta = p - newp;
+  int64_t used = spl_memory_used();
+
+  if(newp >= used || newp <= 0) {
+    printf("SPL: warning: %s(%lld) newp %lld used %lld, will zero pressure_bytes_target\n",
+	   __func__, amount, newp, used);
     pressure_bytes_target = 0;
-  else
-    pressure_bytes_target += amount;
+  } else if(delta < 0) {
+    if(newp > 0 && newp < 64*1024*1024) {
+      printf("SPL: WARNING: %s(%lld) results in small positive newp %lld, setting pressure_bytes_target to zero\n",
+	     __func__, amount, newp);
+      pressure_bytes_target = 0;
+    } else if(delta < -(int64_t)total_memory+(64*1024*1024)) {
+      printf("SPL: ERROR: %s(%lld) results in huge delta %lld\n", __func__, amount, delta);
+      pressure_bytes_target = 0;
+    } else if(delta > -8*1024*1024) {
+      printf("SPL: warning: %s(%lld), dropping small negative delta(%lld)\n",
+	     __func__, amount, delta);
+    } else {
+      printf("SPL: OK: %s(%lld), pressure now %lld\n",
+	     __func__, amount, newp);
+      pressure_bytes_target = newp;
+    }
+  } else if(delta > 0) {
+    // 0 < newp < used
+    if(newp < 64*1024*1024) {
+      printf("SPL: warning: %s(%lld) small positive newp %lld, setting pressure_bytes_target to zero\n",
+	     __func__, amount, newp);
+      pressure_bytes_target = 0;
+    } else {
+      printf("SPL: OK: %s(%lld), pressure now %lld\n",
+	     __func__, amount, newp);
+      pressure_bytes_target = newp;
+    }
+  } else {
+    // delta == 0 and newp in range
+    printf("SPL: %s(%lld) fallthrough, not changing pressure_bytes_target\n",
+	   __func__, amount);
+  }
   mutex_exit(&pressure_bytes_target_lock);
-  printf("SPL: %s(%lld), pressure_bytes_target now %lld\n",
-	 __func__, amount, pressure_bytes_target);
   return(pressure_bytes_target);
 }
 
