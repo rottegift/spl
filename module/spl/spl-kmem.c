@@ -3175,6 +3175,10 @@ spl_adjust_pressure(int64_t amount)
       printf("SPL: WARNING: %s(%lld) results in small positive newp %lld, setting pressure_bytes_target to zero\n",
 	     __func__, amount, newp);
       pressure_bytes_target = 0;
+    } else if (newp > 0 && newp < total_memory / 8) {
+      printf("SPL: WARNING: %s(%lld) results in medium positive newp %lld (total_memory/8 %lld)\n",
+	     __func__, amount, newp, total_memory / 8);
+      pressure_bytes_target = 0;
     } else if(delta < -(int64_t)total_memory+(64*1024*1024)) {
       printf("SPL: ERROR: %s(%lld) results in huge delta %lld\n", __func__, amount, delta);
       pressure_bytes_target = 0;
@@ -3192,6 +3196,9 @@ spl_adjust_pressure(int64_t amount)
       dprintf("SPL: warning: %s(%lld) small positive newp %lld, setting pressure_bytes_target to zero\n",
 	     __func__, amount, newp);
       pressure_bytes_target = 0;
+    } else if(newp < total_memory / 8) {
+      printf("SPL: WARNING: %s(%lld) results in medium positive newp %lld (total_memory / 8 %lld)\n",
+	     __func__, amount, newp, total_memory / 8);
     } else {
       dprintf("SPL: OK: %s(%lld), pressure now %lld\n",
 	     __func__, amount, newp);
