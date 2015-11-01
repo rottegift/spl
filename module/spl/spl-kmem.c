@@ -4470,7 +4470,7 @@ memory_monitor_thread()
 					last_reap = zfs_lbolt();
 					next_release = last_reap + (5*hz);
 				} else if(pressure_bytes_target > 0 && pressure_bytes_target < spl_memory_used()) {
-				  int64_t delta = spl_memory_used() - pressure_bytes_delta;
+				  int64_t delta = spl_memory_used() - pressure_bytes_target;
 				  printf("SPL: MMT pressure based periodic reaping, pressure_bytes delta == %lld, vm_page_free_count == %u, vm_page_speculative_count == %u, pressure_bytes_signal %lld\n",
 					 delta,
 					 vm_page_free_count,
