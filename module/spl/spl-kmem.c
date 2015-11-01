@@ -3172,7 +3172,7 @@ spl_adjust_pressure(int64_t amount)
     pressure_bytes_target = 0;
   } else if(delta < 0) {
     if(newp > 0 && newp < 64*1024*1024) {
-      printf("SPL: WARNING: %s(%lld) results in small positive newp %lld, setting pressure_bytes_target to zero\n",
+      dprintf("SPL: WARNING: %s(%lld) results in small positive newp %lld, setting pressure_bytes_target to zero\n",
 	     __func__, amount, newp);
       pressure_bytes_target = 0;
     } else if (newp > 0 && newp < total_memory / 8) {
