@@ -547,6 +547,7 @@ typedef struct spl_stats {
   kstat_named_t spl_free_wake_count;
   kstat_named_t spl_spl_free;
   kstat_named_t spl_spl_free_minus_kmem_avail;
+  kstat_named_t spl_spl_free_minus_pressure;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -571,6 +572,7 @@ static spl_stats_t spl_stats = {
     {"spl_free_wake_count", KSTAT_DATA_UINT64},
     {"spl_spl_free", KSTAT_DATA_UINT64},
     {"spl_spl_free_minus_kmem_free", KSTAT_DATA_UINT64},
+    {"spl_spl_free_minus_pressure", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4756,6 +4758,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		}
 		ks->spl_spl_free.value.i64 = spl_free;
 		ks->spl_spl_free_minus_kmem_avail.value.ui64 = spl_free - kmem_avail();
+		ks->spl_spl_free_minus_pressure.value.ui64 = spl_free - (total_memory - pressure_bytes_target);
 	}
 
 	return (0);
