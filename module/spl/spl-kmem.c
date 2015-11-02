@@ -43,6 +43,7 @@
 #include <sys/vmem_impl.h>
 #include <kern/sched_prim.h>
 #include <sys/callb.h>
+#include <stdbool.h>
 //===============================================================
 // Options
 //===============================================================
@@ -3293,7 +3294,7 @@ kmem_avail(void)
 	  askbytes = pressure_delta / 4;
 	}
 	mutex_exit(&pressure_bytes_target_lock);
-	printf("SPL: %s pressure wanted %lld bytes, headroom %lu (ceiling %u), returning %lld\n",
+	dprintf("SPL: %s pressure wanted %lld bytes, headroom %lu (ceiling %u), returning %lld\n",
 	       __func__, pressure_delta, fsp, VM_PAGE_FREE_MIN, -askbytes);
 	spl_adjust_pressure(askbytes);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
@@ -3309,7 +3310,7 @@ kmem_avail(void)
 	  askbytes = pressure_delta / 4;
 	}
 	mutex_exit(&pressure_bytes_target_lock);
-	printf("SPL: %s pressure wanted %lld bytes, headroom %u (%u ceililng), returning %lld\n",
+	dprintf("SPL: %s pressure wanted %lld bytes, headroom %u (%u ceililng), returning %lld\n",
 	       __func__, pressure_delta, vm_page_free_count, VM_PAGE_FREE_MIN, -askbytes);
 	spl_adjust_pressure(askbytes);
 	return(-askbytes); // trigger arc_reclaim and/or throttle
@@ -4217,26 +4218,36 @@ spl_free_thread()
 
   while(!spl_free_thread_exit) {
     mutex_exit(&spl_free_thread_lock);
+    bool lowmem = false;
 
     spl_stats.spl_free_wake_count.value.ui64++;
 
     mutex_enter(&spl_free_lock);
+
+    if(vm_page_free_wanted > 0) {
+      spl_free -= vm_page_free_wanted * PAGESIZE;
+      lowmem = true;
+    }
+
+    if(segkmem_total_mem_allocated > total_memory * 90ULL / 100ULL) {
+      lowmem = true;
+    }
 
     if(spl_free > real_total_memory * 90ULL / 100ULL) {
       spl_free -= 2*1024*1024; // shrink at 20MiB/second
     }
 
     if(spl_free > total_memory) {
-      spl_free -= (total_memory - spl_free)/16;
+      spl_free -= (total_memory - spl_free)/16; // shrink back towards our 80%
     }
     
-    if(vm_page_free_wanted > 0) {
-      spl_free -= vm_page_free_wanted * PAGESIZE;
-    }
-
-    if(!vm_page_free_wanted &&
+    if(!vm_page_free_wanted && !lowmem &&
        (vm_page_free_count + vm_page_speculative_count) > VM_PAGE_FREE_MIN) {
       spl_free += (int64_t)(vm_page_free_count + vm_page_speculative_count) * PAGESIZE / 8;
+    }
+
+    if(!lowmem && segkmem_total_mem_allocated < total_memory * 90ULL / 100ULL) {
+      spl_free += 1024*1024;
     }
 
     if(spl_free < -total_memory) {
@@ -4360,7 +4371,9 @@ spl_mach_pressure_monitor_thread()
       } else if(!vm_page_free_wanted &&
 		(vm_page_free_count + vm_page_speculative_count) > VM_PAGE_FREE_MIN) {
 	mutex_enter(&spl_free_lock);
-	spl_free = total_memory;
+	spl_free = vm_page_free_count - (vm_page_speculative_count / 2);
+	if(segkmem_total_mem_allocated > total_memory / 90ULL * 100ULL)
+	  spl_free -= 16*1024*1024;
 	mutex_exit(&spl_free_lock);
       }
     }
@@ -4701,23 +4714,26 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			 ks->spl_simulate_pressure.value.i64*1024*1024,
 			 pressure_bytes_target,
 			 spl_memory_used());
-		        mutex_enter(&pressure_bytes_target_lock);
-			if(!pressure_bytes_target || pressure_bytes_target >= spl_memory_used()) {
-			  pressure_bytes_target = spl_memory_used() -
-			    (ks->spl_simulate_pressure.value.i64 * 1024 * 1024);
-			} else {
-			  pressure_bytes_target -=
-			    (ks->spl_simulate_pressure.value.i64 * 1024 * 1024);
-			}
-			mutex_exit(&pressure_bytes_target_lock);
-			mutex_enter(&pressure_bytes_signal_lock);
-			pressure_bytes_signal |= PRESSURE_KMEM_MANUAL_PRESSURE;
-			mutex_exit(&pressure_bytes_signal_lock);
-			cv_signal(&memory_monitor_thread_cv);
-			if (ks->spl_simulate_pressure.value.i64 == 666) {
-			  printf("SPL: simulate pressure 666, dumping stack\n");
-			  spl_backtrace("SPL: simulate_pressure 666");
-			}
+		  mutex_enter(&pressure_bytes_target_lock);
+		  if(!pressure_bytes_target || pressure_bytes_target >= spl_memory_used()) {
+		    pressure_bytes_target = spl_memory_used() -
+		      (ks->spl_simulate_pressure.value.i64 * 1024 * 1024);
+		  } else {
+		    pressure_bytes_target -=
+		      (ks->spl_simulate_pressure.value.i64 * 1024 * 1024);
+		  }
+		  mutex_exit(&pressure_bytes_target_lock);
+		  mutex_enter(&pressure_bytes_signal_lock);
+		  pressure_bytes_signal |= PRESSURE_KMEM_MANUAL_PRESSURE;
+		  mutex_exit(&pressure_bytes_signal_lock);
+		  cv_signal(&memory_monitor_thread_cv);
+		  if (ks->spl_simulate_pressure.value.i64 == 666) {
+		    printf("SPL: simulate pressure 666, dumping stack\n");
+		    spl_backtrace("SPL: simulate_pressure 666");
+		  }
+		  mutex_enter(&spl_free_lock);
+		  spl_free -= ks->spl_simulate_pressure.value.i64 * 1024 *1024;
+		  mutex_exit(&spl_free_lock);
 		}
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
