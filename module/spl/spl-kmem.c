@@ -4240,10 +4240,10 @@ spl_free_thread()
     }
 
     if(spl_free > total_memory) {
-      spl_free -= (total_memory - spl_free)/16; // shrink back towards our 80%
+      spl_free -= 2*1024*1024; // shrink back towards our 80%
     }
     
-    if(!vm_page_free_wanted && !lowmem &&
+    if(!lowmem &&
        (vm_page_free_count + vm_page_speculative_count) > VM_PAGE_FREE_MIN) {
       spl_free += (int64_t)(vm_page_free_count + vm_page_speculative_count) * PAGESIZE / 8;
     }
@@ -4252,10 +4252,11 @@ spl_free_thread()
       spl_free += 1024*1024;
     }
 
-    if(spl_free < -total_memory) {
-      spl_free = -total_memory;
+    if(spl_free < -(int64_t)total_memory) {
+      spl_free = -(int64_t)total_memory / 2;
     }
-    
+
+    lowmem=false;
     mutex_exit(&spl_free_lock);
 
     mutex_enter(&spl_free_thread_lock);
@@ -4364,16 +4365,16 @@ spl_mach_pressure_monitor_thread()
     if(kr != KERN_SUCCESS) {
       if(os_num_pages_wanted < 1) {
       	mutex_enter(&spl_free_lock);
-	spl_free = -os_num_pages_wanted * PAGESIZE;
+	spl_free = -(int64_t)os_num_pages_wanted * PAGESIZE;
 	mutex_exit(&spl_free_lock);
       } else if (!vm_page_free_wanted && pages_reclaimed > 0) {
       	mutex_enter(&spl_free_lock);
-	spl_free += pages_reclaimed * PAGESIZE;
+	spl_free += (int64_t)pages_reclaimed * PAGESIZE;
 	mutex_exit(&spl_free_lock);	
       } else if(!vm_page_free_wanted &&
 		(vm_page_free_count + vm_page_speculative_count) > VM_PAGE_FREE_MIN) {
 	mutex_enter(&spl_free_lock);
-	spl_free = vm_page_free_count - (vm_page_speculative_count / 2);
+	spl_free = PAGESIZE * ((int64_t)vm_page_free_count + ((int64_t)vm_page_speculative_count / 2));
 	if(segkmem_total_mem_allocated > total_memory / 90ULL * 100ULL)
 	  spl_free -= 16*1024*1024;
 	mutex_exit(&spl_free_lock);
