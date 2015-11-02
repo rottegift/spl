@@ -4256,12 +4256,12 @@ spl_free_thread()
     base = spl_free;
 
     if((vm_page_free_count + vm_page_speculative_count) < VM_PAGE_FREE_MIN) {
-      spl_free -= 2*1024*1024;
+      spl_free -= PAGESIZE * (int64_t)(VM_PAGE_FREE_MIN - (vm_page_free_count + vm_page_speculative_count));
       lowmem=true;
     }
 
     if(segkmem_total_mem_allocated > total_memory * 90ULL / 100ULL) {
-      spl_free -= 1024*1024;
+      spl_free -= 8*1024*1024;
       lowmem = true;
     }
 
@@ -4270,10 +4270,10 @@ spl_free_thread()
     }
 
     if(spl_free > total_memory) { // total_memory is 80% of real_total_memory
-      spl_free -= 2*1024*1024;
+      spl_free -= 16*1024*1024;
     }
 
-    double delta = last_spl_free - spl_free;
+    double delta = spl_free - base;
 
     mutex_exit(&spl_free_lock);
 
