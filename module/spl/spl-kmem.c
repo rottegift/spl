@@ -4744,9 +4744,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		    printf("SPL: simulate pressure 666, dumping stack\n");
 		    spl_backtrace("SPL: simulate_pressure 666");
 		  }
-		  mutex_enter(&spl_free_manual_pressure_lock);
-		  spl_free_manual_pressure = ks->spl_simulate_pressure.value.i64 * 1024 *1024;
-		  mutex_exit(&spl_free_manual_pressure_lock);
+		  spl_free_set_pressure(ks->spl_simulate_pressure.value.i64 * 1024 *1024);
 		}
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
