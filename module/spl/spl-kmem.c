@@ -4246,7 +4246,7 @@ spl_free_thread()
 
     last_spl_free = spl_free;
 
-    spl_free = (vm_page_free_count + (vm_page_speculative_count >> 1))*PAGESIZE;
+    spl_free = (int64_t)(vm_page_free_count + (vm_page_speculative_count >> 1))*PAGESIZE;
 
     if(vm_page_free_wanted > 0) {
       spl_free = -(int64_t)vm_page_free_wanted * PAGESIZE;
@@ -4804,7 +4804,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		}
 		ks->spl_spl_free.value.i64 = spl_free;
 		ks->spl_spl_free_minus_kmem_avail.value.ui64 = spl_free - kmem_avail();
-		ks->spl_spl_free_minus_pressure.value.ui64 = spl_free - (total_memory - pressure_bytes_target);
+		ks->spl_spl_free_minus_pressure.value.ui64 = spl_free - spl_free_manual_pressure;
 		ks->spl_spl_free_manual_pressure.value.i64 = spl_free_manual_pressure;
 		ks->spl_spl_free_delta_ema.value.i64 = spl_free_delta_ema;
 	}
