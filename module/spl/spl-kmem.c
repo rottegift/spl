@@ -4242,10 +4242,13 @@ spl_free_thread()
     if(spl_free > total_memory) {
       spl_free -= 2*1024*1024; // shrink back towards our 80%
     }
-    
+
     if(!lowmem &&
        (vm_page_free_count + vm_page_speculative_count) > VM_PAGE_FREE_MIN) {
-      spl_free += (int64_t)(vm_page_free_count + vm_page_speculative_count) * PAGESIZE / 8;
+      int64_t fs = (int64_t)(PAGESIZE * (vm_page_free_count + vm_page_speculative_count/2));
+      if(spl_free < fs) {
+	spl_free += fs/16;
+      }
     }
 
     if(!lowmem && segkmem_total_mem_allocated < total_memory * 90ULL / 100ULL) {
@@ -4254,6 +4257,10 @@ spl_free_thread()
 
     if(spl_free < -(int64_t)total_memory) {
       spl_free = -(int64_t)total_memory / 2;
+    }
+
+    if(spl_free > (int64_t)real_total_memory - (PAGESIZE * (int64_t)vm_page_free_min)) {
+      spl_free = (int64_t)real_total_memory - (PAGESIZE * (int64_t)vm_page_free_min);
     }
 
     lowmem=false;
