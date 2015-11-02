@@ -95,6 +95,12 @@ static boolean_t spl_mach_pressure_monitor_thread_exit;
 static boolean_t spl_os_pages_are_wanted;
 static kmutex_t spl_os_pages_are_wanted_lock;
 
+static kcondvar_t spl_free_thread_cv;
+static kmutex_t spl_free_thread_lock;
+static boolean_t spl_free_thread_exit;
+int64_t spl_free;
+static kmutex_t spl_free_lock;
+
 // Start and end address of kernel memory
 //http://fxr.watson.org/fxr/source/osfmk/vm/vm_resident.c?v=xnu-2050.18.24;im=excerpts#L135
 extern vm_offset_t virtual_space_start;
@@ -537,6 +543,9 @@ typedef struct spl_stats {
   kstat_named_t spl_kmem_used;
   kstat_named_t spl_spl_memory_used;
   kstat_named_t spl_pressure_differential;
+  kstat_named_t spl_free_wake_count;
+  kstat_named_t spl_spl_free;
+  kstat_named_t spl_spl_free_minus_kmem_avail;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -558,6 +567,9 @@ static spl_stats_t spl_stats = {
     {"kmem_used", KSTAT_DATA_UINT64},
     {"spl_memory_used", KSTAT_DATA_UINT64},
     {"spl_pressure_differential", KSTAT_DATA_UINT64},
+    {"spl_free_wake_count", KSTAT_DATA_UINT64},
+    {"spl_spl_free", KSTAT_DATA_UINT64},
+    {"spl_spl_free_minus_kmem_free", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4189,6 +4201,64 @@ kmem_cache_fini(int pass, int use_large_pages)
 }
 
 static void
+spl_free_thread()
+{
+  callb_cpr_t cpr;
+
+  CALLB_CPR_INIT(&cpr, &spl_free_thread_lock, callb_generic_cpr, FTAG);
+
+  mutex_enter(&spl_free_lock);
+  spl_free = total_memory;
+  mutex_exit(&spl_free_lock);
+  
+  mutex_enter(&spl_free_thread_lock);
+
+  printf("SPL: beginning spl_free_thread() loop, spl_free == %lld\n", spl_free);
+
+  while(!spl_free_thread_exit) {
+    mutex_exit(&spl_free_thread_lock);
+
+    spl_stats.spl_free_wake_count.value.ui64++;
+
+    mutex_enter(&spl_free_lock);
+
+    if(spl_free > real_total_memory * 90ULL / 100ULL) {
+      spl_free -= 2*1024*1024; // shrink at 20MiB/second
+    }
+
+    if(spl_free > total_memory) {
+      spl_free -= (total_memory - spl_free)/16;
+    }
+    
+    if(vm_page_free_wanted > 0) {
+      spl_free -= vm_page_free_wanted * PAGESIZE;
+    }
+
+    if(!vm_page_free_wanted &&
+       (vm_page_free_count + vm_page_speculative_count) > VM_PAGE_FREE_MIN) {
+      spl_free += (int64_t)(vm_page_free_count + vm_page_speculative_count) * PAGESIZE / 8;
+    }
+
+    if(spl_free < -total_memory) {
+      spl_free = -total_memory;
+    }
+    
+    mutex_exit(&spl_free_lock);
+
+    mutex_enter(&spl_free_thread_lock);
+    CALLB_CPR_SAFE_BEGIN(&cpr);
+    (void)cv_timedwait(&spl_free_thread_cv, &spl_free_thread_lock, ddi_get_lbolt() + (hz/10));
+    CALLB_CPR_SAFE_END(&cpr, &spl_free_thread_lock);
+  }
+  spl_free_thread_exit = FALSE;
+  printf("SPL: spl_free_thread_exit set to FALSE and exiting: cv_broadcasting\n");
+  cv_broadcast(&spl_free_thread_cv);
+  CALLB_CPR_EXIT(&cpr);
+  printf("SPL: %s thread_exit\n", __func__);
+  thread_exit();
+}
+
+static void
 reap_thread()
 {
   callb_cpr_t cpr;
@@ -4247,7 +4317,7 @@ reap_thread()
   cv_broadcast(&reap_thread_cv);
   printf("SPL: reap thread exit: doing CALLB_CPR_EXIT\n");
   CALLB_CPR_EXIT(&cpr);
-  printf("SPL: thread exit\n");
+  printf("SPL: %s thread exit\n", __func__);
   thread_exit();
 }
 
@@ -4277,6 +4347,23 @@ spl_mach_pressure_monitor_thread()
     dprintf("SPL: %s back from mach_vm_pressure_montor - unblocked\n", __func__);
 
     spl_stats.spl_spl_mach_pressure_monitor_wake_count.value.ui64++;
+
+    if(kr != KERN_SUCCESS) {
+      if(os_num_pages_wanted < 1) {
+      	mutex_enter(&spl_free_lock);
+	spl_free = -os_num_pages_wanted * PAGESIZE;
+	mutex_exit(&spl_free_lock);
+      } else if (!vm_page_free_wanted && pages_reclaimed > 0) {
+      	mutex_enter(&spl_free_lock);
+	spl_free += pages_reclaimed * PAGESIZE;
+	mutex_exit(&spl_free_lock);	
+      } else if(!vm_page_free_wanted &&
+		(vm_page_free_count + vm_page_speculative_count) > VM_PAGE_FREE_MIN) {
+	mutex_enter(&spl_free_lock);
+	spl_free = total_memory;
+	mutex_exit(&spl_free_lock);
+      }
+    }
 
     if(kr != KERN_SUCCESS) {
       printf("SPL: %s: mach_vm_pressure_monitor returned returned non-success\n", __func__);
@@ -4651,6 +4738,8 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		} else {
 		  ks->spl_pressure_differential.value.i64 = 0;
 		}
+		ks->spl_spl_free.value.i64 = spl_free;
+		ks->spl_spl_free_minus_kmem_avail.value.ui64 = spl_free - kmem_avail();
 	}
 
 	return (0);
@@ -5000,12 +5089,15 @@ spl_kmem_thread_init(void)
 
     // Initialize the MMT lock
     mutex_init(&memory_monitor_lock, "memory_monitor_lock", MUTEX_DEFAULT, NULL);
-    // Initialise the pressure signal lock
+    // Initialise the pressure signal locks
     mutex_init(&pressure_bytes_signal_lock, "pressure_bytes_signal_lock", MUTEX_DEFAULT, NULL);
     mutex_init(&pressure_bytes_target_lock, "pressure_bytes_target_lock", MUTEX_DEFAULT, NULL);
-    // Initialize the reap thread lock
+    // Initialize the reap thread locks
     mutex_init(&reap_thread_lock, "reap_thread_lock", MUTEX_DEFAULT, NULL);
     mutex_init(&reap_now_lock, "reap_now_lock", MUTEX_DEFAULT, NULL);
+    // Initialize the spl_free locks
+    mutex_init(&spl_free_thread_lock, "spl_free_thead_lock", MUTEX_DEFAULT, NULL);
+    mutex_init(&spl_free_lock, "spl_free_lock", MUTEX_DEFAULT, NULL);
     // Initialize the spl_mach_pressure_monitor_thread lock
     mutex_init(&spl_mach_pressure_monitor_thread_lock, "mach_pressure_monitor_thread_lock", MUTEX_DEFAULT, NULL);
     mutex_init(&spl_os_pages_are_wanted_lock, "spl_os_pages_are_wanted_lock", MUTEX_DEFAULT, NULL);
@@ -5024,6 +5116,10 @@ spl_kmem_thread_init(void)
     memory_monitor_thread_exit = FALSE;
     (void)thread_create(NULL, 0, memory_monitor_thread, 0, 0, 0, 0, 92);
     (void)cv_init(&memory_monitor_thread_cv, NULL, CV_DEFAULT, NULL);
+
+    spl_free_thread_exit = FALSE;
+    (void)thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0, 92);
+    (void)cv_init(&spl_free_thread_cv, NULL, CV_DEFAULT, NULL);
 }
 
 void
@@ -5075,12 +5171,27 @@ spl_kmem_thread_fini(void)
 	  cv_signal(&spl_mach_pressure_monitor_thread_cv);
 	  cv_wait(&spl_mach_pressure_monitor_thread_cv, &spl_mach_pressure_monitor_thread_lock);
 	}
-	printf("SPL: spl_mach_pressure_monitorr_thread stop: while loop ended, dropping mutex\n");
+	printf("SPL: spl_mach_pressure_monitor_thread stop: while loop ended, dropping mutex\n");
 	mutex_exit(&spl_mach_pressure_monitor_thread_lock);
 	printf("SPL: spl_mach_pressure_monitor_thread stop: destroying cv and mutex\n");
 	cv_destroy(&spl_mach_pressure_monitor_thread_cv);
 	mutex_destroy(&spl_mach_pressure_monitor_thread_lock);
 	mutex_destroy(&spl_os_pages_are_wanted_lock);
+
+	printf("SPL: stop spl_free_thread\n");
+	mutex_enter(&spl_free_thread_lock);
+	printf("SPL: stop spl_free_thread, lock acquired, setting exit variable and waiting\n");
+	spl_free_thread_exit = TRUE;
+	while(spl_free_thread_exit) {
+	  cv_signal(&spl_free_thread_cv);
+	  cv_wait(&spl_free_thread_cv, &spl_free_thread_lock);
+	}
+	printf("SPL: spl_free_thread stop: while loop ended, dropping mutex\n");
+	mutex_exit(&spl_free_thread_lock);
+	printf("SPL: spl_free_thread stop: destroying cv and mutex\n");
+	cv_destroy(&spl_free_thread_cv);
+	mutex_destroy(&spl_free_thread_lock);
+	mutex_destroy(&spl_free_lock);
 
 	printf("SPL: bsd_untimeout\n");
 	bsd_untimeout(kmem_update,  0);
