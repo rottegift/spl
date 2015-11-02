@@ -554,6 +554,7 @@ typedef struct spl_stats {
   kstat_named_t spl_spl_free_minus_pressure;
   kstat_named_t spl_spl_free_manual_pressure;
   kstat_named_t spl_spl_free_delta_ema;
+  kstat_named_t spl_spl_free_negative_count;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -581,6 +582,7 @@ static spl_stats_t spl_stats = {
     {"spl_spl_free_minus_pressure", KSTAT_DATA_UINT64},
     {"spl_spl_free_manual_pressure", KSTAT_DATA_UINT64},
     {"spl_spl_free_delta_ema", KSTAT_DATA_UINT64},
+    {"spl_spl_free_negative_count", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4275,6 +4277,9 @@ spl_free_thread()
 
     mutex_exit(&spl_free_lock);
 
+    if(spl_free < 0)
+      spl_stats.spl_spl_free_negative_count.value.ui64++;
+
     if(last_update > hz)
       alpha = 1.0;
     else {
@@ -4283,7 +4288,7 @@ spl_free_thread()
     }
 
     ema_new = (alpha * (double)delta) + (1.0 - alpha)*ema_old;
-    spl_free_delta_ema = (int64_t)(1e06 * ema_new);
+    spl_free_delta_ema = (int64_t)ema_new;
     ema_old = ema_new;
 
     mutex_enter(&spl_free_thread_lock);
