@@ -4273,16 +4273,19 @@ spl_free_thread()
   thread_exit();
 }
 
+// this is intended to substitute for kmem_avail() in arc.c
 int64_t
 spl_free_wrapper(void)
 {
   return(spl_free);
 }
 
+// this is intended to substitute for kmem_avail() in arc.c
+// when arc_reclaim_thread() calls spl_free_set_pressure(0);
 int64_t
-spl_free_wrapper_pressure(void)
+spl_free_manual_pressure_wrapper(void)
 {
-  return(spl_free+spl_free_manual_pressure);
+  return(spl_free_manual_pressure);
 }
 
 void
@@ -4744,8 +4747,11 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		    printf("SPL: simulate pressure 666, dumping stack\n");
 		    spl_backtrace("SPL: simulate_pressure 666");
 		  }
-		  spl_free_set_pressure(ks->spl_simulate_pressure.value.i64 * 1024 *1024);
 		}
+
+		if(ks->spl_spl_free_manual_pressure.value.i64 != spl_free_manual_pressure)
+		  spl_free_set_pressure(ks->spl_spl_free_manual_pressure.value.i64 * 1024 *1024);
+		
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
 		ks->spl_active_threads.value.ui64 = zfs_threads;
