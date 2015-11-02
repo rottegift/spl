@@ -101,6 +101,7 @@ static kmutex_t spl_free_thread_lock;
 static boolean_t spl_free_thread_exit;
 int64_t spl_free;
 static kmutex_t spl_free_lock;
+int64_t spl_free_delta_ema;
 
 static int64_t spl_free_manual_pressure = 0;
 static kmutex_t spl_free_manual_pressure_lock;
@@ -552,6 +553,7 @@ typedef struct spl_stats {
   kstat_named_t spl_spl_free_minus_kmem_avail;
   kstat_named_t spl_spl_free_minus_pressure;
   kstat_named_t spl_spl_free_manual_pressure;
+  kstat_named_t spl_spl_free_delta_ema;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -578,6 +580,7 @@ static spl_stats_t spl_stats = {
     {"spl_spl_free_minus_kmem_free", KSTAT_DATA_UINT64},
     {"spl_spl_free_minus_pressure", KSTAT_DATA_UINT64},
     {"spl_spl_free_manual_pressure", KSTAT_DATA_UINT64},
+    {"spl_spl_free_delta_ema", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4214,13 +4217,18 @@ static void
 spl_free_thread()
 {
   callb_cpr_t cpr;
-
+  uint64_t last_update = zfs_lbolt();
+  uint64_t last_spl_free;
+  double ema_new = 0;
+  double ema_old = 0;
+  double alpha;
+  
   CALLB_CPR_INIT(&cpr, &spl_free_thread_lock, callb_generic_cpr, FTAG);
 
   mutex_enter(&spl_free_lock);
-  spl_free = total_memory;
+  spl_free = (vm_page_free_count + (vm_page_speculative_count >> 1)) * PAGESIZE;
   mutex_exit(&spl_free_lock);
-  
+
   mutex_enter(&spl_free_thread_lock);
 
   printf("SPL: beginning spl_free_thread() loop, spl_free == %lld\n", spl_free);
@@ -4228,10 +4236,13 @@ spl_free_thread()
   while(!spl_free_thread_exit) {
     mutex_exit(&spl_free_thread_lock);
     bool lowmem = false;
+    int64_t base;
 
     spl_stats.spl_free_wake_count.value.ui64++;
 
     mutex_enter(&spl_free_lock);
+
+    last_spl_free = spl_free;
 
     spl_free = (vm_page_free_count + (vm_page_speculative_count >> 1))*PAGESIZE;
 
@@ -4239,6 +4250,8 @@ spl_free_thread()
       spl_free = -(int64_t)vm_page_free_wanted * PAGESIZE;
       lowmem = true;
     }
+
+    base = spl_free;
 
     if((vm_page_free_count + vm_page_speculative_count) < VM_PAGE_FREE_MIN) {
       spl_free -= 2*1024*1024;
@@ -4258,7 +4271,20 @@ spl_free_thread()
       spl_free -= 2*1024*1024;
     }
 
+    double delta = last_spl_free - spl_free;
+
     mutex_exit(&spl_free_lock);
+
+    if(last_update > hz)
+      alpha = 1.0;
+    else {
+      double td_tick  = zfs_lbolt() - last_update;
+      alpha = td_tick / (hz*100);
+    }
+
+    ema_new = (alpha * (double)delta) + (1.0 - alpha)*ema_old;
+    spl_free_delta_ema = (int64_t)(1e06 * ema_new);
+    ema_old = ema_new;
 
     mutex_enter(&spl_free_thread_lock);
     CALLB_CPR_SAFE_BEGIN(&cpr);
@@ -4775,6 +4801,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_spl_free_minus_kmem_avail.value.ui64 = spl_free - kmem_avail();
 		ks->spl_spl_free_minus_pressure.value.ui64 = spl_free - (total_memory - pressure_bytes_target);
 		ks->spl_spl_free_manual_pressure.value.i64 = spl_free_manual_pressure;
+		ks->spl_spl_free_delta_ema.value.i64 = spl_free_delta_ema;
 	}
 
 	return (0);
