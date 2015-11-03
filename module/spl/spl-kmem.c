@@ -73,9 +73,6 @@ uint32_t vm_page_free_min_multiplier = 8;            // so 3500*this = 14000 pag
 uint32_t vm_page_free_min_min = 64*1024*1024/4096;   // so 16384 pages
 #define VM_PAGE_FREE_MIN (MAX(vm_page_free_min * vm_page_free_min_multiplier, vm_page_free_min_min))
 
-uint64_t vm_low_memory_signal_shift = 5; // 32, had been good with 64 and 128 (smd)
-#define LOW_MEMORY_MULT (1 << vm_low_memory_signal_shift)
-
 #define SMALL_PRESSURE_INCURSION_PAGES (vm_page_free_min / 20)
 
 static kcondvar_t memory_monitor_thread_cv;
@@ -528,7 +525,6 @@ typedef struct spl_stats {
   kstat_named_t spl_spl_mach_pressure_monitor_wake_count;
   kstat_named_t spl_vm_page_free_min_multiplier;
   kstat_named_t spl_vm_page_free_min_min;
-  kstat_named_t spl_low_memory_signal_shift;
   kstat_named_t spl_free_wake_count;
   kstat_named_t spl_spl_free;
   kstat_named_t spl_spl_free_minus_pressure;
@@ -549,7 +545,6 @@ static spl_stats_t spl_stats = {
     {"spl_mach_pressure_wake_count", KSTAT_DATA_UINT64},
     {"vm_page_free_multiplier", KSTAT_DATA_UINT64},
     {"vm_page_free_min_min", KSTAT_DATA_UINT64},
-    {"low_memory_signal_shift", KSTAT_DATA_UINT64},
     {"spl_free_wake_count", KSTAT_DATA_UINT64},
     {"spl_spl_free", KSTAT_DATA_UINT64},
     {"spl_spl_free_minus_pressure", KSTAT_DATA_UINT64},
@@ -4288,7 +4283,7 @@ memory_monitor_thread()
 		  // has it been five minutes?  reap if the system has less than 20% real memory free
 		  if ((zfs_lbolt() - last_reap) > (hz*300)) {
 		    uint32_t twentypct_real_pages = (uint32_t)((real_total_memory / 20ULL) / PAGESIZE);
-		    if(vm_page_free_count < twentypct_real_pages) {
+		    if((vm_page_free_count + vm_page_speculative_count) < twentypct_real_pages) {
 		      printf("SPL: MMT background 80%% real memory check, vm_page_free_wanted = %u, vm_page_free_count == %u, periodic reaping\n",
 			     vm_page_free_wanted,
 			     vm_page_free_count);
@@ -4343,18 +4338,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 
 	if (rw == KSTAT_WRITE) {
 
-	  if(ks->spl_low_memory_signal_shift.value.ui64 != vm_low_memory_signal_shift) {
-	    uint64_t lowshift = ks->spl_low_memory_signal_shift.value.ui64;
-	    if(1 < lowshift && lowshift < 16) {
-	      printf("SPL: low_memory_signal_shift %llu -> %llu\n",
-		     vm_low_memory_signal_shift, lowshift);
-	      vm_low_memory_signal_shift = lowshift;
-	    } else {
-	      printf("SPL: invalid shift %lld, remains %llu\n",
-		     lowshift, vm_low_memory_signal_shift);
-	    }
-	  }
-
 	  if(ks->spl_vm_page_free_min_multiplier.value.ui64 != (uint64_t)vm_page_free_min_multiplier) {
 	    printf("SPL: vm_page_free_min_multiplier was %u, now %u, headroom now %u\n",
 		   vm_page_free_min_multiplier,
@@ -4381,7 +4364,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_active_rwlock.value.ui64 = zfs_active_rwlock;
 		ks->spl_vm_page_free_min_multiplier.value.ui64 = (uint64_t)vm_page_free_min_multiplier;
 		ks->spl_vm_page_free_min_min.value.ui64 = (uint64_t)vm_page_free_min_min;
-		ks->spl_low_memory_signal_shift.value.ui64 = vm_low_memory_signal_shift;
 		ks->spl_spl_free.value.i64 = spl_free;
 		ks->spl_spl_free_minus_pressure.value.ui64 = spl_free - spl_free_manual_pressure;
 		ks->spl_spl_free_manual_pressure.value.i64 = spl_free_manual_pressure;
