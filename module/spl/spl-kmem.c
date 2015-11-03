@@ -4358,7 +4358,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 
 
 		if(ks->spl_spl_free_manual_pressure.value.i64 != spl_free_manual_pressure)
-		  spl_free_set_pressure(-(ks->spl_spl_free_manual_pressure.value.i64 * 1024 *1024));
+		  spl_free_set_pressure(ks->spl_spl_free_manual_pressure.value.i64 * 1024 *1024);
 		
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
