@@ -529,7 +529,6 @@ typedef struct spl_stats {
   kstat_named_t spl_vm_page_free_min_multiplier;
   kstat_named_t spl_vm_page_free_min_min;
   kstat_named_t spl_low_memory_signal_shift;
-  kstat_named_t spl_spl_memory_used;
   kstat_named_t spl_free_wake_count;
   kstat_named_t spl_spl_free;
   kstat_named_t spl_spl_free_minus_pressure;
@@ -551,7 +550,6 @@ static spl_stats_t spl_stats = {
     {"vm_page_free_multiplier", KSTAT_DATA_UINT64},
     {"vm_page_free_min_min", KSTAT_DATA_UINT64},
     {"low_memory_signal_shift", KSTAT_DATA_UINT64},
-    {"spl_memory_used", KSTAT_DATA_UINT64},
     {"spl_free_wake_count", KSTAT_DATA_UINT64},
     {"spl_spl_free", KSTAT_DATA_UINT64},
     {"spl_spl_free_minus_pressure", KSTAT_DATA_UINT64},
@@ -4384,7 +4382,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_vm_page_free_min_multiplier.value.ui64 = (uint64_t)vm_page_free_min_multiplier;
 		ks->spl_vm_page_free_min_min.value.ui64 = (uint64_t)vm_page_free_min_min;
 		ks->spl_low_memory_signal_shift.value.ui64 = vm_low_memory_signal_shift;
-		ks->spl_spl_memory_used.value.ui64 = spl_memory_used();
 		ks->spl_spl_free.value.i64 = spl_free;
 		ks->spl_spl_free_minus_pressure.value.ui64 = spl_free - spl_free_manual_pressure;
 		ks->spl_spl_free_manual_pressure.value.i64 = spl_free_manual_pressure;
