@@ -73,7 +73,7 @@ uint32_t vm_page_free_min_multiplier = 8;            // so 3500*this = 14000 pag
 uint32_t vm_page_free_min_min = 64*1024*1024/4096;   // so 16384 pages
 #define VM_PAGE_FREE_MIN (MAX(vm_page_free_min * vm_page_free_min_multiplier, vm_page_free_min_min))
 
-#define SMALL_PRESSURE_INCURSION_PAGES (vm_page_free_min / 20)
+#define SMALL_PRESSURE_INCURSION_PAGES (vm_page_free_min >> 5)
 
 static kcondvar_t memory_monitor_thread_cv;
 static kmutex_t memory_monitor_lock;
@@ -4023,8 +4023,14 @@ spl_free_thread()
 
     base = spl_free;
 
+    if(!lowmem) {
+      spl_free += SMALL_PRESSURE_INCURSION_PAGES * PAGESIZE;
+    }
+
     if((vm_page_free_count + vm_page_speculative_count) < VM_PAGE_FREE_MIN) {
-      spl_free -= PAGESIZE * (int64_t)(VM_PAGE_FREE_MIN - (vm_page_free_count + vm_page_speculative_count));
+      spl_free -= PAGESIZE * (int64_t)(VM_PAGE_FREE_MIN -
+				       (vm_page_free_count + vm_page_speculative_count));
+      spl_free += PAGESIZE * (int64_t)(vm_page_speculative_count >> 1);
       lowmem=true;
     }
 
@@ -4175,16 +4181,13 @@ reap_thread()
       spl_stats.spl_reap_thread_miss.value.ui64++;
     }
     mutex_enter(&reap_thread_lock);
-    dprintf("SPL: reap_now calling cv_timedwait\n");
     CALLB_CPR_SAFE_BEGIN(&cpr);
     (void)cv_timedwait(&reap_thread_cv, &reap_thread_lock, ddi_get_lbolt() + (10 * hz));
     CALLB_CPR_SAFE_END(&cpr, &reap_thread_lock);
-    dprintf("SPL: reap now back from cv_timedwait\n");
   }
   reap_thread_exit = FALSE;
   printf("SPL: reap_thread_exit set to FALSE and exiting: cv_broadcasting\n");
   cv_broadcast(&reap_thread_cv);
-  printf("SPL: reap thread exit: doing CALLB_CPR_EXIT\n");
   CALLB_CPR_EXIT(&cpr);
   printf("SPL: %s thread exit\n", __func__);
   thread_exit();
@@ -5897,7 +5900,7 @@ int
 spl_vm_pool_low(void)
 {
 
-  if(vm_page_free_wanted > 0 || vm_page_free_count < VM_PAGE_FREE_MIN) {
+  if(vm_page_free_wanted > 0 || (vm_page_free_count + vm_page_speculative_count) < VM_PAGE_FREE_MIN) {
     cv_signal(&memory_monitor_thread_cv); // wake MMT to shrink
     return 1;
   }
