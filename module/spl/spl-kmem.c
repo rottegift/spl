@@ -4891,21 +4891,6 @@ spl_kmem_thread_fini(void)
 	mutex_destroy(&reap_thread_lock);
 	mutex_destroy(&reap_now_lock);
 
-	printf("SPL: stop spl_mach_pressure_monitor_thread\n");
-	mutex_enter(&spl_mach_pressure_monitor_thread_lock);
-	printf("SPL: stop spl_mach_pressure_monitor_thread, lock acquired, setting exit variable and waiting\n");
-	spl_mach_pressure_monitor_thread_exit = TRUE;
-	while(spl_mach_pressure_monitor_thread_exit) {
-	  cv_signal(&spl_mach_pressure_monitor_thread_cv);
-	  cv_wait(&spl_mach_pressure_monitor_thread_cv, &spl_mach_pressure_monitor_thread_lock);
-	}
-	printf("SPL: spl_mach_pressure_monitor_thread stop: while loop ended, dropping mutex\n");
-	mutex_exit(&spl_mach_pressure_monitor_thread_lock);
-	printf("SPL: spl_mach_pressure_monitor_thread stop: destroying cv and mutex\n");
-	cv_destroy(&spl_mach_pressure_monitor_thread_cv);
-	mutex_destroy(&spl_mach_pressure_monitor_thread_lock);
-	mutex_destroy(&spl_os_pages_are_wanted_lock);
-
 	printf("SPL: stop spl_free_thread\n");
 	mutex_enter(&spl_free_thread_lock);
 	printf("SPL: stop spl_free_thread, lock acquired, setting exit variable and waiting\n");
@@ -4921,6 +4906,23 @@ spl_kmem_thread_fini(void)
 	mutex_destroy(&spl_free_thread_lock);
 	mutex_destroy(&spl_free_lock);
 	mutex_destroy(&spl_free_manual_pressure_lock);
+
+	printf("SPL: stop spl_mach_pressure_monitor_thread\n");
+	mutex_enter(&spl_mach_pressure_monitor_thread_lock);
+	printf("SPL: stop spl_mach_pressure_monitor_thread, lock acquired, setting exit variable and waiting\n");
+	spl_mach_pressure_monitor_thread_exit = TRUE;
+	printf("SPL: stop spl_mach_pressure_monitor_thread may take a long time in memory monitor call\n");
+	while(spl_mach_pressure_monitor_thread_exit) {
+	  cv_signal(&spl_mach_pressure_monitor_thread_cv);
+	  cv_wait(&spl_mach_pressure_monitor_thread_cv, &spl_mach_pressure_monitor_thread_lock);
+	}
+	printf("SPL: spl_mach_pressure_monitor_thread stop: while loop ended, dropping mutex\n");
+	mutex_exit(&spl_mach_pressure_monitor_thread_lock);
+	printf("SPL: spl_mach_pressure_monitor_thread stop: destroying cv and mutex\n");
+	cv_destroy(&spl_mach_pressure_monitor_thread_cv);
+	mutex_destroy(&spl_mach_pressure_monitor_thread_lock);
+	mutex_destroy(&spl_os_pages_are_wanted_lock);
+
 
 	printf("SPL: bsd_untimeout\n");
 	bsd_untimeout(kmem_update,  0);
