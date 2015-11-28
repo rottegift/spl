@@ -535,6 +535,7 @@ typedef struct spl_stats {
   kstat_named_t spl_spl_free_delta_ema;
   kstat_named_t spl_spl_free_negative_count;
   kstat_named_t spl_spl_minimal_uses_spl_free;
+  kstat_named_t spl_active_tsd;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -556,6 +557,7 @@ static spl_stats_t spl_stats = {
     {"spl_spl_free_delta_ema", KSTAT_DATA_UINT64},
     {"spl_spl_free_negative_count", KSTAT_DATA_UINT64},
     {"spl_spl_minimal_uses_spl_free", KSTAT_DATA_INT64},
+    {"active_tsd", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4472,6 +4474,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_spl_free_fast_pressure.value.i64 = spl_free_fast_pressure;
 		ks->spl_spl_free_delta_ema.value.i64 = spl_free_delta_ema;
 		ks->spl_spl_minimal_uses_spl_free.value.i64 = spl_minimal_uses_spl_free;
+		ks->spl_active_tsd.value.ui64 = spl_tsd_size();
 	}
 
 	return (0);
