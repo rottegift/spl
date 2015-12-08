@@ -522,6 +522,7 @@ typedef struct spl_stats {
     kstat_named_t spl_active_mutex;
     kstat_named_t spl_active_rwlock;
     kstat_named_t spl_monitor_thread_wake_count;
+    kstat_named_t spl_active_tsd;
   kstat_named_t spl_reap_thread_wake_count;
   kstat_named_t spl_reap_thread_reaped_count;
   kstat_named_t spl_reap_thread_miss;
@@ -535,7 +536,6 @@ typedef struct spl_stats {
   kstat_named_t spl_spl_free_delta_ema;
   kstat_named_t spl_spl_free_negative_count;
   kstat_named_t spl_spl_minimal_uses_spl_free;
-  kstat_named_t spl_active_tsd;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -544,6 +544,7 @@ static spl_stats_t spl_stats = {
     {"active_mutex", KSTAT_DATA_UINT64},
     {"active_rwlock", KSTAT_DATA_UINT64},
     {"monitor_thread_wake_count", KSTAT_DATA_UINT64},
+    {"active_tsd", KSTAT_DATA_UINT64},
     {"reap_thread_wake_count", KSTAT_DATA_UINT64},
     {"reap_thread_reaped_count", KSTAT_DATA_UINT64},
     {"reap_thread_miss", KSTAT_DATA_UINT64},
@@ -557,7 +558,6 @@ static spl_stats_t spl_stats = {
     {"spl_spl_free_delta_ema", KSTAT_DATA_UINT64},
     {"spl_spl_free_negative_count", KSTAT_DATA_UINT64},
     {"spl_spl_minimal_uses_spl_free", KSTAT_DATA_INT64},
-    {"active_tsd", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -2589,7 +2589,7 @@ kmem_alloc_tryhard(size_t size, size_t *asize, int kmflag)
 static void
 kmem_cache_reap(kmem_cache_t *cp)
 {
-    ASSERT(taskq_member(kmem_taskq, curthread));
+    //ASSERT(taskq_member(kmem_taskq, curthread));
 
 	//return;
 
@@ -2974,7 +2974,7 @@ kmem_cache_update(kmem_cache_t *cp)
 	kmem_cache_reap(cp);
       }
     }
-#endif	
+#endif
 
 }
 
@@ -4058,7 +4058,7 @@ spl_free_thread()
   double ema_new = 0;
   double ema_old = 0;
   double alpha;
-  
+
   CALLB_CPR_INIT(&cpr, &spl_free_thread_lock, callb_generic_cpr, FTAG);
 
   mutex_enter(&spl_free_lock);
@@ -4123,7 +4123,7 @@ spl_free_thread()
       //                             so it's a big shrink.
 
       spl_free -= (pct_used - 95) * (int64_t)(total_memory / 1000ULL);
-	
+
       lowmem = true;
     }
 
@@ -4361,7 +4361,7 @@ memory_monitor_thread()
 	while (!memory_monitor_thread_exit) {
 
 	  mutex_exit(&memory_monitor_lock);
-		
+
 		spl_stats.spl_monitor_thread_wake_count.value.ui64++;
 
 		if (!shutting_down) {
@@ -4396,7 +4396,7 @@ memory_monitor_thread()
 		    cv_broadcast(&memory_monitor_thread_cv);
 		  }
 		} //! shutting down
-				
+
 		// block until signalled, or after 1 second
 		mutex_enter(&memory_monitor_lock);
 		dprintf("SPL: MMT calling cv_timedwait\n");
@@ -4461,12 +4461,13 @@ spl_kstat_update(kstat_t *ksp, int rw)
 	  if(ks->spl_spl_minimal_uses_spl_free.value.i64 != spl_minimal_uses_spl_free) {
 	    spl_minimal_uses_spl_free = ks->spl_spl_minimal_uses_spl_free.value.i64;
 	  }
-		
+
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
 		ks->spl_active_threads.value.ui64 = zfs_threads;
 		ks->spl_active_mutex.value.ui64 = zfs_active_mutex;
 		ks->spl_active_rwlock.value.ui64 = zfs_active_rwlock;
+		ks->spl_active_tsd.value.ui64 = spl_tsd_size();
 		ks->spl_vm_page_free_min_multiplier.value.ui64 = (uint64_t)vm_page_free_min_multiplier;
 		ks->spl_vm_page_free_min_min.value.ui64 = (uint64_t)vm_page_free_min_min;
 		ks->spl_spl_free.value.i64 = spl_free;
@@ -4474,7 +4475,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_spl_free_fast_pressure.value.i64 = spl_free_fast_pressure;
 		ks->spl_spl_free_delta_ema.value.i64 = spl_free_delta_ema;
 		ks->spl_spl_minimal_uses_spl_free.value.i64 = spl_minimal_uses_spl_free;
-		ks->spl_active_tsd.value.ui64 = spl_tsd_size();
 	}
 
 	return (0);
@@ -4492,7 +4492,7 @@ spl_kmem_init(uint64_t total_memory)
 
 	sysctl_register_oid(&sysctl__spl);
 	sysctl_register_oid(&sysctl__spl_kext_version);
-	
+
 	// Initialise the kstat lock
 	mutex_init(&kmem_cache_lock, "kmem_cache_lock", MUTEX_DEFAULT, NULL); // XNU
 	mutex_init(&kmem_flags_lock, "kmem_flags_lock", MUTEX_DEFAULT, NULL); // XNU
@@ -4843,9 +4843,9 @@ spl_kmem_thread_init(void)
     (void)cv_init(&reap_thread_cv, NULL, CV_DEFAULT, NULL);
 
     spl_mach_pressure_monitor_thread_exit = FALSE;
-    (void)thread_create(NULL, 0, spl_mach_pressure_monitor_thread, 0, 0, 0, 0, 92);
     (void)cv_init(&spl_mach_pressure_monitor_thread_cv, NULL, CV_DEFAULT, NULL);
-    
+    (void)thread_create(NULL, 0, spl_mach_pressure_monitor_thread, 0, 0, 0, 0, 92);
+
     memory_monitor_thread_exit = FALSE;
     (void)thread_create(NULL, 0, memory_monitor_thread, 0, 0, 0, 0, 92);
     (void)cv_init(&memory_monitor_thread_cv, NULL, CV_DEFAULT, NULL);
@@ -4916,6 +4916,7 @@ spl_kmem_thread_fini(void)
 	spl_mach_pressure_monitor_thread_exit = TRUE;
 	printf("SPL: stop spl_mach_pressure_monitor_thread may take a long time in memory monitor call\n");
 	while(spl_mach_pressure_monitor_thread_exit) {
+		thread_wakeup((event_t)&vm_page_free_wanted);
 	  cv_signal(&spl_mach_pressure_monitor_thread_cv);
 	  cv_wait(&spl_mach_pressure_monitor_thread_cv, &spl_mach_pressure_monitor_thread_lock);
 	}
@@ -6012,7 +6013,7 @@ spl_vm_pool_low(void)
   }
 
   return 0;
-  
+
 }
 
 //===============================================================
