@@ -104,6 +104,8 @@ static boolean_t spl_free_fast_pressure = FALSE;
 
 static int64_t spl_minimal_uses_spl_free = TRUE;
 
+static uint64_t spl_reap_timeout_seconds = 300;
+
 // Start and end address of kernel memory
 //http://fxr.watson.org/fxr/source/osfmk/vm/vm_resident.c?v=xnu-2050.18.24;im=excerpts#L135
 extern vm_offset_t virtual_space_start;
@@ -536,6 +538,7 @@ typedef struct spl_stats {
   kstat_named_t spl_spl_free_delta_ema;
   kstat_named_t spl_spl_free_negative_count;
   kstat_named_t spl_spl_minimal_uses_spl_free;
+  kstat_named_t spl_spl_reap_timeout_seconds;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -558,6 +561,7 @@ static spl_stats_t spl_stats = {
     {"spl_spl_free_delta_ema", KSTAT_DATA_UINT64},
     {"spl_spl_free_negative_count", KSTAT_DATA_UINT64},
     {"spl_spl_minimal_uses_spl_free", KSTAT_DATA_INT64},
+    {"spl_spl_reap_timeout_seconds", KSTAT_DATA_UINT64 },
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4226,7 +4230,7 @@ reap_thread()
       kmem_reap();
       kmem_reap_idspace();
       spl_stats.spl_reap_thread_reaped_count.value.ui64++;
-    } else if(zfs_lbolt() - last_reap > (hz*3600)) {
+    } else if(zfs_lbolt() - last_reap > (hz*spl_reap_timeout_seconds)) {
       reap_now = 0;
       mutex_exit(&reap_now_lock);
       printf("SPL: %s periodic unconditional reap: last reap %llu seconds ago, memory in use %llu\n",
@@ -4462,6 +4466,10 @@ spl_kstat_update(kstat_t *ksp, int rw)
 	    spl_minimal_uses_spl_free = ks->spl_spl_minimal_uses_spl_free.value.i64;
 	  }
 
+	  if(ks->spl_spl_reap_timeout_seconds.value.ui64 != spl_reap_timeout_seconds) {
+	    spl_reap_timeout_seconds = ks->spl_spl_reap_timeout_seconds.value.ui64;
+	    }
+
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
 		ks->spl_active_threads.value.ui64 = zfs_threads;
@@ -4475,6 +4483,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_spl_free_fast_pressure.value.i64 = spl_free_fast_pressure;
 		ks->spl_spl_free_delta_ema.value.i64 = spl_free_delta_ema;
 		ks->spl_spl_minimal_uses_spl_free.value.i64 = spl_minimal_uses_spl_free;
+		ks->spl_spl_reap_timeout_seconds.value.ui64 = spl_reap_timeout_seconds;
 	}
 
 	return (0);
