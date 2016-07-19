@@ -104,7 +104,7 @@ static boolean_t spl_free_fast_pressure = FALSE;
 
 static int64_t spl_minimal_uses_spl_free = TRUE;
 
-static uint64_t spl_reap_timeout_seconds = 300;
+static uint64_t spl_reap_timeout_seconds = 15;
 
 // Start and end address of kernel memory
 //http://fxr.watson.org/fxr/source/osfmk/vm/vm_resident.c?v=xnu-2050.18.24;im=excerpts#L135
