@@ -4238,7 +4238,7 @@ reap_thread()
       last_reap = zfs_lbolt();
       previous_segkmem_total_mem_allocated = om;
       kmem_reap();
-      //kmem_reap_idspace();
+      kmem_reap_idspace();
       spl_stats.spl_reap_thread_reaped_count.value.ui64++;
     } else if(reap_now && om > previous_segkmem_total_mem_allocated) {
       reap_now = 0;
