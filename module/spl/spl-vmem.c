@@ -328,8 +328,10 @@ static vmem_t *vmem_metadata_arena;
 static vmem_t *vmem_seg_arena;
 static vmem_t *vmem_hash_arena;
 static vmem_t *vmem_vmem_arena;
-static vmem_t *heap_parent_parent; // This is a proxy arena that is a thin wrapper around the OS allocator
-static vmem_t *heap_parent; // This is a proxy arena that is a thin wrapper around the OS allocator
+vmem_t *spl_root_arena; // This is is an early-kernel-allocated slice of memory underlying all vmems
+static void *spl_root_arena_memory; // This holds the global allocation
+static uint64_t spl_root_arena_memory_size;
+static vmem_t *heap_parent; // This underlies the heap, and implements alloc policy and stats for it
 static struct timespec	vmem_update_interval	= {15, 0};	/* vmem_update() every 15 seconds */
 static struct timespec  vmem_fast_update_interval = {1, 0};  // for when there are waiting threads
 uint32_t vmem_mtbf;		/* mean time between failures [default: off] */
@@ -2149,14 +2151,33 @@ vmem_init(const char *heap_name,
 	 * go direct to the OS.
 	 */
 
-	heap_parent_parent = vmem_create("heap_parent_parent", NULL, 0,
-	    4*1024*1024, NULL, NULL, NULL, 0, VM_SLEEP | VM_NEXTFIT);
+#ifdef _KERNEL
+	void *osif_malloc(uint64_t size);
+	extern uint64_t real_total_memory;
+
+	spl_root_arena_memory_size = real_total_memory/2;
+	spl_root_arena_memory = osif_malloc(spl_root_arena_memory_size); // right size?
+
+	if(spl_root_arena_memory == NULL) {
+		panic("SPL: unable to allocate spl_root_arena_memory (%llu bytes)",
+		    spl_root_arena_memory_size);
+	}
+
+	spl_root_arena = vmem_create("spl_root_arena", spl_root_arena_memory,
+	    spl_root_arena_memory_size, PAGESIZE, NULL, NULL, NULL, 0, VM_SLEEP);
+
+	heap_parent = vmem_create("heap_parent",  NULL, 0, PAGESIZE,
+	    vmem_alloc, vmem_free, spl_root_arena, 4*1024*1024,
+	    VM_SLEEP | VMC_NO_QCACHE);
+#else
+	spl_root_arena = vmem_create("spl_root_arena", NULL, 0,
+	    4*1024*1024, NULL, NULL, NULL, 0, VM_SLEEP);
 
 	heap_parent = vmem_create("heap_parent",
 							  NULL, 0, heap_quantum,
-							  heap_alloc, heap_free, heap_parent_parent, 4*1024*1024,
+							  heap_alloc, heap_free, spl_root_arena, 4*1024*1024,
 							  VM_SLEEP | VMC_NO_QCACHE);
-	
+#endif
 	heap = vmem_create(heap_name,
 					   NULL, 0, heap_quantum,
 					   vmem_alloc, vmem_free, heap_parent, 0,
@@ -2247,8 +2268,8 @@ void vmem_fini(vmem_t *heap)
 	vmem_walk(heap_parent, VMEM_ALLOC,
 			  vmem_fini_freelist, heap_parent);
 
-	vmem_walk(heap_parent_parent, VMEM_ALLOC,
-	    vmem_fini_freelist, heap_parent_parent);
+	vmem_walk(spl_root_arena, VMEM_ALLOC,
+	    vmem_fini_freelist, spl_root_arena);
 	
 	for (id = 0; id < 6; id++) {// From vmem_init, 6 vmem_create
 		vmem_xfree(vmem_vmem_arena, global_vmem_reap[id], sizeof (vmem_t));
@@ -2264,6 +2285,12 @@ void vmem_fini(vmem_t *heap)
 	}
 	printf("SPL: Released %llu bytes from arenas\n", total);
 	list_destroy(&freelist);
+
+#ifdef _KERNEL
+	extern void osif_free_noninline(void *, uint64_t);
+
+	osif_free_noninline(spl_root_arena_memory, spl_root_arena_memory_size);
+#endif
 	
 #if 0 // Don't release, panics
 	mutex_destroy(&vmem_panic_lock);

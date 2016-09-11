@@ -246,6 +246,12 @@ osif_malloc_uncapped(uint64_t size)
 #endif				/* _KERNEL */
 }
 
+void *
+osif_malloc(uint64_t size)
+{
+	return(osif_malloc_uncapped(size));
+}
+
 inline static void *
 osif_malloc_capped(uint64_t size)
 {
@@ -345,6 +351,12 @@ osif_free(void* buf, uint64_t size)
 #else
     free(buf);
 #endif /* _KERNEL */
+}
+
+void
+osif_free_noninline (void *buf, uint64_t size)
+{
+	osif_free(buf, size);
 }
 
 /*
@@ -549,12 +561,22 @@ segkmem_zio_init()
 
 	// for now we duke it out on size using segkmem_zio_alloc
 
+#ifdef _KERNEL
+	extern vmem_t *spl_root_arena;
+
+	zio_arena_parent_parent = NULL;
+
+	zio_arena_parent = vmem_create("zfs_file_data_p", NULL, 0,
+	    PAGESIZE, vmem_alloc, vmem_free, spl_root_arena,
+	    4*1024*1024, VM_SLEEP | VMC_NO_QCACHE);
+#else
 	zio_arena_parent_parent = vmem_create("zfs_file_data_p_p", NULL, 0,
 	    4*1024*1024, NULL, NULL, NULL, 0, VM_SLEEP);
 
 	zio_arena_parent = vmem_create("zfs_file_data_p", NULL, 0,
 	    PAGESIZE, segkmem_zio_alloc, segkmem_zio_free, zio_arena_parent_parent,
 	    4*1024*1024, VM_SLEEP | VMC_NO_QCACHE);
+#endif
 
 	zio_arena = vmem_create("zfs_file_data", NULL, 0,
 	    PAGESIZE, vmem_alloc, vmem_free, zio_arena_parent,
@@ -568,6 +590,12 @@ segkmem_zio_fini(void)
 {
 	if (zio_arena) {
 		vmem_destroy(zio_arena);
+	}
+	if (zio_arena_parent) {
+		vmem_destroy(zio_arena_parent);
+	}
+	if (zio_arena_parent_parent) {
+		vmem_destroy(zio_arena_parent_parent);
 	}
 }
 
