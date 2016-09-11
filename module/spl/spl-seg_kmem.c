@@ -246,12 +246,6 @@ osif_malloc_uncapped(uint64_t size)
 #endif				/* _KERNEL */
 }
 
-void *
-osif_malloc(uint64_t size)
-{
-	return(osif_malloc_uncapped(size));
-}
-
 inline static void *
 osif_malloc_capped(uint64_t size)
 {
@@ -340,6 +334,13 @@ osif_malloc_pushpage(size_t size, const char *caller)
 
 	return (NULL);
 }
+
+void *
+osif_malloc(uint64_t size)
+{
+	return(osif_malloc_pushpage(size, __func__));
+}
+
 
 inline static void
 osif_free(void* buf, uint64_t size)

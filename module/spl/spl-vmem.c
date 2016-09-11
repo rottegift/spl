@@ -329,7 +329,7 @@ static vmem_t *vmem_seg_arena;
 static vmem_t *vmem_hash_arena;
 static vmem_t *vmem_vmem_arena;
 vmem_t *spl_root_arena; // This is is an early-kernel-allocated slice of memory underlying all vmems
-static void *spl_root_arena_memory; // This holds the global allocation
+static void *spl_root_arena_memory[64] = {NULL}; // 128GiB is max supported in xnu's vm_map.c
 static uint64_t spl_root_arena_memory_size;
 static vmem_t *heap_parent; // This underlies the heap, and implements alloc policy and stats for it
 static struct timespec	vmem_update_interval	= {15, 0};	/* vmem_update() every 15 seconds */
@@ -2152,19 +2152,36 @@ vmem_init(const char *heap_name,
 	 */
 
 #ifdef _KERNEL
+
+	/*
+	 * xnu's vm_kern.c imposes a a 2GiB per-allocation limit,
+	 * so start with an empty spl_root_arena and vmem_add one
+	 * gibibyte at a time
+	 *
+	 */
 	void *osif_malloc(uint64_t size);
 	extern uint64_t real_total_memory;
+	const uint64_t one_gib = 1024ULL*1024ULL*1024ULL;
 
-	spl_root_arena_memory_size = real_total_memory/2;
-	spl_root_arena_memory = osif_malloc(spl_root_arena_memory_size); // right size?
+	spl_root_arena = vmem_create("spl_root_arena", NULL, 0,
+	    PAGESIZE, NULL, NULL, NULL, 0, VM_SLEEP);
 
-	if(spl_root_arena_memory == NULL) {
-		panic("SPL: unable to allocate spl_root_arena_memory (%llu bytes)",
-		    spl_root_arena_memory_size);
+	spl_root_arena_memory_size = MIN(real_total_memory/2, 64ULL*one_gib);
+
+	int gibibytes_to_add = (int)(spl_root_arena_memory_size / one_gib) - 1;
+
+	for (int index = 0; index <  gibibytes_to_add; index++) {
+		spl_root_arena_memory[index] = osif_malloc(one_gib);
+		if (spl_root_arena_memory[index] == NULL) {
+			panic("SPL: %s unable to allocate %llu", __func__, one_gib);
+		} else {
+			vmem_add(spl_root_arena, spl_root_arena_memory[index], one_gib, VM_SLEEP);
+			printf("SPL: %s did vmem_add(spl_root_arena, spl_root_arena_memory[%d], %llu, VM_SLEEP)\n",
+			    __func__, index, one_gib);
+		}
 	}
-
-	spl_root_arena = vmem_create("spl_root_arena", spl_root_arena_memory,
-	    spl_root_arena_memory_size, PAGESIZE, NULL, NULL, NULL, 0, VM_SLEEP);
+	printf("SPL: spl_root_arena populated, %s segkmem_total_mem_allocated == %llu\n",
+	    __func__, segkmem_total_mem_allocated);
 
 	heap_parent = vmem_create("heap_parent",  NULL, 0, PAGESIZE,
 	    vmem_alloc, vmem_free, spl_root_arena, 4*1024*1024,
@@ -2289,7 +2306,13 @@ void vmem_fini(vmem_t *heap)
 #ifdef _KERNEL
 	extern void osif_free_noninline(void *, uint64_t);
 
-	osif_free_noninline(spl_root_arena_memory, spl_root_arena_memory_size);
+	for (int i = 0; i < 64; i++) {
+		const uint64_t one_gib = 1024ULL*1024ULL*1024ULL;
+		if(spl_root_arena_memory[i] != NULL) {
+			osif_free_noninline(spl_root_arena_memory[i], one_gib);
+			printf("SPL: %s freed spl_root_arena_memory[%d]\n", __func__, i);
+		}
+	}
 #endif
 	
 #if 0 // Don't release, panics
