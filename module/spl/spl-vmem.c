@@ -223,9 +223,9 @@
 //#include <sys/panic.h>
 #include <stdbool.h>
 
-#define	VMEM_INITIAL		14	/* early vmem arenas */
-#define	VMEM_SEG_INITIAL	400
-//200	/* early segments */
+#define	VMEM_INITIAL		21	/* early vmem arenas */
+#define	VMEM_SEG_INITIAL	800
+//200 //400	/* early segments */
 
 /*
  * Adding a new span to an arena requires two segment structures: one to
@@ -323,35 +323,24 @@ static kmutex_t vmem_sleep_lock;
 static kmutex_t vmem_nosleep_lock;
 static kmutex_t vmem_pushpage_lock;
 static kmutex_t vmem_panic_lock;
-static kmutex_t vmem_flush_free_lock;
+static kmutex_t vmem_xnu_alloc_free_lock;
+static kcondvar_t vmem_xnu_alloc_free_cv;
 static vmem_t *vmem_list;
 static vmem_t *vmem_metadata_arena;
 static vmem_t *vmem_seg_arena;
 static vmem_t *vmem_hash_arena;
 static vmem_t *vmem_vmem_arena;
-static vmem_t *free_arena;
-vmem_t *spl_root_arena; // The bottom-most arena for SPL
-static vmem_t *spl_root_arena_parent;
-static void *spl_root_initial_reserve_import;
-static  uint64_t spl_root_initial_reserve_import_size;
-vmem_t *spl_fixed_size_arena;
-static void *spl_fixed_size_initial_allocation = NULL;
-static void *spl_fixed_size_initial_allocation_two = NULL;
-static size_t spl_fixed_size_initial_allocation_size;
-vmem_t *xnu_import_arena;
-#define NUMBER_OF_ARENAS_IN_VMEM_INIT 10
+static vmem_t *spl_default_arena; // The bottom-most arena for SPL
+static vmem_t *spl_default_arena_parent; // dummy arena as a placeholder
+#define VMEM_BUCKETS 13
+#define VMEM_BUCKET_LOWBIT 12
+#define VMEM_BUCKET_HIBIT 24
+static vmem_t *vmem_bucket_arena[VMEM_BUCKETS];
+vmem_t *spl_heap_arena;
+#define NUMBER_OF_ARENAS_IN_VMEM_INIT 21
 static struct timespec	vmem_update_interval	= {15, 0};	/* vmem_update() every 15 seconds */
-static struct timespec  spl_root_refill_interval = {0, MSEC2NSEC(100)};   // spl_root_refill() every 100 ms
-static struct timespec  spl_root_refill_interval_long = {1, 0}; // every one second otherwise
-static struct timespec  vmem_vacuum_thread_interval = {30, 0};
-boolean_t spl_root_refill_enabled = true;
-uint32_t spl_root_refill_percent_highwater = 60;
-uint32_t spl_root_refill_percent_lowater = 50;
 uint32_t vmem_mtbf;		/* mean time between failures [default: off] */
 size_t vmem_seg_size = sizeof (vmem_seg_t);
-
-uint64_t vmem_free_memory_recycled = 0;
-uint64_t vmem_free_memory_released = 0;
 
 static vmem_kstat_t vmem_kstat_template = {
 	{ "mem_inuse",		KSTAT_DATA_UINT64 },
@@ -1020,18 +1009,13 @@ vmem_canalloc(vmem_t *vmp, size_t size)
 	return (flist);
 }
 
-// wrap vmem_canalloc with the mutex its ASSERT requires,
-// and also with the vacuuming mutex
-static int
-vmem_canalloc_nomutex(vmem_t *vmp, size_t size)
+int
+vmem_canalloc_lock(vmem_t *vmp, size_t size)
 {
-	ASSERT(!MUTEX_HELD(&vmp->vm_lock));
-	mutex_enter(&vmem_flush_free_lock);
 	mutex_enter(&vmp->vm_lock);
-	int r = vmem_canalloc(vmp, size);
+	int i = vmem_canalloc(vmp, size);
 	mutex_exit(&vmp->vm_lock);
-	mutex_exit(&vmem_flush_free_lock);
-	return (r);
+	return (i);
 }
 
 /*
@@ -1065,19 +1049,6 @@ spl_vmem_xnu_useful_bytes_free(void)
 	return (useful_free);
 }
 
-static inline boolean_t
-spl_vmem_critical_space(void)
-{
-	extern volatile unsigned int vm_page_free_wanted;
-	extern volatile unsigned int vm_page_free_count;
-	extern volatile unsigned int vm_page_free_min;
-
-	if (vm_page_free_wanted > 0 || vm_page_free_count <= vm_page_free_min)
-		return (false);
-	else
-		return (true);
-}
-
 /*
  * Top-level allocator for spl_root, replacing segkmem_alloc
  *
@@ -1091,8 +1062,6 @@ spl_vmem_critical_space(void)
  * Finally, we can return NULL and expect vmem_canalloc (not _nomutex!) will fail and hit
  * the cv_wait in vmem_xalloc (assuming not VM_NOSLEEP, VM_ABORT or VM_PANIC)
  */
-
-static uint64_t vmem_flush_free_to_root();
 
 static void *
 spl_vmem_malloc_unconditionally(size_t size)
@@ -1121,372 +1090,6 @@ spl_vmem_malloc_if_no_pressure(size_t size)
 		atomic_inc_64(&spl_vmem_conditional_alloc_deny);
 		atomic_add_64(&spl_vmem_conditional_alloc_deny, size);
 		return (NULL);
-	}
-}
-
-
-/*
- * functions for upper-bounded waiting for space on the primary sources
- * (1. spl_fixed_size_arena, 2. spl_root_arena, 3. xnu)
- *
- * constraints: wait-time, resolution, size, [instant|best]
- *
- * for 1 & 2,   [instant|best] map to VM_INSTANT or VM_BEST
- * for 3 (xnu), [instant|best] map to spl_vmem_malloc[if_no_pressure|unconditionally]
- *              although the latter will only do in the face of pressure after wait-time
- *
- * returns NULL or an address to a size-sized segment in the arena
- *
- * in the case of (3), the returned size-sized segment may be at the start
- * of a freshly added-as-import span which is larger than size
- *
- * may return either sooner than wait-time, but not later
- *
- */
-
-static void *
-timed_alloc_reserve(size_t size, hrtime_t timeout, hrtime_t resolution, bool best)
-{
-	vmem_t *vmp = spl_fixed_size_arena;
-
-	const size_t minfree = 32ULL*1024ULL*1024ULL;
-	const size_t waitsize = MAX(size, minfree);
-
-	int flags = VM_ABORT | VM_NOSLEEP;
-	if (best)
-		flags |= VM_BESTFIT;
-
-	mutex_enter(&vmp->vm_lock);
-	if (vmem_canalloc(vmp, waitsize)) {
-		mutex_exit(&vmp->vm_lock);
-		void *p = vmem_alloc(vmp, size, flags);
-		if (p) {
-			return (p);
-		}
-	}
-	(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
-	    timeout, resolution, 0);
-	int can = vmem_canalloc(vmp, size);
-	int canbig = vmem_canalloc(vmp, waitsize);
-	uint64_t f = vmem_size(vmp, VMEM_FREE);
-	mutex_exit(&vmp->vm_lock);
-
-	if (!can)
-		return (NULL);
-
-	if (f <= minfree * 2ULL)
-		return (NULL);
-
-	if (!canbig)
-		flags |= VM_BESTFIT;
-
-	void *p = vmem_alloc(vmp, size, flags);
-	if (p) {
-		atomic_inc_64(&ta_reserve_success);
-		atomic_add_64(&ta_reserve_success_bytes, size);
-	} else {
-		atomic_inc_64(&ta_reserve_fail);
-	}
-	return (p);
-}
-
-// if memory is in xnu_import_arena, use it, otherwise
-// put memory into xnu_import_arena, allocate a segment in there,
-// and return the pointer to the segment.
-static void *
-timed_alloc_root_xnu(size_t size, hrtime_t timeout, hrtime_t resolution, bool even_if_pressure)
-{
-	vmem_t *vmp = xnu_import_arena;
-
-	static volatile uint64_t last_alloc = 0;
-
-	void *m = vmem_alloc(vmp, size, VM_NOSLEEP | VM_ABORT);
-	if (m) {
-		atomic_inc_64(&ta_xnu_vmem_alloc);
-		atomic_add_64(&ta_xnu_vmem_bytes, size);
-		return (m);
-	} else if (timeout >= MSEC2NSEC(1)) {
-		mutex_enter(&vmp->vm_lock);
-		(void)cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
-		    timeout, resolution, 0);
-		mutex_exit(&vmp->vm_lock);
-		m = vmem_alloc(vmp, size, VM_NOSLEEP | VM_ABORT);
-		if (m) {
-			atomic_inc_64(&ta_xnu_vmem_alloc_wait);
-			atomic_add_64(&ta_xnu_vmem_bytes, size);
-			return (m);
-		}
-	}
-
-	uint64_t covering_size; // ask xnu for a big block
-	uint64_t adjusted_size; // ask xnu for at least this much
-	uint64_t allocated_size; // what we succeeded in getting from xnu
-
-	// highbit64 returns bit number + 1; bit number < 63.
-	if (size <  spl_minalloc) {
-		covering_size = spl_minalloc * 4;
-		adjusted_size = spl_minalloc;
-	} else {
-		int hb = highbit(size);
-		adjusted_size = 1ULL << hb;
-		if (size >= (32ULL*1024ULL*1024ULL))
-			covering_size = adjusted_size;
-		else
-			covering_size = 1ULL << (hb+1);
-	}
-
-	// if we've recently done an allocation and used it, be greedy
-	// 16MiB is not going to tip xnu over the edge, and will allow
-	// for several other allocations to avoid pestering it during
-	// its page scan, eviction, compression and/or swapout.
-	uint64_t timenow = zfs_lbolt();
-
-	if (timenow < last_alloc + 10*hz) {
-		if (covering_size < 16ULL*1024ULL*1024ULL)
-			covering_size = 16ULL*1024ULL*1024ULL;
-	}
-
-        void *p = spl_vmem_malloc_if_no_pressure(covering_size);
-	allocated_size = covering_size;
-	if (p) {
-		atomic_inc_64(&ta_xnu_first_alloc);
-	} else {
-		// The XNU allocator can take many milliseconds
-		// below this point, and that and the potential
-		// exhaustion of the full timeout period here
-		// can lead to choppy streaming video playback
-		// when the arc is essentially at maximal size
-		// and is not seeing pressure because xnu is
-		// compressing and dropping pages in the background
-		// while still maintaining a healthy number of
-		// free pages.  this effect is most obvious
-		// when the streaming dataset's recordsize is at
-		// or above spl_minfree, especially if we fall
-		// through to doing just size alloc below.
-		// Therefore we want to tell arc we have
-		// hit an effective ceiling, but not have it overreact,
-		// so we do not get stutter after stutter.
-		spl_free_set_emergency_pressure((int64_t)size*4LL);
-		mutex_enter(&vmp->vm_lock);
-		(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
-		    timeout, resolution, 0);
-		mutex_exit(&vmp->vm_lock);
-
-		p = spl_vmem_malloc_if_no_pressure(covering_size);
-		allocated_size = covering_size;
-		if (p) {
-			atomic_inc_64(&ta_xnu_second_alloc);
-		} else {
-			if (adjusted_size < covering_size) {
-				p = spl_vmem_malloc_if_no_pressure(adjusted_size);
-				allocated_size = adjusted_size;
-				if (p) {
-					atomic_inc_64(&ta_xnu_smaller_alloc);
-				}
-			} else {
-				atomic_inc_64(&ta_xnu_skip_smaller);
-			}
-		}
-	}
-	if (p == NULL && even_if_pressure) {
-		p = spl_vmem_malloc_unconditionally(covering_size);
-		allocated_size = covering_size;
-		if (p) {
-			atomic_inc_64(&ta_xnu_unconditional_alloc);
-			atomic_add_64(&ta_xnu_unconditional_alloc_bytes, allocated_size);
-		}
-	}
-	if (p == NULL) {
-		if (even_if_pressure) {
-			atomic_inc_64(&ta_xnu_unconditional_fail);
-			spl_free_set_emergency_pressure((int64_t)size * 16LL);
-		} else {
-			atomic_inc_64(&ta_xnu_fail);
-			spl_free_set_emergency_pressure((int64_t)size* 4LL);
-		} return (NULL);
-	}
-
-	mutex_enter(&vmp->vm_lock);
-	vmem_seg_t *whole_span_seg_vsp;
-	if (vmem_populate(vmp, VM_SLEEP)) {
-		whole_span_seg_vsp = vmem_span_create(vmp, p, allocated_size, 1);
-		vmem_seg_alloc(vmp, whole_span_seg_vsp, (uintptr_t)p, size);
-		vmp->vm_kstat.vk_parent_alloc.value.ui64++;
-	} else {
-		printf("SPL: %s  WOAH! WTF! vmem_populate(%s, VM_SLEEP) returned NULL\n",
-		    __func__, vmp->vm_name);
-		extern void osif_free(void *, uint64_t);
-		osif_free(p, allocated_size);
-	}
-	mutex_exit(&vmp->vm_lock);
-
-	atomic_inc_64(&ta_xnu_success);
-	atomic_add_64(&ta_xnu_success_bytes, size);
-	return (p);
-}
-
-/*
- * Loop:
- * Try to allocate in, in order: reserve, root, xnu.
- * With different timeouts for VM_NOSLEEP and VM_SLEEP.
- * If VM_NOSLEEP or VM_ABORT, return NULL on failure of first pass.
- *
- */
-
-static void *
-spl_root_allocator(vmem_t *vmp, size_t size, int flags)
-{
-	// MUTEX NOT HELD ON ENTRY
-	ASSERT(!MUTEX_HELD(&vmp->vm_lock));
-
-	// xalloc invokes this with vmp->vm_source in the first argument
-	// so it will be spl_root_arena_parent
-
-	if (vmp == spl_root_arena_parent)
-		vmp = spl_root_arena;
-	else
-		printf("SPL: %s WOAH! vmp is %s!\n",
-		    __func__, vmp->vm_name);
-
-	ASSERT(!MUTEX_HELD(&vmp->vm_lock));
-
-	if (mutex_owner(&vmp->vm_lock) == curthread)
-		printf("SPL: %s ERROR! I am holding the mutex lock for %s!\n",
-		    __func__, vmp->vm_name);
-
-	atomic_inc_64(&spl_root_allocator_calls);
-
-	uint32_t pass = 0;
-
-	if (size > spl_minalloc)
-		atomic_add_64(&spl_root_allocator_large_bytes_asked, size);
-	else if (size < spl_minalloc)
-		atomic_add_64(&spl_root_allocator_small_bytes_asked, size);
-	else
-		atomic_add_64(&spl_root_allocator_minalloc_bytes_asked, size);
-
-	uint64_t loopstart = zfs_lbolt();
-	uint64_t one_tenth_second = loopstart + (hz/10);
-
-	bool tried_xnu_alloc = false;
-
-	while (1) {
-
-		pass++;
-
-		if (pass > 1)
-			atomic_inc_64(&spl_root_allocator_extra_pass);
-
-		void *p = NULL;
-
-		hrtime_t resolution = 0; // this is OK in current cv_timedwait_hires()
-		hrtime_t maxtime;
-
-		// cv_timedwait_hires() has a lower limit of 100 nsec, which
-		// is reset to 1000 nsec (== 1 usec), so we are OK with microseconds
-		// which xnu's mach msleep is OK with too.
-		const hrtime_t tinymaxtime = USEC2NSEC(1);
-		const hrtime_t shortmaxtime = USEC2NSEC(50);
-		const hrtime_t longmaxtime = MSEC2NSEC(1);
-		const hrtime_t verylongmaxtime = MSEC2NSEC(10);
-
-		if (flags & (VM_NOSLEEP | VM_ABORT))
-			maxtime = tinymaxtime;
-		else if (pass < 2 && spl_root_refill_enabled)
-			maxtime = longmaxtime;
-		else if (pass < 2)
-			maxtime = shortmaxtime;
-		else if (spl_root_refill_enabled)
-			maxtime = verylongmaxtime;
-		else
-			maxtime = shortmaxtime;
-
-		bool reserve_best = false;
-		if (pass > 4)
-			reserve_best = true;
-
-		// if we have headroom in the reserve, allocate there if we can
-		uint64_t reserve_free = vmem_size_locked(spl_fixed_size_arena, VMEM_FREE);
-		uint64_t vmem_metadata_size = vmem_size_locked(vmem_metadata_arena, VMEM_ALLOC | VMEM_FREE);
-
-		if (reserve_free > 2ULL * vmem_metadata_size) {
-			p = timed_alloc_reserve(size, maxtime, resolution, reserve_best);
-			if (p != NULL)
-				return (p);
-		}
-
-		if (flags & (VM_NOSLEEP | VM_ABORT))
-			maxtime = tinymaxtime;
-		else if (spl_root_refill_enabled)
-			maxtime = verylongmaxtime;
-		else
-			maxtime = shortmaxtime;
-
-		// try a wait to see if we can recover some space
-		if (!(flags & (VM_NOSLEEP | VM_ABORT)) &&
-		    vmem_canalloc_nomutex(free_arena, size)) {
-			(void) vmem_flush_free_to_root();
-			mutex_enter(&vmp->vm_lock);
-			(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock, maxtime, resolution, 0);
-			mutex_exit(&vmp->vm_lock);
-			if (vmem_canalloc_nomutex(vmp, size)) {
-				atomic_inc_64(&spl_root_allocator_recovered);
-				atomic_add_64(&spl_root_allocator_recovered_bytes, size);
-				return (NULL);
-			}
-		}
-
-		// if we're hunting for memory and free_arena has some,
-		// flush it, if we're allowed to wait for the flush
-		if (pass > 2 && vmem_size_locked(free_arena, VMEM_FREE)) {
-			if (!(flags & (VM_NOSLEEP | VM_ABORT))) {
-				void vmem_vacuum_free_arena(void);
-				vmem_vacuum_free_arena();
-			}
-		}
-
-		bool even_if_pressure = false;
-		if (flags & VM_NOSLEEP) {
-			maxtime = tinymaxtime;
-			if (size > spl_minalloc || (flags & VM_PANIC))
-				even_if_pressure = true;
-		} else if (flags & VM_ABORT) {
-			maxtime = tinymaxtime;
-			even_if_pressure = false;
-		} else if ((zfs_lbolt() < one_tenth_second || pass < 5) &&
-		    !(flags & (VM_NOSLEEP | VM_ABORT))) {
-			// we don't try to do an allocation right away if we
-			// are permitted to wait
-			continue;
-		} else if (zfs_lbolt() < one_tenth_second) {
-			if (spl_root_refill_enabled)
-				maxtime = verylongmaxtime;
-			else
-				maxtime = shortmaxtime;
-			even_if_pressure = false;
-		} else {
-			if (spl_root_refill_enabled)
-				maxtime = verylongmaxtime;
-			else
-				maxtime = shortmaxtime;
-			if (size > spl_minalloc)
-				even_if_pressure = tried_xnu_alloc;
-			dprintf("SPL: %s - WOAH! - pass %u, time elapsed %llu ticks, forcing allocation of %llu\n",
-			    __func__, pass, zfs_lbolt() - loopstart, (uint64_t)size);
-		}
-
-		p = timed_alloc_root_xnu(size, maxtime, resolution, even_if_pressure);
-
-		if (p != NULL) {
-			return (p);
-		} else if (flags & (VM_NOSLEEP | VM_ABORT)) {
-			spl_free_set_emergency_pressure(16*size);
-			return (NULL);
-		} else if (tried_xnu_alloc && (zfs_lbolt() > one_tenth_second || pass >= 10)) {
-			spl_free_set_emergency_pressure(16*size);
-			return (NULL);
-		}
-		tried_xnu_alloc = true;
 	}
 }
 
@@ -1954,25 +1557,6 @@ vmem_add(vmem_t *vmp, void *vaddr, size_t size, int vmflag)
 	return (vaddr);
 }
 
-static void *
-vmem_add_as_import(vmem_t *vmp, void *vaddr, size_t size, int vmflag)
-{
-	if (vaddr == NULL || size == 0)
-		panic("vmem_add_as_import(%p, %p, %lu): bad arguments",
-		    (void *)vmp, vaddr, size);
-
-	ASSERT(!vmem_contains(vmp, vaddr, size));
-
-	mutex_enter(&vmp->vm_lock);
-	if (vmem_populate(vmp, vmflag))
-		(void) vmem_span_create(vmp, vaddr, size, 1);
-	else
-		vaddr = NULL;
-	mutex_exit(&vmp->vm_lock);
-	return (vaddr);
-}
-
-
 /*
  * Walk the vmp arena, applying func to each segment matching typemask.
  * If VMEM_REENTRANT is specified, the arena lock is dropped across each
@@ -2026,13 +1610,16 @@ vmem_walk(vmem_t *vmp, int typemask,
 size_t
 vmem_size(vmem_t *vmp, int typemask)
 {
-	uint64_t size = 0;
+	int64_t size = 0;
 
 	if (typemask & VMEM_ALLOC)
-		size += vmp->vm_kstat.vk_mem_inuse.value.ui64;
+		size += (int64_t)vmp->vm_kstat.vk_mem_inuse.value.ui64;
 	if (typemask & VMEM_FREE)
-		size += vmp->vm_kstat.vk_mem_total.value.ui64 -
-		vmp->vm_kstat.vk_mem_inuse.value.ui64;
+		size += (int64_t)vmp->vm_kstat.vk_mem_total.value.ui64 -
+		    (int64_t)vmp->vm_kstat.vk_mem_inuse.value.ui64;
+	if (size < 0)
+		size = 0;
+
 	return ((size_t)size);
 }
 
@@ -2047,6 +1634,30 @@ vmem_size_locked(vmem_t *vmp, int typemask)
 	if (!m)
 		mutex_exit(&vmp->vm_lock);
 	return (s);
+}
+
+size_t
+vmem_size_semi_atomic(vmem_t *vmp, int typemask)
+{
+	int64_t size = 0;
+	uint64_t inuse = 0;
+	uint64_t total = 0;
+
+	__sync_swap(&total, vmp->vm_kstat.vk_mem_total.value.ui64);
+	__sync_swap(&inuse, vmp->vm_kstat.vk_mem_inuse.value.ui64);
+
+	int64_t inuse_signed = (int64_t)inuse;
+	int64_t total_signed = (int64_t)total;
+
+	if (typemask & VMEM_ALLOC)
+		size += inuse_signed;
+	if (typemask & VMEM_FREE)
+		size += total_signed - inuse_signed;
+
+	if (size < 0)
+		size = 0;
+
+	return ((size_t) size);
 }
 
 size_t
@@ -2143,8 +1754,12 @@ vmem_create_common(const char *name, void *base, size_t size, size_t quantum,
 	 * increase their imports, giving a similar effect.
 	 */
 	if (vmp->vm_cflags & VMC_NO_QCACHE) {
-		vmp->vm_min_import =
-		VMEM_QCACHE_SLABSIZE(nqcache << vmp->vm_qshift);
+		if (qcache_max > VMEM_NQCACHE_MAX && ISP2(qcache_max)) {
+			vmp->vm_min_import = qcache_max;
+		} else {
+			vmp->vm_min_import =
+			    VMEM_QCACHE_SLABSIZE(nqcache << vmp->vm_qshift);
+		}
 		nqcache = 0;
 	}
 
@@ -2168,12 +1783,14 @@ vmem_create_common(const char *name, void *base, size_t size, size_t quantum,
 		kstat_install(vmp->vm_ksp);
 	}
 
+	printf("SPL: %s about to lock %s\n", __func__, name);
 	mutex_enter(&vmem_list_lock);
 	vmpp = &vmem_list;
 	while ((cur = *vmpp) != NULL)
 		vmpp = &cur->vm_next;
 	*vmpp = vmp;
 	mutex_exit(&vmem_list_lock);
+	printf("SPL: %s unlocked %s\n", __func__, name);
 
 	if (vmp->vm_cflags & VMC_POPULATOR) {
 		ASSERT(vmem_populators < VMEM_INITIAL);
@@ -2379,43 +1996,6 @@ vmem_hash_rescale(vmem_t *vmp)
  * Perform periodic maintenance on all vmem arenas.
  */
 
-void vmem_vacuum_free_arena(void);
-void vmem_vacuum_xnu_import_arena(void);
-
-static uint64_t vmem_vacuum_spl_root_arena(void);
-
-void
-vmem_vacuum_thread(void *dummy)
-{
-	vmem_vacuum_free_arena();
-	vmem_vacuum_xnu_import_arena();
-
-	extern volatile unsigned int vm_page_free_wanted;
-	extern volatile unsigned int vm_page_free_count;
-	extern volatile unsigned int vm_page_free_min;
-
-	// vacuum if we are fragmented (or have ample free in root)
-	// fragmentation metric: 25% free space
-	mutex_enter(&spl_root_arena->vm_lock);
-	size_t rtotal = vmem_size(spl_root_arena, VMEM_ALLOC | VMEM_FREE);
-	size_t rfree = vmem_size(spl_root_arena, VMEM_FREE);
-	size_t rused = vmem_size(spl_root_arena, VMEM_ALLOC);
-	size_t rimported = spl_root_arena->vm_kstat.vk_mem_import.value.ui64;
-	mutex_exit(&spl_root_arena->vm_lock);
-
-	if (rfree > rimported / 4)  	// if free > 25% of imported
-		vmem_vacuum_spl_root_arena();
-	else if (rtotal / 2 > rused)    // if we've used less than half of imported+initial
-		vmem_vacuum_spl_root_arena();
-	else if (vm_page_free_wanted > 0 || vm_page_free_count <= vm_page_free_min) {
-		// if system memory is tight, also blow free arena away
-		vmem_vacuum_spl_root_arena();
-		vmem_vacuum_free_arena();
-	}
-
-	bsd_timeout(vmem_vacuum_thread, dummy, &vmem_vacuum_thread_interval);
-}
-
 void
 vmem_update(void *dummy)
 {
@@ -2442,218 +2022,6 @@ vmem_update(void *dummy)
 	(void) bsd_timeout(vmem_update, dummy, &vmem_update_interval);
 }
 
-/*
- * try to lift a large chunk of the reserve arena into the root arena
- * this helps reduce refill thread going to the xnu allocator, and also
- * having the refill thread be (and appear to be) underused compared to
- * the root arena.
- *
- * greater use of the root arena will reduce the number of calls to
- * XNU's allocator and freer, and also reduce the overall memory footprint
- * of the vmem+kmem system.
- *
- * additionally this saves on intensive mutex and convar activity in and
- * below sra_root_alloc()
- *
- * use parent_alloc flag for visibility.
- *
- */
-
-static uint64_t
-try_lift_reserve(void)
-{
-        mutex_enter(&spl_fixed_size_arena->vm_lock);
-        uint64_t reserve_free = vmem_size(spl_fixed_size_arena, VMEM_FREE);
-        uint64_t reserve_size = vmem_size(spl_fixed_size_arena, VMEM_ALLOC | VMEM_FREE);
-        mutex_exit(&spl_fixed_size_arena->vm_lock);
-	uint64_t h_unalign = reserve_size / 2;
-	uint64_t half_reserve_size;
-
-	// since we are interested in vmem segments, we really want
-	// to be working with powers-of-two
-
-	if (ISP2(h_unalign)) {
-		half_reserve_size = h_unalign;
-	} else {
-		int hb = highbit(h_unalign);
-		half_reserve_size = 1ULL << (hb - 1);
-		ASSERT(half_reserve_size == h_unalign);
-	}
-
-	if (reserve_free < half_reserve_size) {
-		uint64_t quarter_reserve_size = reserve_size / 4;
-		// if we have between 1/4 and 1/2 of the reserve free,
-		// and there is no SPAMAX segment available in spl_root,
-		// then we will only try to lift a 64 MiB this time
-		if (reserve_free >= quarter_reserve_size) {
-			const uint64_t spamax = 16ULL*1024ULL*1024ULL;
-			const uint64_t sixtyfour = 64ULL*1024ULL*1024ULL;
-			if (!vmem_canalloc_nomutex(spl_root_arena, spamax) &&
-			    vmem_canalloc_nomutex(spl_fixed_size_arena, sixtyfour)) {
-				void *m = vmem_alloc(spl_fixed_size_arena, sixtyfour,
-				    VM_NOSLEEP | VM_ABORT);
-				if (m) {
-					vmem_add_as_import(spl_root_arena, m, sixtyfour, 0);
-					atomic_inc_64(&spl_fixed_size_arena->vm_kstat.vk_parent_alloc.value.ui64);
-					return (sixtyfour);
-				} else {
-					return (0); // vmem_alloc failed
-				}
-			} else {
-				return (0); // root has memory, or reserve does not
-			}
-		}
-		return (0); // less than 1/2 free
-	}
-
-	uint64_t minimal_alloc = 16ULL*1024ULL*1024ULL;
-
-	for (uint64_t current_try = half_reserve_size;
-	     current_try >= minimal_alloc;
-	     current_try >>= 1ULL) {
-		void *m = vmem_alloc(spl_fixed_size_arena, current_try, VM_NOSLEEP | VM_ABORT);
-		if (m) {
-			atomic_inc_64(&spl_fixed_size_arena->vm_kstat.vk_parent_alloc.value.ui64);
-			vmem_add_as_import(spl_root_arena, m, current_try, 0);
-			return (current_try);
-		}
-	}
-
-	return (0);
-}
-
-
-/*
- * refill thread: regularly pull in memory, if needed and possible
- */
-static uint64_t vmem_add_memory_to_spl_root_arena(size_t, size_t);
-static void spl_root_arena_free_to_free_arena(vmem_t *, void *, size_t);
-
-void
-spl_root_refill(void *dummy)
-{
-	boolean_t wait = true;
-	static boolean_t hit_highwater_and_waiting = false;
-	static uint64_t hit_highwater_waiting_since = 0;
-	static boolean_t we_added_to_pressure = false;
-	static uint64_t avoid_pressure_until = 0;
-
-	extern uint64_t real_total_memory;
-
-	int64_t target_free = real_total_memory/64;
-
-	// maybe move some memory from the reserve arena
-
-	uint64_t lifted = try_lift_reserve();
-	if (lifted > 0) {
-		target_free -= lifted;
-		wait = true;
-	}
-
-	uint64_t now = zfs_lbolt();
-
-	// if we contributed to pressure recently, skip to the bsd_timeout.
-	if (we_added_to_pressure == true) {
-		if (now >= avoid_pressure_until) {
-			we_added_to_pressure = false;
-		} else {
-			spl_root_refill_enabled = false;
-			wait = true;
-			goto out;
-		}
-	}
-
-	const uint64_t spamax = 16ULL * 1024ULL * 1024ULL;
-
-	// if we can't satisfy an allocation for spamax, try now (pressure permitting)
-	// (pressure is dealt with in vmem_add_memory_to_spl_root_arena())
-
-	if (!hit_highwater_and_waiting &&
-	    !vmem_canalloc_nomutex(spl_root_arena, spamax) &&
-	    !vmem_canalloc_nomutex(spl_fixed_size_arena, spamax) &&
-	    !vmem_canalloc_nomutex(xnu_import_arena, spamax)) {
-		if(vmem_add_memory_to_spl_root_arena(spamax, spamax) == spamax) {
-			target_free -= spamax;
-			wait = true; // we can satisfy spamax now, so no need to rush
-		}
-	}
-
-	uint64_t root_free = vmem_size_locked(spl_root_arena, VMEM_FREE);
-	uint64_t xi_free = vmem_size_locked(xnu_import_arena, VMEM_FREE);
-	uint64_t reserve_free = vmem_size_locked(spl_fixed_size_arena, VMEM_FREE);
-
-	// we still want to opportunistically grab spl_minalloc sized blocks
-	// if vmem_alloc(..., spl_minalloc, VM_NOSLEEP) calls would fail.
-	if (!vmem_canalloc_nomutex(spl_root_arena, spl_minalloc))
-		root_free = 0;
-	if (!vmem_canalloc_nomutex(spl_fixed_size_arena, spl_minalloc))
-		reserve_free = 0;
-	if (!vmem_canalloc_nomutex(xnu_import_arena, spl_minalloc))
-		xi_free = 0;
-
-	uint64_t arena_free = root_free + reserve_free + xi_free;
-
-	// amount pulled in by previous refills + initial amount allocated in vmem_init +
-	// anything not recycled or released yet
-	uint64_t sys_mem_in_use = segkmem_total_mem_allocated;
-
-	// if we don't have target_free in spl_root_arena, try to add spans
-	// as long as total vmem isn't above 60% of real_total_memory.
-
-	uint64_t hipct = (uint64_t)spl_root_refill_percent_highwater;
-	uint64_t lopct = (uint64_t)spl_root_refill_percent_lowater;
-	uint64_t high_threshold = real_total_memory * hipct / 100ULL;
-	uint64_t low_threshold = real_total_memory * lopct / 100ULL;
-
-	if (!hit_highwater_and_waiting &&
-	    target_free > 0 &&
-	    arena_free < target_free  &&
-	    sys_mem_in_use < high_threshold &&
-	    spl_vmem_xnu_useful_bytes_free() > spl_minalloc * 32) {
-		uint64_t r = vmem_add_memory_to_spl_root_arena(target_free, spl_minalloc);
-		if (r == 0) {
-			wait = true; // didn'g grab any, sleep longer
-			we_added_to_pressure = true;
-			avoid_pressure_until = now + hz*120;
-		} else if (r < target_free){
-			wait = true; // couldn't grab everything, so wait a while before retrying
-		} else {
-			wait = false; // grabbed everything, greedily grab more soon if necessary
-		}
-	} else if (spl_vmem_xnu_useful_bytes_free() < spl_minalloc * 32) {
-		we_added_to_pressure = true;
-		avoid_pressure_until = now + hz*120;
-		wait = true;
-	}
-
-	if (!hit_highwater_and_waiting && sys_mem_in_use > high_threshold) {
-		hit_highwater_and_waiting = true;
-		hit_highwater_waiting_since = now;
-		wait = true;
-	} else if (hit_highwater_and_waiting &&
-		   sys_mem_in_use < low_threshold &&
-		   (now > (hit_highwater_waiting_since + 1800*hz))) {
-		printf("SPL: %s: below threshold after %llu seconds, filling again.\n",
-		 __func__, now - hit_highwater_waiting_since);
-		hit_highwater_and_waiting = false;
-		hit_highwater_waiting_since = 0;
-		wait = false;
-	} else if (hit_highwater_and_waiting) {
-	        wait = true;
-	}
-
-	spl_root_refill_enabled = !hit_highwater_and_waiting;
-
-	// if we could allocate a large chunk of memory from the reserve, wait longer
-	if (!wait && vmem_canalloc_nomutex(spl_fixed_size_arena, target_free / 2))
-		wait = true;
-out:
-	if (wait)
-		bsd_timeout(spl_root_refill, dummy, &spl_root_refill_interval_long);
-	else
-		bsd_timeout(spl_root_refill, dummy, &spl_root_refill_interval);
-}
-
 void
 vmem_qcache_reap(vmem_t *vmp)
 {
@@ -2667,195 +2035,100 @@ vmem_qcache_reap(vmem_t *vmp)
 			kmem_cache_reap_now(vmp->vm_qcache[i]);
 }
 
-static uint64_t vmem_vacuum_spl_root_arena(void);
-
-/*
- * vmem_add_a_gibibyte_to_spl_root_arena()
- *
- * if we cannot recycle memory sitting in free_memory arena,
- * then we do our best (given instantaneous behaviour of xnu vm  memory)
- * to add minalloc-sized spans to spl_root_arena as imported spans
- * (so they can be freed dynamically and also appear in the import kstat)
- * until we reach 1 GiB.
- *
- * minalloc == 1GiB is fine for any system where the most common
- * recordsize/volblocksize <= 1 MiB.
- *
- * larger allocations will either (if possible) come directly from the huge span
- * added to spl_root early in vmem_init(), or via a call out from vmem_xalloc()
- * to code that if necessary adds a largeer allocation
- *
- * should minalloc be different? dynamic? run-time tunable?
- *
- */
-// RETURNS ***BYTES***
-static uint64_t
-vmem_add_memory_to_spl_root_arena(size_t size, size_t span_size)
+static void *
+xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 {
-	const uint64_t gibi = 1024ULL*1024ULL*1024ULL;
-	const uint64_t minalloc = MAX(span_size, spl_minalloc);
-	const uint64_t pages_per_alloc = minalloc/PAGESIZE;
+	mutex_enter(&vmem_xnu_alloc_free_lock);
+	void *m = spl_vmem_malloc_if_no_pressure(size);
+	mutex_exit(&vmem_xnu_alloc_free_lock);
 
-	uint64_t alloc_bytes = MIN(size, gibi);
-	uint64_t allocs = alloc_bytes / minalloc;
-
-	// vacuum root if we are fragmented (or have ample free in root)
-	// fragmentation metric: 12.5% free space
-	mutex_enter(&spl_root_arena->vm_lock);
-	size_t rtotal = vmem_size(spl_root_arena, VMEM_ALLOC | VMEM_FREE);
-	size_t rfree = vmem_size(spl_root_arena, VMEM_FREE);
-	size_t rused = vmem_size(spl_root_arena, VMEM_ALLOC);
-	mutex_exit(&spl_root_arena->vm_lock);
-	extern uint64_t real_total_memory;
-
-	if (rtotal > (real_total_memory / 4) && rfree > (rtotal / 8))
-		vmem_vacuum_spl_root_arena();
-	else if (rtotal / 2 > rused)
-		vmem_vacuum_spl_root_arena();
-
-	// in critically low memory, just return anything in free_arena to XNU, as
-	// below we can fight for XNU memory with other non-spl allocators.
-	if (spl_vmem_critical_space()) {
-		vmem_vacuum_free_arena();
+	if (m != NULL) {
+		cv_signal(&vmem_xnu_alloc_free_cv);
+		return (m);
 	}
 
-	uint64_t recovered_bytes = vmem_flush_free_to_root();
-	uint64_t recovered_minallocs = recovered_bytes / minalloc;
+	if (vmflag & VM_PANIC)
+		return (spl_vmem_malloc_unconditionally(size));
 
-	// if we recovered the full gibibyte, just return
+	if (vmflag & VM_NOSLEEP)
+		return (NULL);
 
-	if (recovered_bytes >= alloc_bytes) {
-		return (recovered_bytes);
-	}
+	for (int iter = 0; ; iter++) {
+		mutex_enter(&vmem_xnu_alloc_free_lock);
+		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv, &vmem_xnu_alloc_free_lock,
+		    USEC2NSEC(500), 0, 0);
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 
-	// if nothing is waiting on memory and we recovered
-	// anything (but less than the full gibibyte) then just return
-
-	if (recovered_minallocs > 0 &&
-	    spl_vmem_threads_waiting == 0) {
-		return(recovered_bytes);
-	}
-
-	mutex_enter(&spl_root_arena->vm_lock);
-	rfree = vmem_size(spl_root_arena, VMEM_FREE);
-	rused = vmem_size(spl_root_arena, VMEM_ALLOC);
-	mutex_exit(&spl_root_arena->vm_lock);
-	rtotal = rfree + rused;
-
-	// bail out early if there is ample space in any of the arenas
-	mutex_enter(&xnu_import_arena->vm_lock);
-	uint64_t xi_free = vmem_size(xnu_import_arena, VMEM_FREE);
-	uint64_t xi_size = vmem_size(xnu_import_arena, VMEM_FREE | VMEM_ALLOC);
-	mutex_exit(&xnu_import_arena->vm_lock);
-	uint64_t resv_alloc = vmem_size_locked(spl_fixed_size_arena, VMEM_ALLOC);
-
-	if (rtotal > resv_alloc) {
-		// we've pulled more than the reserve into spl_root_arena
-		// and we have 12.5% or more unallocated space in spl_root_arena
-		if (rfree > (rtotal / 8))
-			return (recovered_bytes);
-	}
-
-	if (xi_free > 0 && xi_size > 64ULL*1024ULL*1024ULL) {
-		// we have gone to xnu for more than a small amount memory
-		// and 50% of what we have from xnu is free
-		if (xi_free > (xi_size / 2))
-			return (recovered_bytes);
-	}
-
-	// if we recovered enough space to have 1 GiB free, just return
-
-	if (recovered_minallocs > 0 && recovered_bytes + rfree > alloc_bytes)
-		return (recovered_bytes);
-
-	// if we recovered enough that we have 1/8 of spl_root_arena free, just return
-
-	if (recovered_minallocs > 0 && recovered_bytes + rfree > rtotal / 8)
-		return(recovered_bytes);
-
-	// otherwise, we just deflate the number of allocs we need
-
-	if (recovered_minallocs >= allocs)
-		return(recovered_bytes);
-
-	allocs -= recovered_minallocs;
-
-	// don't grab more memory if we recovered any and are in short supply
-
-	if (recovered_minallocs > 0 &&
-	    (!spl_vmem_critical_space() || spl_vmem_xnu_useful_bytes_free() < minalloc))
-		return (recovered_bytes);
-
-	for (uint64_t i = 1; i <= allocs; i++) {
-		void *a = spl_vmem_malloc_if_no_pressure(minalloc);
-		if (a == NULL) {
-			dprintf("SPL: WOAH! %s bailing out after only %llu pages for %s.\n",
-			    __func__, i * pages_per_alloc, spl_root_arena->vm_name);
-			spl_root_arena->vm_kstat.vk_fail.value.ui64++;
-			return (recovered_bytes + i * minalloc);
+		if (spl_vmem_xnu_useful_bytes_free() > size) {
+			void *a = spl_vmem_malloc_if_no_pressure(size);
+			if (a != NULL) {
+				cv_signal(&vmem_xnu_alloc_free_cv);
+				return (a);
+			}
+		} else if (iter > 10) {
+			// bail out and let vmem_xalloc() deal with it
+			return (NULL);
 		} else {
-			mutex_enter(&vmem_flush_free_lock);
-		        vmem_add_as_import(spl_root_arena, a, minalloc, VM_NOSLEEP);
-			mutex_exit(&vmem_flush_free_lock);
-			spl_root_arena->vm_kstat.vk_parent_xalloc.value.ui64++;
+			spl_free_set_emergency_pressure(size * (iter+1));
 		}
-		rfree = vmem_size_locked(spl_root_arena, VMEM_FREE);
-		if (rfree > gibi)
-			return (recovered_bytes + i * minalloc);
 	}
-	return (alloc_bytes);
+	return (NULL);
 }
 
-/*
- * Prepare vmem for use.
- */
-
 static void
-spl_segkmem_free_if_not_big(vmem_t *vmp, void *inaddr, size_t size)
+xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 {
-	if (vmem_contains(spl_fixed_size_arena, inaddr, size)) {
-		bzero(inaddr, size);
-		vmem_free(spl_fixed_size_arena, inaddr, size);
-		mutex_enter(&spl_fixed_size_arena->vm_lock);
-		cv_broadcast(&spl_fixed_size_arena->vm_cv);
-		mutex_exit(&spl_fixed_size_arena->vm_lock);
-	} else if (vmem_contains(xnu_import_arena, inaddr, size)) {
-		vmem_free(xnu_import_arena, inaddr, size);
+	extern void osif_free(void *, uint64_t);
+
+	// Serialize behind a (short) delay, giving
+	// xnu time to do freelist management and
+	// PT teardowns
+	mutex_enter(&vmem_xnu_alloc_free_lock);
+	for (int i = 0; i < 10; i++) {
+		clock_t r;
+		r = cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
+		    &vmem_xnu_alloc_free_lock,
+		    USEC2NSEC(100), 0, 0);
+		if (r < 1)
+			break;
+	}
+	osif_free(vaddr, size);
+	// cause other waiter(s) to exit their cv_timewait*s early
+	// so that at least 100 usec pass before the next osif_free()
+	// call from a xnu_free_throttled() is made.
+	cv_broadcast(&vmem_xnu_alloc_free_cv);
+	mutex_exit(&vmem_xnu_alloc_free_lock);
+}
+
+static void *
+vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
+{
+	int hb = highbit(size);
+
+	if (hb > VMEM_BUCKET_HIBIT) {
+		return (vmem_alloc(spl_default_arena, size, vmflags));
 	} else {
-		extern void segkmem_free(vmem_t *, void *, size_t);
-		segkmem_free(vmp, inaddr, size);
-		cv_broadcast(&vmp->vm_cv);
+		int bucket = hb - VMEM_BUCKET_LOWBIT;
+		if (bucket < 0)
+			bucket = 0;
+		return (vmem_alloc(vmem_bucket_arena[bucket], size, vmflags));
 	}
 }
 
 static void
-vmem_free_transfer(vmem_t *source, void *inaddr, size_t size, vmem_t *destination)
+vmem_bucket_free(vmem_t *vmp, void *vaddr, size_t size)
 {
-	bzero(inaddr, size);
-	vmem_add_as_import(destination, inaddr, size, VM_NOSLEEP);
-}
+	int hb = highbit(size);
 
-static void
-spl_root_arena_free_to_free_arena(vmem_t *vmp, void *inaddr, size_t size)
-{
-	if (vmem_contains(spl_fixed_size_arena, inaddr, size)) {
-		bzero(inaddr, size);
-		vmem_free(spl_fixed_size_arena, inaddr, size);
-		mutex_enter(&spl_fixed_size_arena->vm_lock);
-		cv_broadcast(&spl_fixed_size_arena->vm_cv);
-		mutex_exit(&spl_fixed_size_arena->vm_lock);
+	if (hb > VMEM_BUCKET_HIBIT) {
+		vmem_free(spl_default_arena, vaddr, size);
 	} else {
-		vmem_free_transfer(vmp, inaddr, size, free_arena);
+		int bucket = hb - VMEM_BUCKET_LOWBIT;
+		if (bucket < 0)
+			bucket = 0;
+		vmem_free(vmem_bucket_arena[bucket], vaddr, size);
 	}
 }
-
-static void
-free_arena_free_to_spl_root(vmem_t *vmp, void *inaddr, size_t size)
-{
-	vmem_free_transfer(vmp, inaddr, size, spl_root_arena);
-}
-
-static void *vmem_add_as_import(vmem_t *, void *, size_t, int);
 
 vmem_t *
 vmem_init(const char *heap_name,
@@ -2874,7 +2147,9 @@ vmem_init(const char *heap_name,
 	mutex_init(&vmem_nosleep_lock, "vmem_nosleep_lock", MUTEX_DEFAULT, NULL);
 	mutex_init(&vmem_pushpage_lock, "vmem_pushpage_lock", MUTEX_DEFAULT, NULL);
 	mutex_init(&vmem_panic_lock, "vmem_panic_lock", MUTEX_DEFAULT, NULL);
-	mutex_init(&vmem_flush_free_lock, "vmem_flush_free_lock", MUTEX_DEFAULT, NULL);
+
+	mutex_init(&vmem_xnu_alloc_free_lock, "vmem_xnu_alloc_free_lock", MUTEX_DEFAULT, NULL);
+	cv_init(&vmem_xnu_alloc_free_cv, "vmem_xnu_alloc_free_cv", CV_DEFAULT, NULL);
 
 	while (--nseg >= 0)
 		vmem_putseg_global(&vmem_seg0[nseg]);
@@ -2889,167 +2164,91 @@ vmem_init(const char *heap_name,
 	 * end the searches done by vmem_[x]alloc and vm_xfree; it
 	 * serves no other purpose; its stats will always be zero.
 	 *
-	 * The spl_fixed_size_arena takes an initial large allocation
-	 * from xnu's allocator at create time; it's scaled to the
-	 * system's physical memory, and provides a source for
-	 * allocations in the face of system memory pressure so as to
-	 * avoid waiting for xnu's allocator to gather up enough memory,
-	 * and to avoid contributing to memory pressure.  The initial
-	 * allocation from xnu's perspective remains as-is until module
-	 * unload.
-	 *
-	 * spl_root_arena serves as the vmem source for all other
-	 * arenas; it will be populated by memory in four ways: [1] an
-	 * initial small allocation for initializing its internal data
-	 * structures, since it cannot import from anywhere directly --
-	 * this memory is manually acquired from the reserve arena by a
-	 * vmem_alloc; [2] population by the spl_root_refill thread that
-	 * adds segments as imports; those segments come from [2a] XNU's
-	 * allocator proactively or in response to a shortfall in
-	 * already-added memory, or [2b] from the reserve arena; or [3]
-	 * from "recycling" memory previously freed.
-	 *
-	 * When frees from spl_root_arena's child arenas empty a span,
-	 * the span will be released to free_arena.  free_arena is
-	 * periodically either "recycled" back into spl_root_arena, so
-	 * that the latter can avoid going to XNU's allocator.  If there
-	 * is no demand or if there is pressure, free_arena is
-	 * "vacuumed", and gives back its accumulated spans to XNU.
-	 *
 	 */
 
-	spl_root_arena_parent = vmem_create("spl_root_arena_parent",  // id 0
+	spl_default_arena_parent = vmem_create("spl_default_arena_parent",  // id 0
 	    NULL, 0, heap_quantum, NULL, NULL, NULL, 0, VM_SLEEP);
 
-	const uint64_t half_gibibyte = 512ULL*1024ULL*1024ULL;
+	// illumos/openzfs has a gigantic pile of memory that it can use for its first arena;
+	// o3x is not so lucky, so we start with this
+
+	static char initial_default_block[16ULL*1024ULL*1024ULL] __attribute__((aligned(4096))) = { 0 };
+
+	spl_default_arena = vmem_create("spl_default_arena", // id 1
+	    initial_default_block, 16ULL*1024ULL*1024ULL,
+	    heap_quantum, xnu_alloc_throttled, xnu_free_throttled,
+	    spl_default_arena_parent, 16ULL*1024ULL*1024ULL, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
+
+	// create arenas for the VMEM_BUCKETS, id 2 - id 14
+	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
+		uint64_t bucket_smallest_size = (1ULL << i);
+		char *buf = vmem_alloc(spl_default_arena, VMEM_NAMELEN + 21, VM_SLEEP);
+		(void) snprintf(buf, VMEM_NAMELEN + 20, "%s_%llu",
+		    "bucket", bucket_smallest_size);
+		printf("SPL: %s creating arena %s (i == %d)\n", __func__, buf, i);
+		vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT] =
+		    vmem_create(buf, NULL, 0, heap_quantum,
+			xnu_alloc_throttled, xnu_free_throttled, spl_default_arena_parent,
+			16ULL*1024ULL*1024ULL, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
+	}
+
+	// spl_heap_arena, the bucket heap, is the primary interface to the vmem system
+
+	spl_heap_arena = vmem_create("bucket_heap", // id 15
+	    NULL, 0, heap_quantum,
+	    vmem_bucket_alloc, vmem_bucket_free, spl_default_arena_parent, 0,
+	    VM_SLEEP);
+
+	// add a fixed-sized allocation to spl_heap_arena
+
+	const size_t mib = 1024ULL * 1024ULL;
+	const size_t gib = 1024ULL * mib;
+	size_t resv_size = 128ULL * mib;
 	extern uint64_t real_total_memory;
-	boolean_t addtwo = false;
-	if (real_total_memory <= 15ULL*1024ULL*1024ULL*1024ULL &&
-	    real_total_memory >= 4ULL*1024ULL*1024ULL*1024ULL) {
-		spl_fixed_size_initial_allocation_size =
-		    MAX(real_total_memory / 16, half_gibibyte);
-	} else if (real_total_memory < 4ULL*1024ULL*1024ULL*1024ULL) {
-		// We need some memory for child arenas and other structures,
-		// notably the vmem_metadata arena, which is a direct child
-		// of spl_fixed_size_arena.  If this alloc is too small
-		// we will panic when creating more arenas or kmem caches.
-		// Minimum RAM size supported by macOS and Mac OS X is 2 GiB,
-		// so 256 MiB could be as large as 1/8 of RAM total.
-		spl_fixed_size_initial_allocation_size = half_gibibyte / 4;
-	} else {
-		spl_fixed_size_initial_allocation_size =
-		    MAX(real_total_memory / 64, 2ULL * half_gibibyte);
-		// nb: xnu forbids single allocations > 2 GiB in vm_kern.c.
-		// for machines > 128 GiB, we make the large arena two spans
-		// of 2 GiB each; 4 GiB should be sufficient for any size machine,
-		// thanks to the fill thread
-		if (spl_fixed_size_initial_allocation_size > 4ULL * half_gibibyte)
-			spl_fixed_size_initial_allocation_size = 4ULL * half_gibibyte;
-		addtwo = true;
-	}
 
-	printf("SPL: %s: doing initial large allocation of %llu bytes\n",
-	    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
+	if (real_total_memory >= 4ULL * gib)
+		resv_size = 256ULL * mib;
+	if (real_total_memory >= 8ULL * gib)
+		resv_size = 512ULL * mib;
+	if (real_total_memory >= 16ULL * gib)
+		resv_size = gib;
 
-	extern void *osif_malloc(uint64_t);
-	spl_fixed_size_initial_allocation = osif_malloc(spl_fixed_size_initial_allocation_size);
+	printf("SPL: %s adding fixed allocation of %llu to the bucket_heap\n",
+	    __func__, (uint64_t)resv_size);
 
-	if (spl_fixed_size_initial_allocation == NULL) {
-		panic("SPL: %s unable to make initial spl_fixed_size_arena allocation of %llu bytes\n",
-		    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
-	}
+	(void) vmem_add(spl_heap_arena,
+	    vmem_alloc(spl_default_arena, resv_size, VM_SLEEP),
+	    resv_size, VM_SLEEP);
 
-	spl_fixed_size_arena = vmem_create("spl_fixed_size_arena",  // id 1
-	    spl_fixed_size_initial_allocation, spl_fixed_size_initial_allocation_size, heap_quantum,
-	    NULL, NULL, spl_root_arena_parent, 0, VM_SLEEP | VMC_POPULATOR);
+	heap = vmem_create(heap_name,  // id 16
+	    NULL, 0, heap_quantum,
+	    vmem_alloc, vmem_free, spl_heap_arena, 0,
+	    VM_SLEEP);
 
-	printf("SPL: %s created spl_fixed_size_arena with %llu bytes.\n",
-	    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
-
-	// for large memory systems, there is enormous value in having an even larger
-	// reserve arena
-
-	if (addtwo) {
-		spl_fixed_size_initial_allocation_two =
-		    osif_malloc(spl_fixed_size_initial_allocation_size);
-		if (spl_fixed_size_initial_allocation_two == NULL)
-			panic("SPL: %s unable to make second spl_fixed_size_arena allocation of %llu bytes\n",
-			    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
-		if(NULL == vmem_add(spl_fixed_size_arena, spl_fixed_size_initial_allocation_two,
-			spl_fixed_size_initial_allocation_size, 0))
-			panic("SPL: %s vmem_add(splra, splra2, %llu, 0)  returned NULL!\n",
-			    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
-		printf("%s: successfully added %llu bytes to spl_fixed_size_arena.\n",
-		    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
-	}
-
-	spl_root_initial_reserve_import_size = half_gibibyte/16;
-	spl_root_initial_reserve_import = vmem_alloc(spl_fixed_size_arena,
-	    spl_root_initial_reserve_import_size, VM_PANIC | VM_NOSLEEP);
-
-	if (spl_root_initial_reserve_import == NULL)
-		panic("vmem_init: unable to vmem_alloc %llu bytes!", spl_root_initial_reserve_import_size);
-
-	spl_root_arena = vmem_create("spl_root_arena", // id 2
-	    spl_root_initial_reserve_import, spl_root_initial_reserve_import_size, heap_quantum,
-	    spl_root_allocator, spl_root_arena_free_to_free_arena, spl_root_arena_parent, 0,
-	    VM_SLEEP | VMC_POPULATOR);
-
-	uint64_t init_pop_size = spl_fixed_size_initial_allocation_size / 2;
-
-	printf("SPL: %s created spl_root_arena.   Trying to add %llu from reserve arena.\n",
-	    __func__, init_pop_size);
-
-	void *init_pop = vmem_alloc(spl_fixed_size_arena, init_pop_size, VM_NOSLEEP | VM_ABORT);
-
-	if (init_pop == NULL) {
-		printf("SPL: %s: WOAH! couldn't vmem_alloc %llu from %s !\n",
-		    __func__, init_pop_size, spl_fixed_size_arena->vm_name);
-	} else {
-		void *vaddr = vmem_add_as_import(spl_root_arena, init_pop, init_pop_size, VM_SLEEP);
-		if (vaddr == NULL) {
-			printf("SPL: %s: WOAH! vmem_add_as_import returned NULL!\n", __func__);
-			vmem_free(spl_fixed_size_arena, init_pop, init_pop_size);
-		}
-	}
-
-	free_arena = vmem_create("free_arena", // id 3
-	    NULL, 0,
-	    PAGESIZE, NULL, NULL, NULL, 0, VM_SLEEP);
-
-	extern void segkmem_free(vmem_t *, void *, size_t);
-	xnu_import_arena = vmem_create("xnu_import", // id 4
-	    NULL, 0, heap_quantum, NULL, NULL, NULL, 0, VM_SLEEP | VMC_POPULATOR);
-
-	heap = vmem_create(heap_name,  // id 5
-					   NULL, 0, heap_quantum,
-					   vmem_alloc, vmem_free, spl_root_arena, 0,
-					   VM_SLEEP);
-
-	// Root all the low bandwidth metadata arenas off the reserve arena.
+		// Root all the low bandwidth metadata arenas off the reserve arena.
 	// The allocations will all be 32 kiB or larger, and are only on the
 	// order of 24 MiB.
 
-	vmem_metadata_arena = vmem_create("vmem_metadata", // id 6
-	    NULL, 0, heap_quantum, vmem_alloc, vmem_free, spl_fixed_size_arena,
+	vmem_metadata_arena = vmem_create("vmem_metadata", // id 17
+	    NULL, 0, heap_quantum, vmem_alloc, vmem_free, spl_default_arena,
 	    8 * PAGESIZE, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
 
-	vmem_seg_arena = vmem_create("vmem_seg", // id 7
+	vmem_seg_arena = vmem_create("vmem_seg", // id 18
 								 NULL, 0, heap_quantum,
 								 vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								 VM_SLEEP | VMC_POPULATOR);
 
-	vmem_hash_arena = vmem_create("vmem_hash", // id 8
+	vmem_hash_arena = vmem_create("vmem_hash", // id 19
 								  NULL, 0, 8,
 								  vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								  VM_SLEEP);
 
-	vmem_vmem_arena = vmem_create("vmem_vmem", // id 9
+	vmem_vmem_arena = vmem_create("vmem_vmem", // id 20
 								  vmem0, sizeof (vmem0), 1,
 								  vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								  VM_SLEEP);
 
-	// 10 (0-based) vmem_create before this line. - macroized NUMBER_OF_ARENAS_IN_VMEM_INIT
+	// 21 (0-based) vmem_create before this line. - macroized NUMBER_OF_ARENAS_IN_VMEM_INIT
 	for (id = 0; id < vmem_id; id++) {
 		global_vmem_reap[id] = vmem_xalloc(vmem_vmem_arena, sizeof (vmem_t),
 										   1, 0, 0, &vmem0[id], &vmem0[id + 1],
@@ -3058,8 +2257,6 @@ vmem_init(const char *heap_name,
 
 	printf("SPL: starting vmem_update() thread\n");
 	vmem_update(NULL);
-	printf("SPL: starting vmem_vacuum_thread() thread\n");
-	vmem_vacuum_thread(NULL);
 
 	return (heap);
 }
@@ -3091,9 +2288,7 @@ vmem_fini(vmem_t *heap)
 	struct free_slab *fs;
 	uint64_t total;
 
-	bsd_untimeout(spl_root_refill, NULL);
 	bsd_untimeout(vmem_update, NULL);
-	bsd_untimeout(vmem_vacuum_thread, NULL);
 
 	/* Create a list of slabs to free by walking the list of allocs */
 	list_create(&freelist, sizeof (struct free_slab),
@@ -3109,13 +2304,7 @@ vmem_fini(vmem_t *heap)
 	vmem_walk(heap, VMEM_ALLOC,
 			  vmem_fini_freelist, heap);
 
-	vmem_walk(spl_root_arena, VMEM_ALLOC,
-	    vmem_fini_freelist, spl_root_arena);
-
-	vmem_walk(xnu_import_arena, VMEM_ALLOC,
-	    vmem_fini_freelist, xnu_import_arena);
-
-	for (id = 0; id < NUMBER_OF_ARENAS_IN_VMEM_INIT; id++) {// From vmem_init, 10 vmem_create macroized
+	for (id = 0; id < NUMBER_OF_ARENAS_IN_VMEM_INIT; id++) {// From vmem_init, 21 vmem_create macroized
 		vmem_xfree(vmem_vmem_arena, global_vmem_reap[id], sizeof (vmem_t));
 	}
 
@@ -3131,19 +2320,8 @@ vmem_fini(vmem_t *heap)
 	printf("SPL: Released %llu bytes from arenas\n", total);
 	list_destroy(&freelist);
 
-	extern void osif_free(void *, uint64_t);
-	printf("SPL: %s freeing spl_fixed_size_initial_allocation of %llu bytes.\n",
-	    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
-	osif_free(spl_fixed_size_initial_allocation, spl_fixed_size_initial_allocation_size);
-	if (spl_fixed_size_initial_allocation_two) {
-		printf("SPL: %s freeing spl_fixed_size_initial_allocation_two of %llu bytes.\n",
-		    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
-		osif_free(spl_fixed_size_initial_allocation_two,
-		    spl_fixed_size_initial_allocation_size);
-	}
-
 #if 0 // Don't release, panics
-	mutex_destroy(&vmem_flush_free_lock);
+	mutex_destroy(&vmem_xnu_alloc_free_lock);
 	mutex_destroy(&vmem_panic_lock);
 	mutex_destroy(&vmem_pushpage_lock);
 	mutex_destroy(&vmem_nosleep_lock);
@@ -3151,233 +2329,4 @@ vmem_fini(vmem_t *heap)
 	mutex_destroy(&vmem_segfree_lock);
 	mutex_destroy(&vmem_list_lock);
 #endif
-}
-
-
-static void
-vmem_vacuum_freelist(void *vmp, void *start, size_t size)
-{
-	static int32_t vacuum_segments_since_preempt = 1;
-	static uint64_t *last_vmp = NULL;
-	static uint64_t highest_total_os_memory_since_preempt = 0;
-
-	// ARENA mutex is not held, but we are under the vacuum mutex
-
-	// a different vacuum function has been started either by the vacuum thread
-	// or by the fill thread
-	if (vmp != last_vmp) {
-		last_vmp = vmp;
-		highest_total_os_memory_since_preempt = segkmem_total_mem_allocated;
-		vacuum_segments_since_preempt = 1;
-	}
-
-	// as large number of frees all at once can slow down the system, we
-	// preempt if xnu has been freeing, but not if another thread is allocating
-	if (segkmem_total_mem_allocated < highest_total_os_memory_since_preempt) {
-		if (highest_total_os_memory_since_preempt -
-		    segkmem_total_mem_allocated > 128ULL*1024ULL*1024ULL) {
-			kpreempt(KPREEMPT_SYNC);
-			highest_total_os_memory_since_preempt = segkmem_total_mem_allocated;
-			vacuum_segments_since_preempt = 1;
-		}
-	} else if (segkmem_total_mem_allocated > highest_total_os_memory_since_preempt) {
-		highest_total_os_memory_since_preempt = segkmem_total_mem_allocated;
-	}
-
-	// as vmem_walk is not especially cpu friendly and does lots of mutex activity,
-	// preempt when every 1024 free segments (note coalesced segments, not spans;
-	// free spans are given away in vmem_walk() itself)
-	vacuum_segments_since_preempt++;
-
-	if (vacuum_segments_since_preempt > 1024) {
-		kpreempt(KPREEMPT_SYNC);
-		vacuum_segments_since_preempt = 1;
-	} else {
-		vacuum_segments_since_preempt++;
-	}
-}
-
-void
-vmem_vacuum_free_arena(void)
-{
-	if (free_arena == NULL)
-		return;
-
-	uint64_t start_total = free_arena->vm_kstat.vk_mem_total.value.ui64;
-
-	if (start_total == 0)
-		return;
-
-	mutex_enter(&vmem_flush_free_lock);
-	mutex_enter(&free_arena->vm_lock);
-
-	if (free_arena->vm_source_free != NULL) {
-		printf("SPL: %s ERROR: free_arena->vm_source_free should be NULL, is %p\n",
-		    __func__, free_arena->vm_source_free);
-		mutex_exit(&free_arena->vm_lock);
-		mutex_exit(&vmem_flush_free_lock);
-		return;
-	}
-
-	free_arena->vm_source_free = spl_segkmem_free_if_not_big;
-
-	mutex_exit(&free_arena->vm_lock);
-	vmem_walk(free_arena, VMEM_FREE | VMEM_REENTRANT, vmem_vacuum_freelist, free_arena);
-	mutex_enter(&free_arena->vm_lock);
-
-	uint64_t end_total = free_arena->vm_kstat.vk_mem_total.value.ui64;
-
-	free_arena->vm_source_free = NULL;
-
-	mutex_exit(&free_arena->vm_lock);
-	mutex_exit(&vmem_flush_free_lock);
-
-	uint64_t difference;
-	if (end_total > start_total) {
-		difference = end_total - start_total;
-		printf("SPL: %s WOAH!, free_arena grew by %llu.\n",
-		    __func__, difference);
-	} else if (start_total > end_total) {
-		difference = start_total - end_total;
-		printf("SPL: %s released %llu bytes from free_arena.\n",
-		    __func__, difference);
-		vmem_free_memory_released += difference;
-	}
-}
-
-void
-vmem_vacuum_xnu_import_arena(void)
-{
-	if (xnu_import_arena == NULL)
-		return;
-
-	uint64_t start_total = xnu_import_arena->vm_kstat.vk_mem_total.value.ui64;
-
-	if (start_total == 0)
-		return;
-
-	mutex_enter(&vmem_flush_free_lock);
-	mutex_enter(&xnu_import_arena->vm_lock);
-
-	if (xnu_import_arena->vm_source_free != NULL) {
-		printf("SPL: %s ERROR: xnu_import_arena->vm_source_free should be NULL, is %p\n",
-		    __func__, xnu_import_arena->vm_source_free);
-		mutex_exit(&xnu_import_arena->vm_lock);
-		mutex_exit(&vmem_flush_free_lock);
-		return;
-	}
-
-	xnu_import_arena->vm_source_free = spl_segkmem_free_if_not_big;
-
-	mutex_exit(&xnu_import_arena->vm_lock);
-	vmem_walk(xnu_import_arena, VMEM_FREE | VMEM_REENTRANT, vmem_vacuum_freelist, xnu_import_arena);
-	mutex_enter(&xnu_import_arena->vm_lock);
-
-	uint64_t end_total = xnu_import_arena->vm_kstat.vk_mem_total.value.ui64;
-
-	xnu_import_arena->vm_source_free = NULL;
-
-	mutex_exit(&xnu_import_arena->vm_lock);
-	mutex_exit(&vmem_flush_free_lock);
-
-	uint64_t difference;
-	if (end_total > start_total) {
-		difference = end_total - start_total;
-		printf("SPL: %s WOAH!, xnu_import_arena grew by %llu.\n",
-		    __func__, difference);
-	} else if (start_total > end_total) {
-		difference = start_total - end_total;
-		printf("SPL: %s released %llu bytes from xnu_import_arena.\n",
-		    __func__, difference);
-		vmem_free_memory_released += difference;
-	}
-}
-
-static uint64_t
-vmem_flush_free_to_root()
-{
-	uint64_t start_total = free_arena->vm_kstat.vk_mem_total.value.ui64;
-
-	if (start_total == 0)
-		return(0);
-
-	mutex_enter(&vmem_flush_free_lock);
-
-	dprintf("SPL: %s starting, current free_arena == %llu\n",
-	    __func__, start_total);
-
-	mutex_enter(&spl_root_arena->vm_lock);
-	mutex_enter(&free_arena->vm_lock);
-
-	spl_root_arena->vm_source_free = NULL;
-
-	free_arena->vm_source_free = free_arena_free_to_spl_root;
-
-	mutex_exit(&free_arena->vm_lock);
-	mutex_exit(&spl_root_arena->vm_lock);
-	vmem_walk(free_arena, VMEM_FREE | VMEM_REENTRANT, vmem_vacuum_freelist, free_arena);
-	mutex_enter(&spl_root_arena->vm_lock);
-	mutex_enter(&free_arena->vm_lock);
-
-	uint64_t end_total = free_arena->vm_kstat.vk_mem_total.value.ui64;
-
-	free_arena->vm_source_free = NULL;
-	spl_root_arena->vm_source_free = spl_root_arena_free_to_free_arena;
-
-	mutex_exit(&spl_root_arena->vm_lock);
-	mutex_exit(&free_arena->vm_lock);
-
-	mutex_exit(&vmem_flush_free_lock);
-
-	uint64_t difference;
-	if (end_total > start_total) {
-		difference = end_total - start_total;
-		printf("SPL: %s WOAH!, free_arena grew by %llu.\n",
-		    __func__, difference);
-	} else if (start_total > end_total) {
-		difference = start_total - end_total;
-		dprintf("SPL: %s flushed  %llu bytes from free_arena back into spl_root_arena.\n",
-		    __func__, difference);
-		vmem_free_memory_recycled += difference;
-		return (difference);
-	}
-	return (0);
-}
-
-static uint64_t
-vmem_vacuum_spl_root_arena()
-{
-	uint64_t start_total = spl_root_arena->vm_kstat.vk_mem_total.value.ui64;
-
-	if (start_total == 0)
-		return(0);
-
-	mutex_enter(&vmem_flush_free_lock);
-	mutex_enter(&spl_root_arena->vm_lock);
-
-	spl_root_arena->vm_source_free = spl_segkmem_free_if_not_big;
-
-	mutex_exit(&spl_root_arena->vm_lock);
-	vmem_walk(spl_root_arena, VMEM_FREE | VMEM_REENTRANT, vmem_vacuum_freelist, spl_root_arena);
-	uint64_t end_total = spl_root_arena->vm_kstat.vk_mem_total.value.ui64;
-	mutex_enter(&spl_root_arena->vm_lock);
-
-	spl_root_arena->vm_source_free = spl_root_arena_free_to_free_arena;
-
-	mutex_exit(&spl_root_arena->vm_lock);
-	mutex_exit(&vmem_flush_free_lock);
-
-	uint64_t difference;
-	if (end_total > start_total) {
-		difference = end_total - start_total;
-		printf("SPL: %s WOAH!, spl_root_arena grew by %llu.\n",
-		    __func__, difference);
-	} else if (start_total > end_total) {
-		difference = start_total - end_total;
-		printf("SPL: %s released  %llu bytes from spl_root_arena.\n",
-		    __func__, difference);
-		vmem_free_memory_released += difference;
-		return (difference);
-	}
-	return (0);
 }

@@ -216,7 +216,7 @@ segkmem_free(vmem_t *vmp, void *inaddr, size_t size)
 /*
  * OSX does not use separate heaps for the ZIO buffers,
  * the ZFS code is structured such that the zio caches will
- * fallback to using the kmem_default arena same 
+ * fallback to using the kmem_default arena same
  * as all the other caches.
  */
 // smd: we nevertheless plumb in an arena with heap as parent, so that
@@ -229,44 +229,29 @@ segkmem_zio_init()
 	// and SEGZSIOMAXSIZE = 512G; if physmem is between the two, then
 	// segziosize is (physmem - SEGZIOMAXSIZE) / 2.
 
-	// for now we duke it out on size using segkmem_zio_alloc
-
 	// Illumos does not segregate zio_metadata_arena out of heap,
 	// almost exclusively for reasons involving panic dump data
 	// retention.     However, parenting zio_metadata_arena to
 	// spl_root_arena and giving it its own qcaches provides better
 	// kstat observability *and* noticeably better performance in
 	// realworld (zfs/dmu) metadata-heavy activity.    Additionally,
-	// the qcaches pester spl_root_arena only for slabs 256k and bigger,
+	// the qcaches pester spl_heap_arena only for slabs 256k and bigger,
 	// and each of the qcache entries (powers of two from PAGESIZE to
 	// 64k) are *exact-fit* and therefore dramatically reduce internal
 	// fragmentation and more than pay off for the extra code and (tiny)
 	// extra data for holding the arenas' segment tables.
 
-#ifdef _KERNEL
-	extern vmem_t *spl_root_arena;
+	extern vmem_t *spl_heap_arena;
 
 	zio_arena_parent = NULL;
 
 	zio_arena = vmem_create("zfs_file_data", NULL, 0,
-	    PAGESIZE, vmem_alloc, vmem_free, spl_root_arena,
+	    PAGESIZE, vmem_alloc, vmem_free, spl_heap_arena,
 	    64 * 1024, VM_SLEEP);
 
 	zio_metadata_arena = vmem_create("zfs_metadata", NULL, 0,
-	    PAGESIZE, vmem_alloc, vmem_free, spl_root_arena,
+	    PAGESIZE, vmem_alloc, vmem_free, spl_heap_arena,
 	    64 * 1024, VM_SLEEP);
-#else
-	zio_arena_parent = vmem_create("zfs_file_data_p", NULL, 0,
-	    PAGESIZE, NULL, NULL, 0, NULL, VM_SLEEP);
-
-	zio_arena = vmem_create("zfs_file_data", NULL, 0,
-	    PAGESIZE, segkmem_zio_alloc, segkmem_zio_free, zio_arena_parent,
-	    0, VM_SLEEP);
-
-	zio_metadata_arena = vmem_create("zfs_metadata", NULL, 0,
-	    PAGESIZE, segkmem_zio_alloc, segkmem_zio_free, zio_arena_parent,
-	   0, VM_SLEEP);
-#endif
 
 	ASSERT(zio_arena != NULL);
 	ASSERT(zio_metadata_arena != NULL);

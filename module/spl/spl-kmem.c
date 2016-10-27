@@ -489,8 +489,6 @@ extern uint64_t stat_osif_malloc_success;
 extern uint64_t stat_osif_malloc_fail;
 extern uint64_t stat_osif_free;
 
-extern uint64_t vmem_free_memory_recycled;
-extern uint64_t vmem_free_memory_released;
 extern uint64_t spl_vmem_large_allocs;
 
 // stats for spl_root_allocator();
@@ -527,10 +525,6 @@ extern uint64_t spl_vmem_conditional_alloc_fail_bytes;
 extern uint64_t spl_vmem_conditional_alloc_deny;
 extern uint64_t spl_vmem_conditional_alloc_deny_bytes;
 
-extern boolean_t spl_root_refill_enabled;
-extern uint32_t spl_root_refill_percent_highwater;
-extern uint32_t spl_root_refill_percent_lowater;
-
 typedef struct spl_stats {
 	kstat_named_t spl_os_alloc;
 	kstat_named_t spl_active_threads;
@@ -546,8 +540,6 @@ typedef struct spl_stats {
 	kstat_named_t spl_osif_malloc_success;
 	kstat_named_t spl_osif_malloc_fail;
 	kstat_named_t spl_osif_free;
-	kstat_named_t spl_vmem_free_memory_recycled;
-	kstat_named_t spl_vmem_free_memory_released;
 	kstat_named_t spl_vmem_large_allocs;
 
 	kstat_named_t spl_root_allocator_calls;
@@ -582,9 +574,6 @@ typedef struct spl_stats {
 	kstat_named_t spl_vmem_conditional_alloc_fail_bytes;
 	kstat_named_t spl_vmem_conditional_alloc_deny;
 	kstat_named_t spl_vmem_conditional_alloc_deny_bytes;
-	kstat_named_t spl_root_refill_running;
-	kstat_named_t spl_root_refill_lopct;
-	kstat_named_t spl_root_refill_hipct;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -602,8 +591,6 @@ static spl_stats_t spl_stats = {
 	{"spl_osif_malloc_success", KSTAT_DATA_UINT64},
 	{"spl_osif_malloc_fail", KSTAT_DATA_UINT64},
 	{"spl_osif_free", KSTAT_DATA_UINT64},
-	{"spl_vmem_free_memory_recycled", KSTAT_DATA_UINT64},
-	{"spl_vmem_free_memory_released", KSTAT_DATA_UINT64},
 	{"spl_vmem_large_allocs", KSTAT_DATA_UINT64},
 
 	{"sra_calls", KSTAT_DATA_UINT64},
@@ -638,9 +625,6 @@ static spl_stats_t spl_stats = {
 	{"vmem_conditional_alloc_fail_bytes", KSTAT_DATA_UINT64},
 	{"vmem_conditional_alloc_deny", KSTAT_DATA_UINT64},
 	{"vmem_conditional_alloc_deny_bytes", KSTAT_DATA_UINT64},
-	{"root_refill_running", KSTAT_DATA_UINT64},
-	{"root_refill_low_percent", KSTAT_DATA_UINT64},
-	{"root_refill_high_percent", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -3973,10 +3957,6 @@ kmem_cache_init(int pass, int use_large_pages)
 		kmem_big_alloc_table, maxbuf, KMEM_BIG_SHIFT);
 
 	kmem_big_alloc_table_max = maxbuf >> KMEM_BIG_SHIFT;
-
-	printf("SPL: starting spl_root_refill() thread\n");
-	extern void spl_root_refill(void *);
-	spl_root_refill(NULL);
 }
 
 struct free_slab {
@@ -4096,7 +4076,6 @@ spl_free_set_pressure(int64_t new_p)
 	__sync_lock_test_and_set(&previous_highest_pressure, spl_free_manual_pressure);
 	if (new_p > previous_highest_pressure || new_p <= 0)
 		__sync_lock_test_and_set(&spl_free_manual_pressure, new_p);
-	spl_free_fast_pressure = FALSE;
 	mutex_exit(&spl_free_manual_pressure_lock);
 }
 
@@ -4170,38 +4149,36 @@ spl_free_thread()
 		// if there is pressure that has not yet reached arc_reclaim_thread()
 		// then start with a negative new_spl_free
 		if (spl_free_manual_pressure > 0) {
-			new_spl_free -= spl_free_manual_pressure * 2LL;
+			int64_t old_pressure = 0;
+			__sync_lock_test_and_set(&old_pressure, spl_free_manual_pressure);
+			new_spl_free -= old_pressure * 2LL;
 			lowmem = true;
 			if (spl_free_fast_pressure) {
 				emergency_lowmem = true;
-				new_spl_free -= spl_free_manual_pressure * 4LL;
+				new_spl_free -= old_pressure * 4LL;
 			}
 		}
 
-		// can we allocate at least a 64MiB segment from the reserve arena?
+		// can we allocate at least a 16 MiB segment from spl_heap_arena?
+		// this probes the reserve and also the largest imported spans,
+		// which vmem_alloc can fragment if needed.
 
 		boolean_t reserve_low = false;
-		extern vmem_t *spl_fixed_size_arena;
+		extern vmem_t *spl_heap_arena;
 		const uint64_t sixtyfour = 64ULL*1024ULL*1024ULL;
 		const uint64_t rvallones = (sixtyfour << 1ULL) - 1ULL;
 		const uint64_t rvmask = ~rvallones;
-		uint64_t rvfreebits;
-		atomic_swap_64(&rvfreebits,
-		    spl_fixed_size_arena->vm_freemap);
+		uint64_t rvfreebits = 0;
+		atomic_swap_64(&rvfreebits, spl_heap_arena->vm_freemap);
 		if ((rvfreebits & rvmask) == 0) {
 			reserve_low = true;
 		}
 
-		// are we likely to be able to allocate several MiB from the reserve arena?
-		// are we likely to be able to allocate several MiB from the root arena?
-
-		extern vmem_t *spl_root_arena;
 		boolean_t early_lots_free = false;
+		const uint64_t onetwentyeight = 128ULL*1024ULL*1024ULL;
 		if (!reserve_low) {
 			early_lots_free = true;
-		} else if (vmem_size_locked(spl_fixed_size_arena, VMEM_FREE) > sixtyfour * 2ULL) {
-			early_lots_free = true;
-		} else if (vmem_size_locked(spl_root_arena, VMEM_FREE) > sixtyfour * 4ULL) {
+		} else if (vmem_size_semi_atomic(spl_heap_arena, VMEM_FREE) > onetwentyeight) {
 			early_lots_free = true;
 		}
 
@@ -4210,11 +4187,8 @@ spl_free_thread()
 		// but generally it should be taken seriously when it's positive
 		// (it is often falsely 0)
 
-		// but if we know we can allocate several MiB without goig to XNU, then
-		// don't react harshly.
-
 		if ((vm_page_free_wanted > 0 && reserve_low && !early_lots_free) ||
-			vm_page_free_wanted >= 1024) {
+		    vm_page_free_wanted >= 1024) {
 			int64_t bminus = (int64_t)vm_page_free_wanted * (int64_t)PAGESIZE * -16LL;
 			if (bminus > -16LL*1024LL*1024LL)
 				bminus = -16LL*1024LL*1024LL;
@@ -4232,10 +4206,10 @@ spl_free_thread()
 		} else if (vm_page_free_wanted > 0) {
 			int64_t bytes_wanted = (int64_t)vm_page_free_wanted * (int64_t)PAGESIZE;
 			new_spl_free -= bytes_wanted;
-			if (reserve_low) {
-				lowmem = true;
-				if (recent_lowmem == 0) {
-					recent_lowmem = time_now;
+                        if (reserve_low) {
+                                lowmem = true;
+                                if (recent_lowmem == 0) {
+                                        recent_lowmem = time_now;
 				}
 			}
 		}
@@ -4253,7 +4227,7 @@ spl_free_thread()
 		// even if we're scanning we may have plenty of space in the reserve arena,
 		// in which case we should not react too strongly
 
-		if (above_min_free_bytes < (int64_t)PAGESIZE * 500LL && reserve_low && !early_lots_free) {
+                if (above_min_free_bytes < (int64_t)PAGESIZE * 500LL && reserve_low && !early_lots_free) {
 			// trigger a reap below
 			lowmem = true;
 		}
@@ -4372,33 +4346,18 @@ spl_free_thread()
 
 		base = new_spl_free;
 
-		// adjust for available memory in spl_root_arena
+		// adjust for available memory in spl_heap_arena
 		// cf arc_available_memory()
 		if (!emergency_lowmem) {
-			extern vmem_t *spl_root_arena;
-			extern vmem_t *spl_fixed_size_arena;
-			extern vmem_t *xnu_import_arena;
-			int64_t root_total = (int64_t)vmem_size_locked(spl_root_arena, VMEM_FREE|VMEM_ALLOC);
+			int64_t root_total = (int64_t)vmem_size_semi_atomic(spl_heap_arena, VMEM_FREE|VMEM_ALLOC);
+			int64_t root_free = (int64_t)vmem_size_semi_atomic(spl_heap_arena, VMEM_FREE);
 			int64_t root_fraction_total = root_total/64;
-			int64_t ra_free = (int64_t)vmem_size_locked(spl_root_arena, VMEM_FREE);
-			int64_t la_free = (int64_t)vmem_size_locked(spl_fixed_size_arena, VMEM_FREE);
-			int64_t xa_free = (int64_t)vmem_size_locked(xnu_import_arena, VMEM_FREE);
+			int64_t sixtyfouri = 64LL * 1024LL * 1024LL;
 
-			if (reserve_low && la_free < (int64_t)sixtyfour * 4LL)
-				la_free = 0;
-			else if (!reserve_low || la_free >= (int64_t)sixtyfour * 4LL)
+			if (!reserve_low || root_free > sixtyfouri) {
 				lowmem = false;
-
-			int64_t root_free = la_free;
-
-			if ((ra_free + xa_free) > 0)
-				root_free += (ra_free + xa_free) / 4;
-
-			if (lowmem) {
-				if (la_free >= (int64_t)sixtyfour)
-					root_free = la_free / 4;
-				else
-					root_free = 0;
+			} else if (lowmem) {
+				root_free = 0;
 			}
 
 			// if there's free space for spl_root_arena to grow into without
@@ -4406,31 +4365,12 @@ spl_free_thread()
 			if (root_free > root_fraction_total) {
 				new_spl_free += root_free / 2;
 			}
-			// spl_root_arena has gotten really big, shrink hard
-			if ((root_total * 100LL / real_total_memory) > 70) {
+			// memory footprint has gotten really big, decrease spl_free substantially
+			if ((segkmem_total_mem_allocated * 100LL / real_total_memory) > 70) {
 				new_spl_free -= root_fraction_total;
-			} else if ((root_total * 100LL / real_total_memory) > 75) {
+			} else if ((segkmem_total_mem_allocated * 100LL / real_total_memory) > 75) {
 				new_spl_free -= root_fraction_total;
 				lowmem = true;
-			}
-			// adjust for population of xnu_import arena
-			// beware of division by zero with unpopulated arenas (xi, mainly)
-			uint64_t xi_used = vmem_size_locked(xnu_import_arena, VMEM_ALLOC);
-			uint64_t xi_size = vmem_size_locked(xnu_import_arena, VMEM_ALLOC | VMEM_FREE);
-			uint64_t root_size = vmem_size_locked(spl_root_arena, VMEM_ALLOC | VMEM_FREE);
-			// xi is too big, shrink
-			if (xi_used > 0 && xi_size > 0) {
-				if ((xi_used * 100ULL / real_total_memory) > 20) {
-					lowmem = true;
-					new_spl_free -= xi_size / 64;
-				}
-				if ((xi_used * 100ULL / real_total_memory) > 40) {
-					lowmem = true;
-					new_spl_free -= xi_size / 16;
-				}
-				if ((xi_used * 100ULL / root_size) > 40) {
-					new_spl_free -= xi_size / 64;
-				}
 			}
 		}
 
@@ -4440,8 +4380,8 @@ spl_free_thread()
 		// to the relative value of each up to arc.c.
 		// O3X arc.c does not (yet) take these arena sizes into
 		// account like Illumos's does.
-		uint64_t zio_size = vmem_size_locked(zio_arena, VMEM_ALLOC | VMEM_FREE);
-		uint64_t zio_metadata_size = vmem_size_locked(zio_metadata_arena,
+		uint64_t zio_size = vmem_size_semi_atomic(zio_arena, VMEM_ALLOC | VMEM_FREE);
+		uint64_t zio_metadata_size = vmem_size_semi_atomic(zio_metadata_arena,
 		    VMEM_ALLOC | VMEM_FREE);
 		zio_size += zio_metadata_size;
 		// wrap this in a basic block for lexical scope SSA convenience
@@ -4482,11 +4422,11 @@ spl_free_thread()
 			}
 		}
 
-		// try to get 1/64 of spl_root_arena freed up
+		// try to get 1/64 of spl_heap_arena freed up
 		if (emergency_lowmem && new_spl_free >= 0LL) {
 			extern vmem_t *spl_root_arena;
-			uint64_t root_size = vmem_size_locked(spl_root_arena, VMEM_ALLOC | VMEM_FREE);
-			uint64_t root_free = vmem_size_locked(spl_root_arena, VMEM_FREE);
+			uint64_t root_size = vmem_size_semi_atomic(spl_heap_arena, VMEM_ALLOC | VMEM_FREE);
+			uint64_t root_free = vmem_size_semi_atomic(spl_heap_arena, VMEM_FREE);
 			int64_t difference = root_size - root_free;
 			int64_t target = root_size / 64;
 			if (difference < target) {
@@ -4560,17 +4500,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			}
 		}
 
-		if (ks->spl_root_refill_running.value.ui64 != (uint64_t)spl_root_refill_enabled)
-			spl_root_refill_enabled = (boolean_t)ks->spl_root_refill_running.value.ui64;
-
-		if (ks->spl_root_refill_lopct.value.ui64 != (uint64_t)spl_root_refill_percent_lowater &&
-		    ks->spl_root_refill_lopct.value.ui64 > 5 && ks->spl_root_refill_lopct.value.ui64 < 90)
-			spl_root_refill_percent_lowater = (uint32_t)ks->spl_root_refill_lopct.value.ui64;
-
-		if (ks->spl_root_refill_hipct.value.ui64 != (uint64_t)spl_root_refill_percent_highwater &&
-		    ks->spl_root_refill_hipct.value.ui64 > 5 && ks->spl_root_refill_hipct.value.ui64 < 90)
-			spl_root_refill_percent_highwater = (uint32_t)ks->spl_root_refill_hipct.value.ui64;
-
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
 		ks->spl_active_threads.value.ui64 = zfs_threads;
@@ -4584,8 +4513,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_osif_malloc_success.value.ui64 = stat_osif_malloc_success;
 		ks->spl_osif_malloc_fail.value.ui64 = stat_osif_malloc_fail;
 		ks->spl_osif_free.value.ui64 = stat_osif_free;
-		ks->spl_vmem_free_memory_recycled.value.ui64 = vmem_free_memory_recycled;
-		ks->spl_vmem_free_memory_released.value.ui64 = vmem_free_memory_released;
 		ks->spl_vmem_large_allocs.value.ui64 = spl_vmem_large_allocs;
 
 		ks->spl_root_allocator_calls.value.ui64 = spl_root_allocator_calls;
@@ -4620,10 +4547,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_vmem_conditional_alloc_fail_bytes.value.ui64 = spl_vmem_conditional_alloc_fail_bytes;
 		ks->spl_vmem_conditional_alloc_deny.value.ui64 = spl_vmem_conditional_alloc_deny;
 		ks->spl_vmem_conditional_alloc_deny_bytes.value.ui64 = spl_vmem_conditional_alloc_deny_bytes;
-
-		ks->spl_root_refill_running.value.ui64 = (uint64_t)spl_root_refill_enabled;
-		ks->spl_root_refill_lopct.value.ui64 = (uint64_t)spl_root_refill_percent_lowater;
-		ks->spl_root_refill_hipct.value.ui64 = (uint64_t)spl_root_refill_percent_highwater;
 	}
 
 	return (0);
