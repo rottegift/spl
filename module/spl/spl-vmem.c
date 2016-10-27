@@ -334,10 +334,10 @@ vmem_t *spl_root_arena; // The bottom-most arena for SPL
 static vmem_t *spl_root_arena_parent;
 static void *spl_root_initial_reserve_import;
 static  uint64_t spl_root_initial_reserve_import_size;
-vmem_t *spl_large_reserve_arena;
-static void *spl_large_reserve_initial_allocation = NULL;
-static void *spl_large_reserve_initial_allocation_two = NULL;
-static size_t spl_large_reserve_initial_allocation_size;
+vmem_t *spl_fixed_size_arena;
+static void *spl_fixed_size_initial_allocation = NULL;
+static void *spl_fixed_size_initial_allocation_two = NULL;
+static size_t spl_fixed_size_initial_allocation_size;
 vmem_t *xnu_import_arena;
 #define NUMBER_OF_ARENAS_IN_VMEM_INIT 10
 static struct timespec	vmem_update_interval	= {15, 0};	/* vmem_update() every 15 seconds */
@@ -1127,7 +1127,7 @@ spl_vmem_malloc_if_no_pressure(size_t size)
 
 /*
  * functions for upper-bounded waiting for space on the primary sources
- * (1. spl_large_reserve_arena, 2. spl_root_arena, 3. xnu)
+ * (1. spl_fixed_size_arena, 2. spl_root_arena, 3. xnu)
  *
  * constraints: wait-time, resolution, size, [instant|best]
  *
@@ -1147,7 +1147,7 @@ spl_vmem_malloc_if_no_pressure(size_t size)
 static void *
 timed_alloc_reserve(size_t size, hrtime_t timeout, hrtime_t resolution, bool best)
 {
-	vmem_t *vmp = spl_large_reserve_arena;
+	vmem_t *vmp = spl_fixed_size_arena;
 
 	const size_t minfree = 32ULL*1024ULL*1024ULL;
 	const size_t waitsize = MAX(size, minfree);
@@ -1406,7 +1406,7 @@ spl_root_allocator(vmem_t *vmp, size_t size, int flags)
 			reserve_best = true;
 
 		// if we have headroom in the reserve, allocate there if we can
-		uint64_t reserve_free = vmem_size_locked(spl_large_reserve_arena, VMEM_FREE);
+		uint64_t reserve_free = vmem_size_locked(spl_fixed_size_arena, VMEM_FREE);
 		uint64_t vmem_metadata_size = vmem_size_locked(vmem_metadata_arena, VMEM_ALLOC | VMEM_FREE);
 
 		if (reserve_free > 2ULL * vmem_metadata_size) {
@@ -2462,10 +2462,10 @@ vmem_update(void *dummy)
 static uint64_t
 try_lift_reserve(void)
 {
-        mutex_enter(&spl_large_reserve_arena->vm_lock);
-        uint64_t reserve_free = vmem_size(spl_large_reserve_arena, VMEM_FREE);
-        uint64_t reserve_size = vmem_size(spl_large_reserve_arena, VMEM_ALLOC | VMEM_FREE);
-        mutex_exit(&spl_large_reserve_arena->vm_lock);
+        mutex_enter(&spl_fixed_size_arena->vm_lock);
+        uint64_t reserve_free = vmem_size(spl_fixed_size_arena, VMEM_FREE);
+        uint64_t reserve_size = vmem_size(spl_fixed_size_arena, VMEM_ALLOC | VMEM_FREE);
+        mutex_exit(&spl_fixed_size_arena->vm_lock);
 	uint64_t h_unalign = reserve_size / 2;
 	uint64_t half_reserve_size;
 
@@ -2489,12 +2489,12 @@ try_lift_reserve(void)
 			const uint64_t spamax = 16ULL*1024ULL*1024ULL;
 			const uint64_t sixtyfour = 64ULL*1024ULL*1024ULL;
 			if (!vmem_canalloc_nomutex(spl_root_arena, spamax) &&
-			    vmem_canalloc_nomutex(spl_large_reserve_arena, sixtyfour)) {
-				void *m = vmem_alloc(spl_large_reserve_arena, sixtyfour,
+			    vmem_canalloc_nomutex(spl_fixed_size_arena, sixtyfour)) {
+				void *m = vmem_alloc(spl_fixed_size_arena, sixtyfour,
 				    VM_NOSLEEP | VM_ABORT);
 				if (m) {
 					vmem_add_as_import(spl_root_arena, m, sixtyfour, 0);
-					atomic_inc_64(&spl_large_reserve_arena->vm_kstat.vk_parent_alloc.value.ui64);
+					atomic_inc_64(&spl_fixed_size_arena->vm_kstat.vk_parent_alloc.value.ui64);
 					return (sixtyfour);
 				} else {
 					return (0); // vmem_alloc failed
@@ -2511,9 +2511,9 @@ try_lift_reserve(void)
 	for (uint64_t current_try = half_reserve_size;
 	     current_try >= minimal_alloc;
 	     current_try >>= 1ULL) {
-		void *m = vmem_alloc(spl_large_reserve_arena, current_try, VM_NOSLEEP | VM_ABORT);
+		void *m = vmem_alloc(spl_fixed_size_arena, current_try, VM_NOSLEEP | VM_ABORT);
 		if (m) {
-			atomic_inc_64(&spl_large_reserve_arena->vm_kstat.vk_parent_alloc.value.ui64);
+			atomic_inc_64(&spl_fixed_size_arena->vm_kstat.vk_parent_alloc.value.ui64);
 			vmem_add_as_import(spl_root_arena, m, current_try, 0);
 			return (current_try);
 		}
@@ -2570,7 +2570,7 @@ spl_root_refill(void *dummy)
 
 	if (!hit_highwater_and_waiting &&
 	    !vmem_canalloc_nomutex(spl_root_arena, spamax) &&
-	    !vmem_canalloc_nomutex(spl_large_reserve_arena, spamax) &&
+	    !vmem_canalloc_nomutex(spl_fixed_size_arena, spamax) &&
 	    !vmem_canalloc_nomutex(xnu_import_arena, spamax)) {
 		if(vmem_add_memory_to_spl_root_arena(spamax, spamax) == spamax) {
 			target_free -= spamax;
@@ -2580,13 +2580,13 @@ spl_root_refill(void *dummy)
 
 	uint64_t root_free = vmem_size_locked(spl_root_arena, VMEM_FREE);
 	uint64_t xi_free = vmem_size_locked(xnu_import_arena, VMEM_FREE);
-	uint64_t reserve_free = vmem_size_locked(spl_large_reserve_arena, VMEM_FREE);
+	uint64_t reserve_free = vmem_size_locked(spl_fixed_size_arena, VMEM_FREE);
 
 	// we still want to opportunistically grab spl_minalloc sized blocks
 	// if vmem_alloc(..., spl_minalloc, VM_NOSLEEP) calls would fail.
 	if (!vmem_canalloc_nomutex(spl_root_arena, spl_minalloc))
 		root_free = 0;
-	if (!vmem_canalloc_nomutex(spl_large_reserve_arena, spl_minalloc))
+	if (!vmem_canalloc_nomutex(spl_fixed_size_arena, spl_minalloc))
 		reserve_free = 0;
 	if (!vmem_canalloc_nomutex(xnu_import_arena, spl_minalloc))
 		xi_free = 0;
@@ -2645,7 +2645,7 @@ spl_root_refill(void *dummy)
 	spl_root_refill_enabled = !hit_highwater_and_waiting;
 
 	// if we could allocate a large chunk of memory from the reserve, wait longer
-	if (!wait && vmem_canalloc_nomutex(spl_large_reserve_arena, target_free / 2))
+	if (!wait && vmem_canalloc_nomutex(spl_fixed_size_arena, target_free / 2))
 		wait = true;
 out:
 	if (wait)
@@ -2747,7 +2747,7 @@ vmem_add_memory_to_spl_root_arena(size_t size, size_t span_size)
 	uint64_t xi_free = vmem_size(xnu_import_arena, VMEM_FREE);
 	uint64_t xi_size = vmem_size(xnu_import_arena, VMEM_FREE | VMEM_ALLOC);
 	mutex_exit(&xnu_import_arena->vm_lock);
-	uint64_t resv_alloc = vmem_size_locked(spl_large_reserve_arena, VMEM_ALLOC);
+	uint64_t resv_alloc = vmem_size_locked(spl_fixed_size_arena, VMEM_ALLOC);
 
 	if (rtotal > resv_alloc) {
 		// we've pulled more than the reserve into spl_root_arena
@@ -2813,12 +2813,12 @@ vmem_add_memory_to_spl_root_arena(size_t size, size_t span_size)
 static void
 spl_segkmem_free_if_not_big(vmem_t *vmp, void *inaddr, size_t size)
 {
-	if (vmem_contains(spl_large_reserve_arena, inaddr, size)) {
+	if (vmem_contains(spl_fixed_size_arena, inaddr, size)) {
 		bzero(inaddr, size);
-		vmem_free(spl_large_reserve_arena, inaddr, size);
-		mutex_enter(&spl_large_reserve_arena->vm_lock);
-		cv_broadcast(&spl_large_reserve_arena->vm_cv);
-		mutex_exit(&spl_large_reserve_arena->vm_lock);
+		vmem_free(spl_fixed_size_arena, inaddr, size);
+		mutex_enter(&spl_fixed_size_arena->vm_lock);
+		cv_broadcast(&spl_fixed_size_arena->vm_cv);
+		mutex_exit(&spl_fixed_size_arena->vm_lock);
 	} else if (vmem_contains(xnu_import_arena, inaddr, size)) {
 		vmem_free(xnu_import_arena, inaddr, size);
 	} else {
@@ -2838,12 +2838,12 @@ vmem_free_transfer(vmem_t *source, void *inaddr, size_t size, vmem_t *destinatio
 static void
 spl_root_arena_free_to_free_arena(vmem_t *vmp, void *inaddr, size_t size)
 {
-	if (vmem_contains(spl_large_reserve_arena, inaddr, size)) {
+	if (vmem_contains(spl_fixed_size_arena, inaddr, size)) {
 		bzero(inaddr, size);
-		vmem_free(spl_large_reserve_arena, inaddr, size);
-		mutex_enter(&spl_large_reserve_arena->vm_lock);
-		cv_broadcast(&spl_large_reserve_arena->vm_cv);
-		mutex_exit(&spl_large_reserve_arena->vm_lock);
+		vmem_free(spl_fixed_size_arena, inaddr, size);
+		mutex_enter(&spl_fixed_size_arena->vm_lock);
+		cv_broadcast(&spl_fixed_size_arena->vm_cv);
+		mutex_exit(&spl_fixed_size_arena->vm_lock);
 	} else {
 		vmem_free_transfer(vmp, inaddr, size, free_arena);
 	}
@@ -2889,7 +2889,7 @@ vmem_init(const char *heap_name,
 	 * end the searches done by vmem_[x]alloc and vm_xfree; it
 	 * serves no other purpose; its stats will always be zero.
 	 *
-	 * The spl_large_reserve_arena takes an initial large allocation
+	 * The spl_fixed_size_arena takes an initial large allocation
 	 * from xnu's allocator at create time; it's scaled to the
 	 * system's physical memory, and provides a source for
 	 * allocations in the face of system memory pressure so as to
@@ -2926,65 +2926,65 @@ vmem_init(const char *heap_name,
 	boolean_t addtwo = false;
 	if (real_total_memory <= 15ULL*1024ULL*1024ULL*1024ULL &&
 	    real_total_memory >= 4ULL*1024ULL*1024ULL*1024ULL) {
-		spl_large_reserve_initial_allocation_size =
+		spl_fixed_size_initial_allocation_size =
 		    MAX(real_total_memory / 16, half_gibibyte);
 	} else if (real_total_memory < 4ULL*1024ULL*1024ULL*1024ULL) {
 		// We need some memory for child arenas and other structures,
 		// notably the vmem_metadata arena, which is a direct child
-		// of spl_large_reserve_arena.  If this alloc is too small
+		// of spl_fixed_size_arena.  If this alloc is too small
 		// we will panic when creating more arenas or kmem caches.
 		// Minimum RAM size supported by macOS and Mac OS X is 2 GiB,
 		// so 256 MiB could be as large as 1/8 of RAM total.
-		spl_large_reserve_initial_allocation_size = half_gibibyte / 4;
+		spl_fixed_size_initial_allocation_size = half_gibibyte / 4;
 	} else {
-		spl_large_reserve_initial_allocation_size =
+		spl_fixed_size_initial_allocation_size =
 		    MAX(real_total_memory / 64, 2ULL * half_gibibyte);
 		// nb: xnu forbids single allocations > 2 GiB in vm_kern.c.
 		// for machines > 128 GiB, we make the large arena two spans
 		// of 2 GiB each; 4 GiB should be sufficient for any size machine,
 		// thanks to the fill thread
-		if (spl_large_reserve_initial_allocation_size > 4ULL * half_gibibyte)
-			spl_large_reserve_initial_allocation_size = 4ULL * half_gibibyte;
+		if (spl_fixed_size_initial_allocation_size > 4ULL * half_gibibyte)
+			spl_fixed_size_initial_allocation_size = 4ULL * half_gibibyte;
 		addtwo = true;
 	}
 
 	printf("SPL: %s: doing initial large allocation of %llu bytes\n",
-	    __func__, (uint64_t)spl_large_reserve_initial_allocation_size);
+	    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
 
 	extern void *osif_malloc(uint64_t);
-	spl_large_reserve_initial_allocation = osif_malloc(spl_large_reserve_initial_allocation_size);
+	spl_fixed_size_initial_allocation = osif_malloc(spl_fixed_size_initial_allocation_size);
 
-	if (spl_large_reserve_initial_allocation == NULL) {
-		panic("SPL: %s unable to make initial spl_large_reserve_arena allocation of %llu bytes\n",
-		    __func__, (uint64_t)spl_large_reserve_initial_allocation_size);
+	if (spl_fixed_size_initial_allocation == NULL) {
+		panic("SPL: %s unable to make initial spl_fixed_size_arena allocation of %llu bytes\n",
+		    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
 	}
 
-	spl_large_reserve_arena = vmem_create("spl_large_reserve_arena",  // id 1
-	    spl_large_reserve_initial_allocation, spl_large_reserve_initial_allocation_size, heap_quantum,
+	spl_fixed_size_arena = vmem_create("spl_fixed_size_arena",  // id 1
+	    spl_fixed_size_initial_allocation, spl_fixed_size_initial_allocation_size, heap_quantum,
 	    NULL, NULL, spl_root_arena_parent, 0, VM_SLEEP | VMC_POPULATOR);
 
-	printf("SPL: %s created spl_large_reserve_arena with %llu bytes.\n",
-	    __func__, (uint64_t)spl_large_reserve_initial_allocation_size);
+	printf("SPL: %s created spl_fixed_size_arena with %llu bytes.\n",
+	    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
 
 	// for large memory systems, there is enormous value in having an even larger
 	// reserve arena
 
 	if (addtwo) {
-		spl_large_reserve_initial_allocation_two =
-		    osif_malloc(spl_large_reserve_initial_allocation_size);
-		if (spl_large_reserve_initial_allocation_two == NULL)
-			panic("SPL: %s unable to make second spl_large_reserve_arena allocation of %llu bytes\n",
-			    __func__, (uint64_t)spl_large_reserve_initial_allocation_size);
-		if(NULL == vmem_add(spl_large_reserve_arena, spl_large_reserve_initial_allocation_two,
-			spl_large_reserve_initial_allocation_size, 0))
+		spl_fixed_size_initial_allocation_two =
+		    osif_malloc(spl_fixed_size_initial_allocation_size);
+		if (spl_fixed_size_initial_allocation_two == NULL)
+			panic("SPL: %s unable to make second spl_fixed_size_arena allocation of %llu bytes\n",
+			    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
+		if(NULL == vmem_add(spl_fixed_size_arena, spl_fixed_size_initial_allocation_two,
+			spl_fixed_size_initial_allocation_size, 0))
 			panic("SPL: %s vmem_add(splra, splra2, %llu, 0)  returned NULL!\n",
-			    __func__, (uint64_t)spl_large_reserve_initial_allocation_size);
-		printf("%s: successfully added %llu bytes to spl_large_reserve_arena.\n",
-		    __func__, (uint64_t)spl_large_reserve_initial_allocation_size);
+			    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
+		printf("%s: successfully added %llu bytes to spl_fixed_size_arena.\n",
+		    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
 	}
 
 	spl_root_initial_reserve_import_size = half_gibibyte/16;
-	spl_root_initial_reserve_import = vmem_alloc(spl_large_reserve_arena,
+	spl_root_initial_reserve_import = vmem_alloc(spl_fixed_size_arena,
 	    spl_root_initial_reserve_import_size, VM_PANIC | VM_NOSLEEP);
 
 	if (spl_root_initial_reserve_import == NULL)
@@ -2995,21 +2995,21 @@ vmem_init(const char *heap_name,
 	    spl_root_allocator, spl_root_arena_free_to_free_arena, spl_root_arena_parent, 0,
 	    VM_SLEEP | VMC_POPULATOR);
 
-	uint64_t init_pop_size = spl_large_reserve_initial_allocation_size / 2;
+	uint64_t init_pop_size = spl_fixed_size_initial_allocation_size / 2;
 
 	printf("SPL: %s created spl_root_arena.   Trying to add %llu from reserve arena.\n",
 	    __func__, init_pop_size);
 
-	void *init_pop = vmem_alloc(spl_large_reserve_arena, init_pop_size, VM_NOSLEEP | VM_ABORT);
+	void *init_pop = vmem_alloc(spl_fixed_size_arena, init_pop_size, VM_NOSLEEP | VM_ABORT);
 
 	if (init_pop == NULL) {
 		printf("SPL: %s: WOAH! couldn't vmem_alloc %llu from %s !\n",
-		    __func__, init_pop_size, spl_large_reserve_arena->vm_name);
+		    __func__, init_pop_size, spl_fixed_size_arena->vm_name);
 	} else {
 		void *vaddr = vmem_add_as_import(spl_root_arena, init_pop, init_pop_size, VM_SLEEP);
 		if (vaddr == NULL) {
 			printf("SPL: %s: WOAH! vmem_add_as_import returned NULL!\n", __func__);
-			vmem_free(spl_large_reserve_arena, init_pop, init_pop_size);
+			vmem_free(spl_fixed_size_arena, init_pop, init_pop_size);
 		}
 	}
 
@@ -3031,7 +3031,7 @@ vmem_init(const char *heap_name,
 	// order of 24 MiB.
 
 	vmem_metadata_arena = vmem_create("vmem_metadata", // id 6
-	    NULL, 0, heap_quantum, vmem_alloc, vmem_free, spl_large_reserve_arena,
+	    NULL, 0, heap_quantum, vmem_alloc, vmem_free, spl_fixed_size_arena,
 	    8 * PAGESIZE, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
 
 	vmem_seg_arena = vmem_create("vmem_seg", // id 7
@@ -3132,14 +3132,14 @@ vmem_fini(vmem_t *heap)
 	list_destroy(&freelist);
 
 	extern void osif_free(void *, uint64_t);
-	printf("SPL: %s freeing spl_large_reserve_initial_allocation of %llu bytes.\n",
-	    __func__, (uint64_t)spl_large_reserve_initial_allocation_size);
-	osif_free(spl_large_reserve_initial_allocation, spl_large_reserve_initial_allocation_size);
-	if (spl_large_reserve_initial_allocation_two) {
-		printf("SPL: %s freeing spl_large_reserve_initial_allocation_two of %llu bytes.\n",
-		    __func__, (uint64_t)spl_large_reserve_initial_allocation_size);
-		osif_free(spl_large_reserve_initial_allocation_two,
-		    spl_large_reserve_initial_allocation_size);
+	printf("SPL: %s freeing spl_fixed_size_initial_allocation of %llu bytes.\n",
+	    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
+	osif_free(spl_fixed_size_initial_allocation, spl_fixed_size_initial_allocation_size);
+	if (spl_fixed_size_initial_allocation_two) {
+		printf("SPL: %s freeing spl_fixed_size_initial_allocation_two of %llu bytes.\n",
+		    __func__, (uint64_t)spl_fixed_size_initial_allocation_size);
+		osif_free(spl_fixed_size_initial_allocation_two,
+		    spl_fixed_size_initial_allocation_size);
 	}
 
 #if 0 // Don't release, panics

@@ -4181,13 +4181,13 @@ spl_free_thread()
 		// can we allocate at least a 64MiB segment from the reserve arena?
 
 		boolean_t reserve_low = false;
-		extern vmem_t *spl_large_reserve_arena;
+		extern vmem_t *spl_fixed_size_arena;
 		const uint64_t sixtyfour = 64ULL*1024ULL*1024ULL;
 		const uint64_t rvallones = (sixtyfour << 1ULL) - 1ULL;
 		const uint64_t rvmask = ~rvallones;
 		uint64_t rvfreebits;
 		atomic_swap_64(&rvfreebits,
-		    spl_large_reserve_arena->vm_freemap);
+		    spl_fixed_size_arena->vm_freemap);
 		if ((rvfreebits & rvmask) == 0) {
 			reserve_low = true;
 		}
@@ -4199,7 +4199,7 @@ spl_free_thread()
 		boolean_t early_lots_free = false;
 		if (!reserve_low) {
 			early_lots_free = true;
-		} else if (vmem_size_locked(spl_large_reserve_arena, VMEM_FREE) > sixtyfour * 2ULL) {
+		} else if (vmem_size_locked(spl_fixed_size_arena, VMEM_FREE) > sixtyfour * 2ULL) {
 			early_lots_free = true;
 		} else if (vmem_size_locked(spl_root_arena, VMEM_FREE) > sixtyfour * 4ULL) {
 			early_lots_free = true;
@@ -4376,12 +4376,12 @@ spl_free_thread()
 		// cf arc_available_memory()
 		if (!emergency_lowmem) {
 			extern vmem_t *spl_root_arena;
-			extern vmem_t *spl_large_reserve_arena;
+			extern vmem_t *spl_fixed_size_arena;
 			extern vmem_t *xnu_import_arena;
 			int64_t root_total = (int64_t)vmem_size_locked(spl_root_arena, VMEM_FREE|VMEM_ALLOC);
 			int64_t root_fraction_total = root_total/64;
 			int64_t ra_free = (int64_t)vmem_size_locked(spl_root_arena, VMEM_FREE);
-			int64_t la_free = (int64_t)vmem_size_locked(spl_large_reserve_arena, VMEM_FREE);
+			int64_t la_free = (int64_t)vmem_size_locked(spl_fixed_size_arena, VMEM_FREE);
 			int64_t xa_free = (int64_t)vmem_size_locked(xnu_import_arena, VMEM_FREE);
 
 			if (reserve_low && la_free < (int64_t)sixtyfour * 4LL)
