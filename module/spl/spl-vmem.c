@@ -2065,7 +2065,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 				cv_signal(&vmem_xnu_alloc_free_cv);
 				return (a);
 			}
-		} else if (iter > 10) {
+		} else if (iter > 4) {
 			// bail out and let vmem_xalloc() deal with it
 			return (NULL);
 		} else {
