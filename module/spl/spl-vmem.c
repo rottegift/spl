@@ -330,7 +330,7 @@ static vmem_t *vmem_metadata_arena;
 static vmem_t *vmem_seg_arena;
 static vmem_t *vmem_hash_arena;
 static vmem_t *vmem_vmem_arena;
-static vmem_t *spl_default_arena; // The bottom-most arena for SPL
+vmem_t *spl_default_arena; // The bottom-most arena for SPL
 static vmem_t *spl_default_arena_parent; // dummy arena as a placeholder
 #define VMEM_BUCKETS 13
 #define VMEM_BUCKET_LOWBIT 12

@@ -4159,7 +4159,7 @@ spl_free_thread()
 			}
 		}
 
-		// can we allocate at least a 16 MiB segment from spl_heap_arena?
+		// can we allocate at least a 64 MiB segment from spl_heap_arena?
 		// this probes the reserve and also the largest imported spans,
 		// which vmem_alloc can fragment if needed.
 
@@ -4349,27 +4349,22 @@ spl_free_thread()
 		// adjust for available memory in spl_heap_arena
 		// cf arc_available_memory()
 		if (!emergency_lowmem) {
-			int64_t root_total = (int64_t)vmem_size_semi_atomic(spl_heap_arena, VMEM_FREE|VMEM_ALLOC);
-			int64_t root_free = (int64_t)vmem_size_semi_atomic(spl_heap_arena, VMEM_FREE);
-			int64_t root_fraction_total = root_total/64;
-			int64_t sixtyfouri = 64LL * 1024LL * 1024LL;
+			extern vmem_t *spl_default_arena;
+			int64_t heap_inuse = (int64_t)vmem_size_semi_atomic(spl_heap_arena,VMEM_ALLOC);
+			int64_t default_inuse = (int64_t)vmem_size_semi_atomic(spl_default_arena, VMEM_ALLOC);
+			int64_t combined_inuse = heap_inuse + default_inuse;
+			int64_t total_mem_used = (int64_t) segkmem_total_mem_allocated;
 
-			if (!reserve_low || root_free > sixtyfouri) {
-				lowmem = false;
-			} else if (lowmem) {
-				root_free = 0;
-			}
+			int64_t combined_unused = total_mem_used - combined_inuse;
 
-			// if there's free space for spl_root_arena to grow into without
-			// allocating, then inflate
-			if (root_free > root_fraction_total) {
-				new_spl_free += root_free / 2;
-			}
+			if (combined_unused != 0)
+				new_spl_free += combined_unused / 4;
+
 			// memory footprint has gotten really big, decrease spl_free substantially
 			if ((segkmem_total_mem_allocated * 100LL / real_total_memory) > 70) {
-				new_spl_free -= root_fraction_total;
+				new_spl_free -= total_mem_used / 64;
 			} else if ((segkmem_total_mem_allocated * 100LL / real_total_memory) > 75) {
-				new_spl_free -= root_fraction_total;
+				new_spl_free -= total_mem_used / 32;
 				lowmem = true;
 			}
 		}
