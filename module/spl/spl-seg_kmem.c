@@ -138,10 +138,12 @@ vmem_t *zio_metadata_arena;                                             /* and f
 
 #ifdef _KERNEL
 extern uint64_t total_memory;
-#endif
 uint64_t stat_osif_malloc_success = 0;
 uint64_t stat_osif_malloc_fail = 0;
 uint64_t stat_osif_free = 0;
+uint64_t stat_osif_malloc_bytes = 0;
+uint64_t stat_osif_free_bytes = 0;
+#endif
 
 void *
 osif_malloc(uint64_t size)
@@ -154,8 +156,9 @@ osif_malloc(uint64_t size)
 	    &tr, size, PAGESIZE, 0, SPL_TAG);
 
 	if (kr == KERN_SUCCESS) {
-		stat_osif_malloc_success++;
+		atomic_inc_64(&stat_osif_malloc_success);
 		atomic_add_64(&segkmem_total_mem_allocated, size);
+		atomic_add_64(&stat_osif_malloc_bytes, size);
 		return(tr);
 	} else {
 		atomic_inc_64(&stat_osif_malloc_fail);
@@ -171,8 +174,9 @@ osif_free(void* buf, uint64_t size)
 {
 #ifdef _KERNEL
     kmem_free(kernel_map, buf, size);
-    stat_osif_free++;
+    atomic_inc_64(&stat_osif_free);
     atomic_sub_64(&segkmem_total_mem_allocated, size);
+    atomic_add_64(&stat_osif_free_bytes, size);
 #else
     free(buf);
 #endif /* _KERNEL */

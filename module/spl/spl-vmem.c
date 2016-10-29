@@ -395,31 +395,6 @@ static uint64_t spl_minalloc = 1024ULL*1024ULL;
 // number of allocations > minalloc
 uint64_t spl_vmem_large_allocs = 0;
 
-// stats for spl_root_allocator()
-uint64_t spl_root_allocator_calls = 0;
-uint64_t spl_root_allocator_large_bytes_asked = 0;
-uint64_t spl_root_allocator_small_bytes_asked = 0;
-uint64_t spl_root_allocator_minalloc_bytes_asked = 0;
-uint64_t spl_root_allocator_extra_pass = 0;
-uint64_t spl_root_allocator_recovered = 0;
-uint64_t spl_root_allocator_recovered_bytes = 0;
-uint64_t ta_reserve_success = 0;
-uint64_t ta_reserve_success_bytes = 0;
-uint64_t ta_reserve_fail = 0;
-uint64_t ta_xnu_vmem_alloc = 0;
-uint64_t ta_xnu_vmem_alloc_wait = 0;
-uint64_t ta_xnu_vmem_bytes = 0;
-uint64_t ta_xnu_first_alloc = 0;
-uint64_t ta_xnu_second_alloc = 0;
-uint64_t ta_xnu_smaller_alloc = 0;
-uint64_t ta_xnu_skip_smaller = 0;
-uint64_t ta_xnu_unconditional_alloc = 0;
-uint64_t ta_xnu_unconditional_alloc_bytes = 0;
-uint64_t ta_xnu_success = 0;
-uint64_t ta_xnu_success_bytes = 0;
-uint64_t ta_xnu_unconditional_fail = 0;
-uint64_t ta_xnu_fail = 0;
-
 // allocator kstats
 uint64_t spl_vmem_unconditional_allocs = 0;
 uint64_t spl_vmem_unconditional_alloc_bytes = 0;
@@ -429,6 +404,12 @@ uint64_t spl_vmem_conditional_alloc_bytes = 0;
 uint64_t spl_vmem_conditional_alloc_fail_bytes = 0;
 uint64_t spl_vmem_conditional_alloc_deny = 0;
 uint64_t spl_vmem_conditional_alloc_deny_bytes = 0;
+
+// bucket allocator kstat
+uint64_t spl_xat_success = 0;
+uint64_t spl_xat_late_success = 0;
+uint64_t spl_xat_pressured = 0;
+uint64_t spl_xat_bailed = 0;
 
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
@@ -1088,7 +1069,7 @@ spl_vmem_malloc_if_no_pressure(size_t size)
 		return (p);
 	} else {
 		atomic_inc_64(&spl_vmem_conditional_alloc_deny);
-		atomic_add_64(&spl_vmem_conditional_alloc_deny, size);
+		atomic_add_64(&spl_vmem_conditional_alloc_deny_bytes, size);
 		return (NULL);
 	}
 }
@@ -2044,6 +2025,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 
 	if (m != NULL) {
 		cv_signal(&vmem_xnu_alloc_free_cv);
+		atomic_inc_64(&spl_xat_success);
 		return (m);
 	}
 
@@ -2063,13 +2045,16 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			void *a = spl_vmem_malloc_if_no_pressure(size);
 			if (a != NULL) {
 				cv_signal(&vmem_xnu_alloc_free_cv);
+				atomic_inc_64(&spl_xat_late_success);
 				return (a);
 			}
-		} else if (iter > 4) {
+		} else if (iter > 8) {
 			// bail out and let vmem_xalloc() deal with it
+			atomic_inc_64(&spl_xat_bailed);
 			return (NULL);
 		} else {
-			spl_free_set_emergency_pressure(size * (iter+1));
+			spl_free_set_emergency_pressure(size);
+			atomic_inc_64(&spl_xat_pressured);
 		}
 	}
 	return (NULL);
