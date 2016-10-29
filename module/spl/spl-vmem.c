@@ -410,6 +410,8 @@ uint64_t spl_xat_success = 0;
 uint64_t spl_xat_late_success = 0;
 uint64_t spl_xat_pressured = 0;
 uint64_t spl_xat_bailed = 0;
+uint64_t spl_xat_lastalloc = 0;
+uint64_t spl_xat_lastfree = 0;
 
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
@@ -2019,6 +2021,10 @@ vmem_qcache_reap(vmem_t *vmp)
 static void *
 xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 {
+	uint64_t now = zfs_lbolt();
+	if (now > hz)
+		atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+
 	mutex_enter(&vmem_xnu_alloc_free_lock);
 	void *m = spl_vmem_malloc_if_no_pressure(size);
 	mutex_exit(&vmem_xnu_alloc_free_lock);
@@ -2064,6 +2070,10 @@ static void
 xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 {
 	extern void osif_free(void *, uint64_t);
+
+	uint64_t now = zfs_lbolt();
+	if (now > hz)
+		atomic_swap_64(&spl_xat_lastfree,  now / hz);
 
 	// Serialize behind a (short) delay, giving
 	// xnu time to do freelist management and

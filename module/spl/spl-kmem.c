@@ -515,6 +515,8 @@ extern uint64_t spl_xat_success;
 extern uint64_t spl_xat_late_success;
 extern uint64_t spl_xat_pressured;
 extern uint64_t spl_xat_bailed;
+extern uint64_t spl_xat_lastalloc;
+extern uint64_t spl_xat_lastfree;
 
 
 typedef struct spl_stats {
@@ -549,6 +551,8 @@ typedef struct spl_stats {
 	kstat_named_t spl_xat_late_success;
 	kstat_named_t spl_xat_pressured;
 	kstat_named_t spl_xat_bailed;
+	kstat_named_t spl_xat_lastalloc;
+	kstat_named_t spl_xat_lastfree;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -583,6 +587,8 @@ static spl_stats_t spl_stats = {
 	{"spl_xat_late_success", KSTAT_DATA_UINT64},
 	{"spl_xat_pressured", KSTAT_DATA_UINT64},
 	{"spl_xat_bailed", KSTAT_DATA_UINT64},
+	{"spl_xat_lastalloc", KSTAT_DATA_UINT64},
+	{"spl_xat_lastfree", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4086,6 +4092,7 @@ spl_free_thread()
 		   spl_free);
 
 	uint64_t recent_lowmem = 0;
+	uint64_t last_disequilibrium = 0;
 
 	while (!spl_free_thread_exit) {
 		mutex_exit(&spl_free_thread_lock);
@@ -4099,6 +4106,9 @@ spl_free_thread()
 		mutex_enter(&spl_free_lock);
 
 		uint64_t time_now = zfs_lbolt();
+		uint64_t time_now_seconds = 0;
+		if (time_now > hz)
+			time_now_seconds = time_now / hz;
 
 		last_spl_free = spl_free;
 
@@ -4140,12 +4150,33 @@ spl_free_thread()
 			early_lots_free = true;
 		}
 
+		// if we have neither alloced or freed in several minutes,
+		// then we do not need to shrink back if there is a momentary
+		// transient memory spike (i.e., one that lasts less than a second)
+
+		boolean_t memory_equilibrium = false;
+		const uint64_t five_minutes = 300ULL;
+		const uint64_t one_minute = 60ULL;
+		uint64_t last_xat_alloc_seconds = 0;
+		uint64_t last_xat_free_seconds = 0;
+		atomic_swap_64(&last_xat_alloc_seconds, spl_xat_lastalloc);
+		atomic_swap_64(&last_xat_free_seconds, spl_xat_lastfree);
+		if (last_xat_alloc_seconds + five_minutes > time_now_seconds &&
+		    last_xat_free_seconds + five_minutes > time_now_seconds) {
+			if (last_disequilibrium + one_minute > time_now_seconds) {
+				memory_equilibrium = true;
+				last_disequilibrium = 0;
+			}
+		} else {
+			last_disequilibrium = time_now_seconds;
+		}
+
 		// this is a sign of a period of time of low system memory, however
 		// XNU's generation of this variable is not very predictable,
 		// but generally it should be taken seriously when it's positive
 		// (it is often falsely 0)
 
-		if ((vm_page_free_wanted > 0 && reserve_low && !early_lots_free) ||
+		if ((vm_page_free_wanted > 0 && reserve_low && !early_lots_free && !memory_equilibrium) ||
 		    vm_page_free_wanted >= 1024) {
 			int64_t bminus = (int64_t)vm_page_free_wanted * (int64_t)PAGESIZE * -16LL;
 			if (bminus > -16LL*1024LL*1024LL)
@@ -4161,13 +4192,17 @@ spl_free_thread()
 				__sync_lock_test_and_set(&spl_free_manual_pressure, -16LL * new_spl_free);
 			if (vm_page_free_wanted > vm_page_free_min / 8)
 				__sync_lock_test_and_set(&spl_free_fast_pressure, TRUE);
+			last_disequilibrium = time_now_seconds;
 		} else if (vm_page_free_wanted > 0) {
 			int64_t bytes_wanted = (int64_t)vm_page_free_wanted * (int64_t)PAGESIZE;
 			new_spl_free -= bytes_wanted;
-                        if (reserve_low) {
+                        if (reserve_low && !early_lots_free) {
                                 lowmem = true;
                                 if (recent_lowmem == 0) {
                                         recent_lowmem = time_now;
+				}
+				if (!memory_equilibrium) {
+					last_disequilibrium = time_now_seconds;
 				}
 			}
 		}
@@ -4185,17 +4220,21 @@ spl_free_thread()
 		// even if we're scanning we may have plenty of space in the reserve arena,
 		// in which case we should not react too strongly
 
-                if (above_min_free_bytes < (int64_t)PAGESIZE * 500LL && reserve_low && !early_lots_free) {
+		// if we have been in memory equilibrium, also don't react too strongly
+
+                if (above_min_free_bytes < (int64_t)PAGESIZE * 500LL && reserve_low
+		    && !early_lots_free && !memory_equilibrium) {
 			// trigger a reap below
 			lowmem = true;
 		}
 		extern volatile unsigned int vm_page_speculative_count;
-		if ((above_min_free_bytes < 0LL && reserve_low && !early_lots_free) ||
+		if ((above_min_free_bytes < 0LL && reserve_low && !early_lots_free && !memory_equilibrium) ||
 		    above_min_free_bytes <= -4LL*1024LL*1024LL) {
 			int64_t new_p = -1LL * above_min_free_bytes;
 			emergency_lowmem = true;
 			lowmem = true;
 			recent_lowmem = time_now;
+			last_disequilibrium = time_now_seconds;
 			int64_t previous_highest_pressure = 0;
 			__sync_lock_test_and_set(&previous_highest_pressure, spl_free_manual_pressure);
 			if (new_p > previous_highest_pressure || new_p <= 0)
@@ -4205,10 +4244,12 @@ spl_free_thread()
 			int64_t spec_bytes = (int64_t)vm_page_speculative_count * (int64_t)PAGESIZE;
 			if (vm_page_free_wanted > 0 || new_p > spec_bytes)
 				__sync_lock_test_and_set(&spl_free_fast_pressure, TRUE);
-		} else if (above_min_free_bytes < 0LL && reserve_low) {
+		} else if (above_min_free_bytes < 0LL && !early_lots_free) {
 			lowmem = true;
 			if (recent_lowmem == 0)
 				recent_lowmem = time_now;
+			if (!memory_equilibrium)
+				last_disequilibrium = time_now_seconds;
 		}
 
 		new_spl_free += above_min_free_bytes;
@@ -4246,7 +4287,7 @@ spl_free_thread()
 		// out of the set pressure by turning off spl_free_fast_pressure, since
 		// that automatically provokes an arc shrink and arc reap
 
-		if (!reserve_low || early_lots_free) {
+		if (!reserve_low || early_lots_free || memory_equilibrium) {
 			lowmem = false;
 			emergency_lowmem = false;
 			__sync_lock_test_and_set(&spl_free_fast_pressure, FALSE);
@@ -4284,15 +4325,15 @@ spl_free_thread()
 		// few seconds -- possibly two (one that causes a reap, one
 		// that falls through to the 4 second hold above).
 
-		if (recent_lowmem > time_now && early_lots_free && reserve_low) {
+		if (recent_lowmem == time_now && early_lots_free && reserve_low) {
 			// we can't grab 64 MiB as a single segment,
 			// but otherwise have ample memory brought in from xnu,
 			// but recently we had lowmem... and still have lowmem.
 			// cure this condition with a dose of pressure.
-			if (above_min_free_bytes < 500LL*(int64_t)PAGESIZE) {
+			if (above_min_free_bytes < 0) {
 				int64_t old_p;
 				__sync_lock_test_and_set(&old_p, spl_free_manual_pressure);
-				if (old_p <= 0) {
+				if (old_p <= -above_min_free_bytes) {
 					__sync_lock_test_and_set(&spl_free_manual_pressure,
 						-above_min_free_bytes);
 					recent_lowmem = 0;
@@ -4490,6 +4531,8 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_xat_late_success.value.ui64 = spl_xat_late_success;
 		ks->spl_xat_pressured.value.ui64 = spl_xat_pressured;
 		ks->spl_xat_bailed.value.ui64 = spl_xat_bailed;
+		ks->spl_xat_lastalloc.value.ui64 = spl_xat_lastalloc;
+		ks->spl_xat_lastfree.value.ui64 = spl_xat_lastfree;
 	}
 
 	return (0);
