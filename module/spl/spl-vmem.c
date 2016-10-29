@@ -2103,7 +2103,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 static void *
 vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 {
-	int hb = highbit(size);
+	int hb = highbit(size-1);
 
 	if (hb > VMEM_BUCKET_HIBIT) {
 		return (vmem_alloc(spl_default_arena, size, vmflags));
@@ -2118,7 +2118,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 static void
 vmem_bucket_free(vmem_t *vmp, void *vaddr, size_t size)
 {
-	int hb = highbit(size);
+	int hb = highbit(size-1);
 
 	if (hb > VMEM_BUCKET_HIBIT) {
 		vmem_free(spl_default_arena, vaddr, size);
