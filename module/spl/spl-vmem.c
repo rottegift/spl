@@ -2125,6 +2125,41 @@ vmem_bucket_free(vmem_t *vmp, void *vaddr, size_t size)
 	}
 }
 
+static inline int64_t
+vmem_bucket_arena_free(uint16_t bucket)
+{
+	VERIFY(bucket < VMEM_BUCKETS);
+	return((int64_t)vmem_size_semi_atomic(vmem_bucket_arena[bucket], VMEM_FREE));
+}
+
+static inline int64_t
+vmem_bucket_arena_used(int bucket)
+{
+	VERIFY(bucket < VMEM_BUCKETS);
+	return((int64_t)vmem_size_semi_atomic(vmem_bucket_arena[bucket], VMEM_ALLOC));
+}
+
+
+int64_t
+vmem_buckets_size(int typemask)
+{
+	int64_t total_size = 0;
+
+	for (int i = 0; i < VMEM_BUCKETS; i++) {
+		int64_t u = vmem_bucket_arena_used(i);
+		int64_t f = vmem_bucket_arena_free(i);
+		if (typemask & VMEM_ALLOC)
+			total_size += u;
+		if (typemask & VMEM_FREE)
+			total_size += f;
+	}
+	if (total_size < 0)
+		total_size = 0;
+
+	return((size_t) total_size);
+}
+
+
 vmem_t *
 vmem_init(const char *heap_name,
 		  void *heap_start, size_t heap_size, size_t heap_quantum,

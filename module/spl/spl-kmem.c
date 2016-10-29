@@ -518,6 +518,8 @@ extern uint64_t spl_xat_bailed;
 extern uint64_t spl_xat_lastalloc;
 extern uint64_t spl_xat_lastfree;
 
+uint64_t spl_buckets_mem_free = 0;
+
 
 typedef struct spl_stats {
 	kstat_named_t spl_os_alloc;
@@ -553,6 +555,8 @@ typedef struct spl_stats {
 	kstat_named_t spl_xat_bailed;
 	kstat_named_t spl_xat_lastalloc;
 	kstat_named_t spl_xat_lastfree;
+
+	kstat_named_t spl_buckets_mem_free;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -589,6 +593,8 @@ static spl_stats_t spl_stats = {
 	{"spl_xat_bailed", KSTAT_DATA_UINT64},
 	{"spl_xat_lastalloc", KSTAT_DATA_UINT64},
 	{"spl_xat_lastfree", KSTAT_DATA_UINT64},
+
+	{"spl_buckets_mem_free", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4140,14 +4146,36 @@ spl_free_thread()
 		atomic_swap_64(&rvfreebits, spl_heap_arena->vm_freemap);
 		if ((rvfreebits & rvmask) == 0) {
 			reserve_low = true;
+		} else {
+			new_spl_free += (int64_t) sixtyfour;
 		}
+
+		// do we have lots of memory in the spl_heap_arena ?
 
 		boolean_t early_lots_free = false;
 		const uint64_t onetwentyeight = 128ULL*1024ULL*1024ULL;
+		const uint64_t sixteen = 16ULL*1024ULL*1024ULL;
 		if (!reserve_low) {
 			early_lots_free = true;
 		} else if (vmem_size_semi_atomic(spl_heap_arena, VMEM_FREE) > onetwentyeight) {
 			early_lots_free = true;
+			new_spl_free += (int64_t) sixteen;
+		}
+
+		// do we have lots of memory in the bucket_arenas ?
+
+		extern int64_t vmem_buckets_size(int);
+		int64_t buckets_free = vmem_buckets_size(VMEM_FREE);
+		if ((uint64_t)buckets_free != spl_buckets_mem_free)
+			spl_buckets_mem_free = (uint64_t) buckets_free;
+
+		if (buckets_free >= 512LL*1024LL*1024LL) {
+			early_lots_free = true;
+			new_spl_free += (int64_t) sixteen;
+		}
+		if (buckets_free >= 1024LL*1024LL*1024LL) {
+			reserve_low = false;
+			new_spl_free += (int64_t) sixteen;
 		}
 
 		// if we have neither alloced or freed in several minutes,
@@ -4349,17 +4377,20 @@ spl_free_thread()
 		// cf arc_available_memory()
 		if (!emergency_lowmem) {
 			extern vmem_t *spl_default_arena;
-			int64_t heap_inuse = (int64_t)vmem_size_semi_atomic(spl_heap_arena,VMEM_ALLOC);
-			int64_t default_inuse = (int64_t)vmem_size_semi_atomic(spl_default_arena, VMEM_ALLOC);
-			int64_t combined_inuse = heap_inuse + default_inuse;
-			int64_t total_mem_used = (int64_t) segkmem_total_mem_allocated;
+			int64_t heap_free = (int64_t)vmem_size_semi_atomic(spl_heap_arena, VMEM_FREE);
+			// grabbed buckets_free up above; we are OK with change to it in the meanwhile,
+			// it'll get an update on the next run.
+			int64_t combined_free = heap_free + buckets_free;
 
-			int64_t combined_unused = total_mem_used - combined_inuse;
-
-			if (combined_unused != 0)
-				new_spl_free += combined_unused / 2;
+			if (combined_free != 0) {
+				if (lowmem)
+					new_spl_free += combined_free / 8;
+				else
+					new_spl_free += combined_free / 2;
+			}
 
 			// memory footprint has gotten really big, decrease spl_free substantially
+			int64_t total_mem_used = (int64_t) segkmem_total_mem_allocated;
 			if ((segkmem_total_mem_allocated * 100LL / real_total_memory) > 70) {
 				new_spl_free -= total_mem_used / 64;
 			} else if ((segkmem_total_mem_allocated * 100LL / real_total_memory) > 75) {
@@ -4371,7 +4402,7 @@ spl_free_thread()
 				    ((int64_t)real_total_memory - total_mem_used);
 				int64_t safe_freebytes = total_freebytes - 128ULL * 1024ULL * 1024ULL;
 				if (safe_freebytes > 0)
-					spl_free += safe_freebytes / 8;
+					new_spl_free += safe_freebytes / 8;
 			}
 		}
 
@@ -4533,6 +4564,8 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_xat_bailed.value.ui64 = spl_xat_bailed;
 		ks->spl_xat_lastalloc.value.ui64 = spl_xat_lastalloc;
 		ks->spl_xat_lastfree.value.ui64 = spl_xat_lastfree;
+
+		ks->spl_buckets_mem_free.value.ui64 = spl_buckets_mem_free;
 	}
 
 	return (0);
