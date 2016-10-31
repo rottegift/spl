@@ -2100,14 +2100,38 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 {
 	int hb = highbit(size-1);
 
-	if (hb > VMEM_BUCKET_HIBIT) {
+	if (hb > VMEM_BUCKET_HIBIT)
 		return (vmem_alloc(spl_default_arena, size, vmflags));
-	} else {
-		int bucket = hb - VMEM_BUCKET_LOWBIT;
-		if (bucket < 0)
-			bucket = 0;
-		return (vmem_alloc(vmem_bucket_arena[bucket], size, vmflags));
+
+	int bucket = hb - VMEM_BUCKET_LOWBIT;
+
+	if (bucket < 0)
+		bucket = 0;
+
+	vmem_t *bvmp = vmem_bucket_arena[bucket];
+	static uint32_t waiters = 0;
+
+	// spin-sleep: if we would need to go to the xnu allocator.
+	// we want to avoid a burst of allocs from bucket_heap's children
+	// successively hitting a low-memory condition, or alternatively
+	// each successfully importing memory from xnu when they can share
+	// a single import.
+	mutex_enter(&bvmp->vm_lock);
+	atomic_inc_32(&waiters);
+	for (int iter = 0; waiters > 1; iter++) {
+		// we have the mutex here from the _enter() above
+		// or the cv_...wait_() below
+		if (vmem_canalloc(bvmp,size) ||
+		    vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT) ||
+		    iter >= 10) {
+			break;
+		}
+		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
+		    USEC2NSEC(500), 0, 0);
 	}
+	atomic_dec_32(&waiters);
+	mutex_exit(&bvmp->vm_lock);
+	return (vmem_alloc(bvmp, size, vmflags));
 }
 
 static void
