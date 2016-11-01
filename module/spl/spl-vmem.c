@@ -2240,10 +2240,51 @@ vmem_init(const char *heap_name,
 		(void) snprintf(buf, VMEM_NAMELEN + 20, "%s_%llu",
 		    "bucket", bucket_smallest_size);
 		printf("SPL: %s creating arena %s (i == %d)\n", __func__, buf, i);
+		size_t minimum_allocsize = 0;
+		switch (i) {
+		case 17:
+			// The 128k bucket will generally be the most fragmented of all
+			// because it is one step larger than the maximum qcache size
+			// and is a popular size for the zio data and metadata arenas,
+			// with a small amount of va heap use.
+			//
+			// These static factors and the dynamism of a busy zfs system lead
+			// to interleaving 128k allocations with very different lifespans
+			// into the same xnu allocation, and at 16MiB this tends to
+			// leads to substantial (~ 1/2 GiB) waste.   That does not seem
+			// like much memory for most sytems, but it tends to represent holding
+			// ~ 4x more memory than the ideal case of 0 waste, thus the division by
+			// four of minimum_allocate compared to the 16 MiB default.   Additionally,
+			// this interleaving makes it harder to shrink the overall SPL memory
+			// use when memory is cruicially low.
+			//
+			// The trade off here is contributing to the fragmentation of
+			// the xnu freelist, so the step-down should not be even smaller.
+			//
+			// The 64k bucket is bursty and will often be just a single
+			// allocation, so it typically wastes ~ 16MiB.  It does give
+			// back memory very efficiently, however, so it is not given
+			// the same exception as the 128k case, as the total long-term
+			// waste is tiny in absolute terms.
+			minimum_allocsize = 4ULL*1024ULL*1024ULL;
+			printf("SPL: %s setting bucket %d (%d) to size %llu\n",
+			    __func__, i, (int)(1 << i), (uint64_t)minimum_allocsize);
+			break;
+		default:
+			// 16 MiB has proven to be a decent choice, with surprisingly
+			// little waste.   The greatest waste has in practice been in
+			// the 128k bucket (see above), the 256k bucket under unusual
+			// circumstances (although this is much  smaller as a percentage,
+			// and in particular less than 1/2, so a step change to 8 MiB would
+			// not be very worthwhile), the 64k bucket (see above), and the
+			// 2 MiB bucket (which will typically occupy only one span anyway).
+			minimum_allocsize = 16ULL*1024ULL*1024ULL;
+			break;
+		}
 		vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT] =
 		    vmem_create(buf, NULL, 0, heap_quantum,
 			xnu_alloc_throttled, xnu_free_throttled, spl_default_arena_parent,
-			16ULL*1024ULL*1024ULL, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
+			minimum_allocsize, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
 	}
 
 	// spl_heap_arena, the bucket heap, is the primary interface to the vmem system
