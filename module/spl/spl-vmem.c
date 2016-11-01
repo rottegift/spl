@@ -2054,11 +2054,14 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 				atomic_inc_64(&spl_xat_late_success);
 				return (a);
 			}
-		} else if (iter > 8) {
+		} else if (iter >= 20) {
+			// after ~ 10 milliseconds,
 			// bail out and let vmem_xalloc() deal with it
 			atomic_inc_64(&spl_xat_bailed);
 			return (NULL);
-		} else {
+		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
+			// set pressure after ~ 1 ms
+			// and then not on every iter
 			spl_free_set_emergency_pressure(size);
 			atomic_inc_64(&spl_xat_pressured);
 		}
@@ -2075,22 +2078,23 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	if (now > hz)
 		atomic_swap_64(&spl_xat_lastfree,  now / hz);
 
-	// Serialize behind a (short) delay, giving
+	// Serialize behind a (short) spin-sleep delay, giving
 	// xnu time to do freelist management and
 	// PT teardowns
+	static volatile uint32_t waiters = 0;
+
 	mutex_enter(&vmem_xnu_alloc_free_lock);
-	for (int i = 0; i < 10; i++) {
-		clock_t r;
-		r = cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
+	atomic_inc_32(&waiters);
+	for (int i = 0; waiters > 1; i++) {
+		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
 		    &vmem_xnu_alloc_free_lock,
 		    USEC2NSEC(100), 0, 0);
-		if (r < 1)
-			break;
 	}
 	osif_free(vaddr, size);
 	// cause other waiter(s) to exit their cv_timewait*s early
 	// so that at least 100 usec pass before the next osif_free()
 	// call from a xnu_free_throttled() is made.
+	atomic_dec_32(&waiters);
 	cv_broadcast(&vmem_xnu_alloc_free_cv);
 	mutex_exit(&vmem_xnu_alloc_free_lock);
 }
@@ -2109,7 +2113,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 		bucket = 0;
 
 	vmem_t *bvmp = vmem_bucket_arena[bucket];
-	static uint32_t waiters = 0;
+	static volatile uint32_t waiters = 0;
 
 	// spin-sleep: if we would need to go to the xnu allocator.
 	// we want to avoid a burst of allocs from bucket_heap's children
