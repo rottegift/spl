@@ -4199,12 +4199,17 @@ spl_free_thread()
 			last_disequilibrium = time_now_seconds;
 		}
 
+		boolean_t just_alloced = false;
+		if (last_xat_alloc_seconds + 1 > time_now_seconds)
+			just_alloced = true;
+
 		// this is a sign of a period of time of low system memory, however
 		// XNU's generation of this variable is not very predictable,
 		// but generally it should be taken seriously when it's positive
 		// (it is often falsely 0)
 
-		if ((vm_page_free_wanted > 0 && reserve_low && !early_lots_free && !memory_equilibrium) ||
+		if ((vm_page_free_wanted > 0 && reserve_low && !early_lots_free &&
+			!memory_equilibrium && !just_alloced) ||
 		    vm_page_free_wanted >= 1024) {
 			int64_t bminus = (int64_t)vm_page_free_wanted * (int64_t)PAGESIZE * -16LL;
 			if (bminus > -16LL*1024LL*1024LL)
@@ -4256,7 +4261,8 @@ spl_free_thread()
 			lowmem = true;
 		}
 		extern volatile unsigned int vm_page_speculative_count;
-		if ((above_min_free_bytes < 0LL && reserve_low && !early_lots_free && !memory_equilibrium) ||
+		if ((above_min_free_bytes < 0LL && reserve_low && !early_lots_free &&
+			!memory_equilibrium && !just_alloced) ||
 		    above_min_free_bytes <= -4LL*1024LL*1024LL) {
 			int64_t new_p = -1LL * above_min_free_bytes;
 			emergency_lowmem = true;
@@ -4315,7 +4321,7 @@ spl_free_thread()
 		// out of the set pressure by turning off spl_free_fast_pressure, since
 		// that automatically provokes an arc shrink and arc reap
 
-		if (!reserve_low || early_lots_free || memory_equilibrium) {
+		if (!reserve_low || early_lots_free || memory_equilibrium || just_alloced) {
 			lowmem = false;
 			emergency_lowmem = false;
 			__sync_lock_test_and_set(&spl_free_fast_pressure, FALSE);

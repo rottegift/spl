@@ -2022,8 +2022,6 @@ static void *
 xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 {
 	uint64_t now = zfs_lbolt();
-	if (now > hz)
-		atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 
 	mutex_enter(&vmem_xnu_alloc_free_lock);
 	void *m = spl_vmem_malloc_if_no_pressure(size);
@@ -2032,6 +2030,8 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 	if (m != NULL) {
 		cv_signal(&vmem_xnu_alloc_free_cv);
 		atomic_inc_64(&spl_xat_success);
+		if (now > hz)
+			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 		return (m);
 	}
 
@@ -2052,6 +2052,8 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			if (a != NULL) {
 				cv_signal(&vmem_xnu_alloc_free_cv);
 				atomic_inc_64(&spl_xat_late_success);
+				if (now > hz)
+					atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 				return (a);
 			}
 		} else if (iter >= 20) {
@@ -2074,10 +2076,6 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 {
 	extern void osif_free(void *, uint64_t);
 
-	uint64_t now = zfs_lbolt();
-	if (now > hz)
-		atomic_swap_64(&spl_xat_lastfree,  now / hz);
-
 	// Serialize behind a (short) spin-sleep delay, giving
 	// xnu time to do freelist management and
 	// PT teardowns
@@ -2097,6 +2095,10 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	atomic_dec_32(&waiters);
 	cv_broadcast(&vmem_xnu_alloc_free_cv);
 	mutex_exit(&vmem_xnu_alloc_free_lock);
+
+	uint64_t now = zfs_lbolt();
+	if (now > hz)
+		atomic_swap_64(&spl_xat_lastfree,  now / hz);
 }
 
 static void *
