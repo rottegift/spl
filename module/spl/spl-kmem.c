@@ -517,6 +517,7 @@ extern uint64_t spl_xat_pressured;
 extern uint64_t spl_xat_bailed;
 extern uint64_t spl_xat_lastalloc;
 extern uint64_t spl_xat_lastfree;
+extern uint64_t spl_xat_forced;
 
 uint64_t spl_buckets_mem_free = 0;
 
@@ -555,6 +556,7 @@ typedef struct spl_stats {
 	kstat_named_t spl_xat_bailed;
 	kstat_named_t spl_xat_lastalloc;
 	kstat_named_t spl_xat_lastfree;
+	kstat_named_t spl_xat_forced;
 
 	kstat_named_t spl_buckets_mem_free;
 } spl_stats_t;
@@ -593,6 +595,7 @@ static spl_stats_t spl_stats = {
 	{"spl_xat_bailed", KSTAT_DATA_UINT64},
 	{"spl_xat_lastalloc", KSTAT_DATA_UINT64},
 	{"spl_xat_lastfree", KSTAT_DATA_UINT64},
+	{"spl_xat_forced", KSTAT_DATA_UINT64},
 
 	{"spl_buckets_mem_free", KSTAT_DATA_UINT64},
 };
@@ -4570,6 +4573,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_xat_bailed.value.ui64 = spl_xat_bailed;
 		ks->spl_xat_lastalloc.value.ui64 = spl_xat_lastalloc;
 		ks->spl_xat_lastfree.value.ui64 = spl_xat_lastfree;
+		ks->spl_xat_forced.value.ui64 = spl_xat_forced;
 
 		ks->spl_buckets_mem_free.value.ui64 = spl_buckets_mem_free;
 	}

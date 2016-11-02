@@ -412,6 +412,7 @@ uint64_t spl_xat_pressured = 0;
 uint64_t spl_xat_bailed = 0;
 uint64_t spl_xat_lastalloc = 0;
 uint64_t spl_xat_lastfree = 0;
+uint64_t spl_xat_forced = 0;
 
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
@@ -2018,6 +2019,82 @@ vmem_qcache_reap(vmem_t *vmp)
 			kmem_cache_reap_now(vmp->vm_qcache[i]);
 }
 
+/*
+ * return NULL in the typical case, but force an allocation if we have been
+ * stuck waiting for an allocation for a long time
+ */
+static inline void *
+xnu_allocate_throttled_bail(uint64_t now_ticks, size_t size, int vmflags)
+{
+	static volatile uint32_t waiters = 0;
+
+	atomic_inc_32(&waiters);
+
+	if (waiters > 1) {
+		// only allow one forced-allocation at a time
+		atomic_dec_32(&waiters);
+		return (NULL);
+	}
+
+	const uint64_t one_second = hz;
+	const uint64_t one_minute = one_second * 60ULL;
+	const uint64_t pushpage_after = one_minute;
+	const uint64_t non_pushpage_after = 5ULL * one_minute;
+
+	static uint64_t last_forced_ticks = 0;
+	uint64_t lft = 0;
+	atomic_swap_64(&lft, last_forced_ticks);
+
+	// wait at least one second from previous force
+	// now is prior to expiration, bail
+	if (now_ticks < lft + one_second) {
+		atomic_dec_32(&waiters);
+		return (NULL);
+	}
+
+	uint64_t last_success_seconds = 0;
+	atomic_swap_64(&last_success_seconds, spl_xat_lastalloc);
+        uint64_t last_success_ticks = last_success_seconds * 60ULL;
+
+	// now is prior to expiration, bail
+	// not enough time has elapsed since the last successful
+	// allocation, so return NULL and let vmem_xalloc() deal with that.
+	if (now_ticks < last_success_ticks + pushpage_after) {
+		atomic_dec_32(&waiters);
+		return (NULL);
+	}
+
+	uint64_t lastfree_seconds = 0;
+	atomic_swap_64(&lastfree_seconds, spl_xat_lastfree);
+	uint64_t lastfree_ticks = lastfree_seconds * 60ULL;
+
+	// if we freed in the last minute, bail
+	if (now_ticks < lastfree_ticks + one_minute) {
+		atomic_dec_32(&waiters);
+		return (NULL);
+	}
+
+	// if now is after the threshold, allocate
+	if ((vmflags & VM_PUSHPAGE) &&
+	    (now_ticks > last_success_ticks + pushpage_after)) {
+		void *push_m = spl_vmem_malloc_unconditionally(size);
+		atomic_inc_64(&spl_xat_forced);
+		atomic_swap_64(&last_forced_ticks, now_ticks);
+		atomic_dec_32(&waiters);
+		return (push_m);
+	} else if (now_ticks > last_success_ticks + non_pushpage_after) {
+		void *norm_m = spl_vmem_malloc_unconditionally(size);
+		atomic_inc_64(&spl_xat_forced);
+		atomic_swap_64(&last_forced_ticks, now_ticks);
+		atomic_dec_32(&waiters);
+		return (norm_m);
+	}
+
+	// now is not after the threshold, bail
+	atomic_dec_32(&waiters);
+	return (NULL);
+}
+
 static void *
 xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 {
@@ -2060,7 +2137,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			// after ~ 10 milliseconds,
 			// bail out and let vmem_xalloc() deal with it
 			atomic_inc_64(&spl_xat_bailed);
-			return (NULL);
+			return (xnu_allocate_throttled_bail(now, size, vmflag));
 		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
 			// set pressure after ~ 1 ms
 			// and then not on every iter
