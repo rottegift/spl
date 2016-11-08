@@ -337,6 +337,8 @@ static vmem_t *spl_default_arena_parent; // dummy arena as a placeholder
 #define VMEM_BUCKET_HIBIT 24
 static vmem_t *vmem_bucket_arena[VMEM_BUCKETS];
 vmem_t *spl_heap_arena;
+static void *spl_heap_arena_initial_alloc;
+static size_t spl_heap_arena_initial_alloc_size = 0;
 #define NUMBER_OF_ARENAS_IN_VMEM_INIT 21
 static struct timespec	vmem_update_interval	= {15, 0};	/* vmem_update() every 15 seconds */
 uint32_t vmem_mtbf;		/* mean time between failures [default: off] */
@@ -2394,9 +2396,11 @@ vmem_init(const char *heap_name,
 	printf("SPL: %s adding fixed allocation of %llu to the bucket_heap\n",
 	    __func__, (uint64_t)resv_size);
 
-	(void) vmem_add(spl_heap_arena,
+	spl_heap_arena_initial_alloc =  vmem_add(spl_heap_arena,
 	    vmem_alloc(spl_default_arena, resv_size, VM_SLEEP),
 	    resv_size, VM_SLEEP);
+
+	spl_heap_arena_initial_alloc_size = resv_size;
 
 	heap = vmem_create(heap_name,  // id 16
 	    NULL, 0, heap_quantum,
@@ -2468,6 +2472,8 @@ vmem_fini(vmem_t *heap)
 
 	bsd_untimeout(vmem_update, NULL);
 
+	printf("SPL: %s: stopped vmem_update.  Creating list and walking arenas.\n", __func__);
+
 	/* Create a list of slabs to free by walking the list of allocs */
 	list_create(&freelist, sizeof (struct free_slab),
 				offsetof(struct free_slab, next));
@@ -2481,6 +2487,19 @@ vmem_fini(vmem_t *heap)
 
 	vmem_walk(heap, VMEM_ALLOC,
 			  vmem_fini_freelist, heap);
+
+	printf("SPL: %s: calling vmem_xfree(spl_heap_arena, ptr, %llu\n",
+	    __func__, (uint64_t)spl_heap_arena_initial_alloc_size);
+
+	vmem_xfree(spl_heap_arena, spl_heap_arena_initial_alloc,
+	    spl_heap_arena_initial_alloc_size);
+
+	printf("SPL: %s: walking spl_heap_arena\n", __func__);
+
+	vmem_walk(spl_heap_arena, VMEM_ALLOC, vmem_fini_freelist, spl_heap_arena);
+
+	printf("SPL: %s: looping vmem_xfree(vmem_vmem_arena, global_vmem_reap[0-%u], %llu\n",
+	    __func__, (uint32_t)NUMBER_OF_ARENAS_IN_VMEM_INIT, (uint64_t)sizeof(vmem_t));
 
 	for (id = 0; id < NUMBER_OF_ARENAS_IN_VMEM_INIT; id++) {// From vmem_init, 21 vmem_create macroized
 		vmem_xfree(vmem_vmem_arena, global_vmem_reap[id], sizeof (vmem_t));
@@ -2497,14 +2516,47 @@ vmem_fini(vmem_t *heap)
 	}
 	printf("SPL: Released %llu bytes from arenas\n", total);
 	list_destroy(&freelist);
+	printf("SPL: %s: delaying for readability before arena destroying\n", __func__);
+	delay(hz*5);
 
-#if 0 // Don't release, panics
+	printf("SPL: %s destroying heap\n", __func__);
+	vmem_destroy(heap);
+
+	printf("SPL: %s destroying vmem_vmem_arena\n", __func__);
+	vmem_destroy_internal(vmem_vmem_arena);
+	printf("SPL: %s destroying vmem_hash_arena\n", __func__);
+	vmem_destroy_internal(vmem_hash_arena);
+	printf("SPL: %s destroying vmem_seg_arena\n", __func__);
+	vmem_destroy_internal(vmem_seg_arena);
+	printf("SPL: %s destroying vmem_metadata_arena\n", __func__);
+	vmem_destroy_internal(vmem_metadata_arena);
+	printf("SPL: %s destroying spl_heap_arena\n", __func__);
+	vmem_destroy_internal(spl_heap_arena);
+	printf("SPL: %s destroying spl_bucket_arenas...\n", __func__);
+	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
+		vmem_t *vmpt = vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT];
+		printf(" %llu", (1ULL << i));
+		vmem_xfree(spl_default_arena, vmpt->vm_name, VMEM_NAMELEN + 21);
+		vmem_destroy_internal(vmpt);
+	}
+	printf("\nSPL: %s destroying spl_default_arena\n", __func__);
+	vmem_destroy_internal(spl_default_arena);
+	printf("\nSPL: done freeing, now try destroying mutexes... ");
+
+	printf("vmem_xnu_alloc_free_lock ");
 	mutex_destroy(&vmem_xnu_alloc_free_lock);
+	printf("vmem_panic_lock ");
 	mutex_destroy(&vmem_panic_lock);
+	printf("vmem_pushpage_lock ");
 	mutex_destroy(&vmem_pushpage_lock);
+	printf("vmem_nosleep_lock ");
 	mutex_destroy(&vmem_nosleep_lock);
+	printf("vmem_sleep_lock ");
 	mutex_destroy(&vmem_sleep_lock);
+	printf("vmem_segfree_lock ");
 	mutex_destroy(&vmem_segfree_lock);
+	printf("vmem_list_lock ");
 	mutex_destroy(&vmem_list_lock);
-#endif
+	printf("\nSPL: %s done. Pausing briefly.\n", __func__);
+	delay(5*hz);
 }
