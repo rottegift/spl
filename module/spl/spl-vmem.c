@@ -2488,39 +2488,33 @@ vmem_fini(vmem_t *heap)
 	vmem_walk(heap, VMEM_ALLOC,
 			  vmem_fini_freelist, heap);
 
-	printf("SPL: %s: calling vmem_xfree(spl_heap_arena, ptr, %llu\n",
+	printf("SPL: %s: calling vmem_xfree(spl_default_arena, ptr, %llu\n",
 	    __func__, (uint64_t)spl_heap_arena_initial_alloc_size);
 
-	vmem_xfree(spl_heap_arena, spl_heap_arena_initial_alloc,
+	vmem_xfree(spl_default_arena, spl_heap_arena_initial_alloc,
 	    spl_heap_arena_initial_alloc_size);
 
 	printf("SPL: %s: walking spl_heap_arena\n", __func__);
 
 	vmem_walk(spl_heap_arena, VMEM_ALLOC, vmem_fini_freelist, spl_heap_arena);
 
-	printf("SPL: %s: looping vmem_xfree(vmem_vmem_arena, global_vmem_reap[0-%u], %llu\n",
+	printf("SPL: %s: looping vmem_xfree(vmem_vmem_arena, global_vmem_reap[0-%u], %llu... ",
 	    __func__, (uint32_t)NUMBER_OF_ARENAS_IN_VMEM_INIT, (uint64_t)sizeof(vmem_t));
 
 	for (id = 0; id < NUMBER_OF_ARENAS_IN_VMEM_INIT; id++) {// From vmem_init, 21 vmem_create macroized
+	  printf("%d ", id);
 		vmem_xfree(vmem_vmem_arena, global_vmem_reap[id], sizeof (vmem_t));
 	}
 
-	/* Now release the list of allocs to built above */
-	total = 0;
-	while((fs = list_head(&freelist))) {
-		total+=fs->slabsize;
-		list_remove(&freelist, fs);
-		extern void segkmem_free(vmem_t *, void *, size_t);
-		segkmem_free(fs->vmp, fs->slab, fs->slabsize);
-		FREE(fs, M_TEMP);
-	}
-	printf("SPL: Released %llu bytes from arenas\n", total);
-	list_destroy(&freelist);
-	printf("SPL: %s: delaying for readability before arena destroying\n", __func__);
-	delay(hz*5);
+	printf("\nSPL: %s destroying heap\n", __func__);
+	vmem_destroy_internal(heap);
 
-	printf("SPL: %s destroying heap\n", __func__);
-	vmem_destroy(heap);
+	printf("SPL: %s destroying spl_bucket_arenas...", __func__);
+	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
+		vmem_t *vmpt = vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT];
+		printf(" %llu", (1ULL << i));
+		vmem_destroy_internal(vmpt);
+	}
 
 	printf("SPL: %s destroying vmem_vmem_arena\n", __func__);
 	vmem_destroy_internal(vmem_vmem_arena);
@@ -2532,16 +2526,14 @@ vmem_fini(vmem_t *heap)
 	vmem_destroy_internal(vmem_metadata_arena);
 	printf("SPL: %s destroying spl_heap_arena\n", __func__);
 	vmem_destroy_internal(spl_heap_arena);
-	printf("SPL: %s destroying spl_bucket_arenas...\n", __func__);
-	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
-		vmem_t *vmpt = vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT];
-		printf(" %llu", (1ULL << i));
-		vmem_xfree(spl_default_arena, vmpt->vm_name, VMEM_NAMELEN + 21);
-		vmem_destroy_internal(vmpt);
-	}
+	
 	printf("\nSPL: %s destroying spl_default_arena\n", __func__);
 	vmem_destroy_internal(spl_default_arena);
-	printf("\nSPL: done freeing, now try destroying mutexes... ");
+
+	printf("SPL: %s destroying spl_default_arena_parent\n", __func__);
+	vmem_destroy_internal(spl_default_arena_parent);
+	
+	printf("SPL: arenas removed, now try destroying mutexes... ");
 
 	printf("vmem_xnu_alloc_free_lock ");
 	mutex_destroy(&vmem_xnu_alloc_free_lock);
@@ -2557,6 +2549,25 @@ vmem_fini(vmem_t *heap)
 	mutex_destroy(&vmem_segfree_lock);
 	printf("vmem_list_lock ");
 	mutex_destroy(&vmem_list_lock);
-	printf("\nSPL: %s done. Pausing briefly.\n", __func__);
-	delay(5*hz);
+
+	printf("\nSPL: %s: walking list of live slabs at time of call to %s\n",
+	       __func__, __func__);
+
+	/* Now release the list of allocs to built above */
+	total = 0;
+	uint64_t total_count = 0;
+	while((fs = list_head(&freelist))) {
+	        total_count++;
+		total+=fs->slabsize;
+		list_remove(&freelist, fs);
+		//extern void segkmem_free(vmem_t *, void *, size_t);
+		//segkmem_free(fs->vmp, fs->slab, fs->slabsize);
+		FREE(fs, M_TEMP);
+	}
+	printf("SPL: WOULD HAVE released %llu bytes (%llu spans) from arenas\n",
+	       total, total_count);
+	list_destroy(&freelist);
+	printf("SPL: %s: Brief delay for readability...\n", __func__);
+	delay(hz);
+	printf("SPL: %s: done!\n", __func__);
 }
