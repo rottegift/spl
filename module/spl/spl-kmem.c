@@ -519,6 +519,11 @@ extern uint64_t spl_xat_lastalloc;
 extern uint64_t spl_xat_lastfree;
 extern uint64_t spl_xat_forced;
 
+extern uint64_t spl_bucket_tunable_large_span;
+extern uint64_t spl_bucket_tunable_small_span;
+extern void spl_set_bucket_tunable_large_span(uint64_t);
+extern void spl_set_bucket_tunable_small_span(uint64_t);
+
 uint64_t spl_buckets_mem_free = 0;
 
 
@@ -558,6 +563,9 @@ typedef struct spl_stats {
 	kstat_named_t spl_xat_lastfree;
 	kstat_named_t spl_xat_forced;
 
+	kstat_named_t spl_bucket_tunable_large_span;
+	kstat_named_t spl_bucket_tunable_small_span;
+
 	kstat_named_t spl_buckets_mem_free;
 } spl_stats_t;
 
@@ -596,6 +604,9 @@ static spl_stats_t spl_stats = {
 	{"spl_xat_lastalloc", KSTAT_DATA_UINT64},
 	{"spl_xat_lastfree", KSTAT_DATA_UINT64},
 	{"spl_xat_forced", KSTAT_DATA_UINT64},
+
+	{"spl_tunable_large_span", KSTAT_DATA_UINT64},
+	{"spl_tunable_small_span", KSTAT_DATA_UINT64},
 
 	{"spl_buckets_mem_free", KSTAT_DATA_UINT64},
 };
@@ -4541,6 +4552,14 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			}
 		}
 
+ 		if (ks->spl_bucket_tunable_large_span.value.ui64 != spl_bucket_tunable_large_span) {
+			spl_set_bucket_tunable_large_span(ks->spl_bucket_tunable_large_span.value.ui64);
+		}
+
+		if (ks->spl_bucket_tunable_small_span.value.ui64 != spl_bucket_tunable_small_span) {
+			spl_set_bucket_tunable_small_span(ks->spl_bucket_tunable_small_span.value.ui64);
+		}
+
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
 		ks->spl_active_threads.value.ui64 = zfs_threads;
@@ -4574,6 +4593,9 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_xat_lastalloc.value.ui64 = spl_xat_lastalloc;
 		ks->spl_xat_lastfree.value.ui64 = spl_xat_lastfree;
 		ks->spl_xat_forced.value.ui64 = spl_xat_forced;
+
+		ks->spl_bucket_tunable_large_span.value.ui64 = spl_bucket_tunable_large_span;
+		ks->spl_bucket_tunable_small_span.value.ui64 = spl_bucket_tunable_small_span;
 
 		ks->spl_buckets_mem_free.value.ui64 = spl_buckets_mem_free;
 	}

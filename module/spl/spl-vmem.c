@@ -2272,6 +2272,99 @@ vmem_buckets_size(int typemask)
 	return((size_t) total_size);
 }
 
+static uint64_t
+spl_validate_bucket_span_size(uint64_t val)
+{
+	if (!ISP2(val)) {
+		printf("SPL: %s: WARNING %llu is not a power of two, not changing.\n",
+		    __func__, val);
+		return (0);
+	}
+	if (val < 128ULL*1024ULL || val > 16ULL*1024ULL*1024ULL) {
+		printf("SPL: %s: WARNING %llu is out of range [128k - 16M], not changing.\n",
+		    __func__, val);
+		return (0);
+	}
+	return (val);
+}
+
+static inline void
+spl_modify_bucket_span_size(int bucket, uint64_t size)
+{
+	vmem_t *bvmp = vmem_bucket_arena[bucket];
+
+	mutex_enter(&bvmp->vm_lock);
+	bvmp->vm_min_import = size;
+	mutex_exit(&bvmp->vm_lock);
+}
+
+static inline void
+spl_modify_bucket_array()
+{
+	for (int i = VMEM_BUCKET_LOWBIT; i < VMEM_BUCKET_HIBIT; i++) {
+		int bucket = i - VMEM_BUCKET_LOWBIT;
+		switch(i) {
+			// see vmem_init() below for details
+		case 16:
+		case 17:
+			spl_modify_bucket_span_size(bucket, spl_bucket_tunable_small_span);
+			break;
+		default:
+			spl_modify_bucket_span_size(bucket, spl_bucket_tunable_large_span);
+			break;
+		}
+	}
+}
+
+static inline void
+spl_printf_bucket_span_sizes(void)
+{
+	// this doesn't have to be super-exact
+	printf("SPL: %s: ", __func__);
+	for (int i = VMEM_BUCKET_LOWBIT; i < VMEM_BUCKET_HIBIT; i++) {
+		int bnum = i - VMEM_BUCKET_LOWBIT;
+		vmem_t *bvmp = vmem_bucket_arena[bnum];
+		printf("%llu ", (uint64_t)bvmp->vm_min_import);
+	}
+	printf("\n");
+}
+
+static inline void
+spl_set_bucket_spans(uint64_t l, uint64_t s)
+{
+	if (spl_validate_bucket_span_size(l) &&
+	    spl_validate_bucket_span_size(s)) {
+		atomic_swap_64(&spl_bucket_tunable_large_span, l);
+		atomic_swap_64(&spl_bucket_tunable_small_span, s);
+		spl_modify_bucket_array();
+	}
+}
+
+void
+spl_set_bucket_tunable_large_span(uint64_t size)
+{
+	uint64_t s = 0;
+
+	mutex_enter(&vmem_xnu_alloc_free_lock);
+	atomic_swap_64(&s, spl_bucket_tunable_small_span);
+	spl_set_bucket_spans(size, s);
+	mutex_exit(&vmem_xnu_alloc_free_lock);
+
+	spl_printf_bucket_span_sizes();
+}
+
+void
+spl_set_bucket_tunable_small_span(uint64_t size)
+{
+	uint64_t l = 0;
+
+	mutex_enter(&vmem_xnu_alloc_free_lock);
+	atomic_swap_64(&l, spl_bucket_tunable_large_span);
+	spl_set_bucket_spans(l, size);
+	mutex_exit(&vmem_xnu_alloc_free_lock);
+
+	spl_printf_bucket_span_sizes();
+}
 
 vmem_t *
 vmem_init(const char *heap_name,
@@ -2345,6 +2438,7 @@ vmem_init(const char *heap_name,
 		}
 		size_t minimum_allocsize = 0;
 		switch (i) {
+		case 16:
 		case 17:
 			// The 128k bucket will generally be the most fragmented of all
 			// because it is one step larger than the maximum qcache size
@@ -2364,11 +2458,8 @@ vmem_init(const char *heap_name,
 			// The trade off here is contributing to the fragmentation of
 			// the xnu freelist, so the step-down should not be even smaller.
 			//
-			// The 64k bucket is bursty and will often be just a single
-			// allocation, so it typically wastes ~ 16MiB.  It does give
-			// back memory very efficiently, however, so it is not given
-			// the same exception as the 128k case, as the total long-term
-			// waste is tiny in absolute terms.
+			// The 64k bucket is typically very low bandwidth and often holds just
+			// one or two spans thanks to qcaching so does not need to be large.
 			minimum_allocsize = spl_bucket_tunable_large_span;
 			printf("SPL: %s setting bucket %d (%d) to size %llu\n",
 			    __func__, i, (int)(1 << i), (uint64_t)minimum_allocsize);
