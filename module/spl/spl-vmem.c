@@ -416,6 +416,10 @@ uint64_t spl_xat_lastalloc = 0;
 uint64_t spl_xat_lastfree = 0;
 uint64_t spl_xat_forced = 0;
 
+// bucket minimum span size tunables
+uint64_t spl_bucket_tunable_large_span = 0;
+uint64_t spl_bucket_tunable_small_span = 0;
+
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
 extern uint64_t total_memory;
@@ -2325,6 +2329,20 @@ vmem_init(const char *heap_name,
 		(void) snprintf(buf, VMEM_NAMELEN + 20, "%s_%llu",
 		    "bucket", bucket_smallest_size);
 		printf("SPL: %s creating arena %s (i == %d)\n", __func__, buf, i);
+		extern uint64_t real_total_memory;
+		if (real_total_memory > 0) {
+			// adjust minimum bucket span size for memory size
+			// we do not want to be smaller than 1 MiB
+			const uint64_t k = 1024ULL;
+			const uint64_t m = 1024ULL* k;
+			const uint64_t b = MAX(real_total_memory / (k * 2ULL), m);
+			const uint64_t s = MAX(b / 2ULL, m);
+			spl_bucket_tunable_large_span = MIN(b, 16ULL * m);
+			spl_bucket_tunable_small_span = s;
+			printf("SPL: %s: real_total_memory %llu, large spans %llu, small spans %llu\n",
+			    __func__, real_total_memory,
+			    spl_bucket_tunable_large_span, spl_bucket_tunable_small_span);
+		}
 		size_t minimum_allocsize = 0;
 		switch (i) {
 		case 17:
@@ -2351,7 +2369,7 @@ vmem_init(const char *heap_name,
 			// back memory very efficiently, however, so it is not given
 			// the same exception as the 128k case, as the total long-term
 			// waste is tiny in absolute terms.
-			minimum_allocsize = 4ULL*1024ULL*1024ULL;
+			minimum_allocsize = spl_bucket_tunable_large_span;
 			printf("SPL: %s setting bucket %d (%d) to size %llu\n",
 			    __func__, i, (int)(1 << i), (uint64_t)minimum_allocsize);
 			break;
@@ -2363,7 +2381,7 @@ vmem_init(const char *heap_name,
 			// and in particular less than 1/2, so a step change to 8 MiB would
 			// not be very worthwhile), the 64k bucket (see above), and the
 			// 2 MiB bucket (which will typically occupy only one span anyway).
-			minimum_allocsize = 16ULL*1024ULL*1024ULL;
+			minimum_allocsize = spl_bucket_tunable_small_span;
 			break;
 		}
 		vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT] =
@@ -2526,13 +2544,13 @@ vmem_fini(vmem_t *heap)
 	vmem_destroy_internal(vmem_metadata_arena);
 	printf("SPL: %s destroying spl_heap_arena\n", __func__);
 	vmem_destroy_internal(spl_heap_arena);
-	
+
 	printf("\nSPL: %s destroying spl_default_arena\n", __func__);
 	vmem_destroy_internal(spl_default_arena);
 
 	printf("SPL: %s destroying spl_default_arena_parent\n", __func__);
 	vmem_destroy_internal(spl_default_arena_parent);
-	
+
 	printf("SPL: arenas removed, now try destroying mutexes... ");
 
 	printf("vmem_xnu_alloc_free_lock ");
