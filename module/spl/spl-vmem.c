@@ -2460,7 +2460,7 @@ vmem_init(const char *heap_name,
 			//
 			// The 64k bucket is typically very low bandwidth and often holds just
 			// one or two spans thanks to qcaching so does not need to be large.
-			minimum_allocsize = spl_bucket_tunable_large_span;
+			minimum_allocsize = spl_bucket_tunable_small_span;
 			printf("SPL: %s setting bucket %d (%d) to size %llu\n",
 			    __func__, i, (int)(1 << i), (uint64_t)minimum_allocsize);
 			break;
@@ -2472,7 +2472,7 @@ vmem_init(const char *heap_name,
 			// and in particular less than 1/2, so a step change to 8 MiB would
 			// not be very worthwhile), the 64k bucket (see above), and the
 			// 2 MiB bucket (which will typically occupy only one span anyway).
-			minimum_allocsize = spl_bucket_tunable_small_span;
+			minimum_allocsize = spl_bucket_tunable_large_span;
 			break;
 		}
 		vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT] =
