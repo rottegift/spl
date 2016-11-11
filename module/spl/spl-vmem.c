@@ -2316,15 +2316,23 @@ static inline void
 spl_modify_bucket_array()
 {
 	for (int i = VMEM_BUCKET_LOWBIT; i < VMEM_BUCKET_HIBIT; i++) {
-		int bucket = i - VMEM_BUCKET_LOWBIT;
+		// i = 12, bucket = 0, contains allocs from 8192 to 16383 bytes,
+		// and should never ask xnu for < 16384 bytes, so as to avoid
+		// asking xnu for a non-power-of-two size.
+		const int bucket = i - VMEM_BUCKET_LOWBIT;
+		const uint32_t bucket_alloc_minimum_size = 1UL << (uint32_t)i;
+		const uint32_t bucket_parent_alloc_minimum_size = bucket_alloc_minimum_size * 2UL;
+
 		switch(i) {
 			// see vmem_init() below for details
 		case 16:
 		case 17:
-			spl_modify_bucket_span_size(bucket, spl_bucket_tunable_small_span);
+			spl_modify_bucket_span_size(bucket,
+			    MAX(spl_bucket_tunable_small_span, bucket_parent_alloc_minimum_size));
 			break;
 		default:
-			spl_modify_bucket_span_size(bucket, spl_bucket_tunable_large_span);
+			spl_modify_bucket_span_size(bucket,
+			    MAX(spl_bucket_tunable_large_span, bucket_parent_alloc_minimum_size));
 			break;
 		}
 	}
