@@ -396,6 +396,7 @@ uint64_t spl_vmem_threads_waiting = 0;
 static uint64_t spl_minalloc = 1024ULL*1024ULL;
 // number of allocations > minalloc
 uint64_t spl_bucket_non_pow2_allocs = 0;
+uint64_t spl_xat_non_pow2_allocs = 0;
 
 // allocator kstats
 uint64_t spl_vmem_unconditional_allocs = 0;
@@ -2096,6 +2097,9 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, size_t size, int vmflags)
 static void *
 xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 {
+	if (!ISP2(size))
+		atomic_inc_64(&spl_xat_non_pow2_allocs);
+
 	uint64_t now = zfs_lbolt();
 
 	mutex_enter(&vmem_xnu_alloc_free_lock);

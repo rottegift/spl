@@ -492,6 +492,7 @@ extern uint64_t stat_osif_free;
 extern uint64_t stat_osif_free_bytes;
 
 extern uint64_t spl_bucket_non_pow2_allocs;
+extern uint64_t spl_xat_non_pow2_allocs;
 
 // stats for spl_root_allocator();
 extern uint64_t spl_root_allocator_calls;
@@ -545,6 +546,7 @@ typedef struct spl_stats {
 	kstat_named_t spl_osif_free;
 	kstat_named_t spl_osif_free_bytes;
 	kstat_named_t spl_bucket_non_pow2_allocs;
+	kstat_named_t spl_xat_non_pow2_allocs;
 
 	kstat_named_t spl_vmem_unconditional_allocs;
 	kstat_named_t spl_vmem_unconditional_alloc_bytes;
@@ -587,6 +589,7 @@ static spl_stats_t spl_stats = {
 	{"spl_osif_free", KSTAT_DATA_UINT64},
 	{"spl_osif_free_bytes", KSTAT_DATA_UINT64},
 	{"spl_bucket_non_pow2_allocs", KSTAT_DATA_UINT64},
+	{"spl_xat_non_pow2_allocs", KSTAT_DATA_UINT64},
 
 	{"vmem_unconditional_allocs", KSTAT_DATA_UINT64},
 	{"vmem_unconditional_alloc_bytes", KSTAT_DATA_UINT64},
@@ -4576,6 +4579,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_osif_free.value.ui64 = stat_osif_free;
 		ks->spl_osif_free_bytes.value.ui64 = stat_osif_free_bytes;
 		ks->spl_bucket_non_pow2_allocs.value.ui64 = spl_bucket_non_pow2_allocs;
+		ks->spl_xat_non_pow2_allocs.value.ui64 = spl_xat_non_pow2_allocs;
 
 		ks->spl_vmem_unconditional_allocs.value.ui64 = spl_vmem_unconditional_allocs;
 		ks->spl_vmem_unconditional_alloc_bytes.value.ui64 = spl_vmem_unconditional_alloc_bytes;
