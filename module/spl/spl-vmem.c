@@ -2439,7 +2439,7 @@ vmem_init(const char *heap_name,
 
 	// create arenas for the VMEM_BUCKETS, id 2 - id 14
 	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
-		uint64_t bucket_smallest_size = (1ULL << i);
+		const uint64_t bucket_smallest_size = (1ULL << (uint64_t)i);
 		char *buf = vmem_alloc(spl_default_arena, VMEM_NAMELEN + 21, VM_SLEEP);
 		(void) snprintf(buf, VMEM_NAMELEN + 20, "%s_%llu",
 		    "bucket", bucket_smallest_size);
@@ -2482,9 +2482,8 @@ vmem_init(const char *heap_name,
 			//
 			// The 64k bucket is typically very low bandwidth and often holds just
 			// one or two spans thanks to qcaching so does not need to be large.
-			minimum_allocsize = spl_bucket_tunable_small_span;
-			printf("SPL: %s setting bucket %d (%d) to size %llu\n",
-			    __func__, i, (int)(1 << i), (uint64_t)minimum_allocsize);
+			minimum_allocsize = MAX(spl_bucket_tunable_small_span,
+			    bucket_smallest_size * 2);
 			break;
 		default:
 			// 16 MiB has proven to be a decent choice, with surprisingly
@@ -2494,9 +2493,12 @@ vmem_init(const char *heap_name,
 			// and in particular less than 1/2, so a step change to 8 MiB would
 			// not be very worthwhile), the 64k bucket (see above), and the
 			// 2 MiB bucket (which will typically occupy only one span anyway).
-			minimum_allocsize = spl_bucket_tunable_large_span;
+			minimum_allocsize = MAX(spl_bucket_tunable_large_span,
+			    bucket_smallest_size * 2);
 			break;
 		}
+		printf("SPL: %s setting bucket %d (%d) to size %llu\n",
+		    __func__, i, (int)(1 << i), (uint64_t)minimum_allocsize);
 		vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT] =
 		    vmem_create(buf, NULL, 0, heap_quantum,
 			xnu_alloc_throttled, xnu_free_throttled, spl_default_arena_parent,
