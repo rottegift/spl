@@ -2450,7 +2450,7 @@ vmem_init(const char *heap_name,
 			// we do not want to be smaller than 1 MiB
 			const uint64_t k = 1024ULL;
 			const uint64_t m = 1024ULL* k;
-			const uint64_t b = MAX(real_total_memory / (k * 2ULL), m);
+			const uint64_t b = MAX(real_total_memory / (k * 4ULL), m);
 			const uint64_t s = MAX(b / 2ULL, m);
 			spl_bucket_tunable_large_span = MIN(b, 16ULL * m);
 			spl_bucket_tunable_small_span = s;
