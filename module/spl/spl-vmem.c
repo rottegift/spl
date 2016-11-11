@@ -395,7 +395,7 @@ uint64_t spl_vmem_threads_waiting = 0;
 
 static uint64_t spl_minalloc = 1024ULL*1024ULL;
 // number of allocations > minalloc
-uint64_t spl_vmem_large_allocs = 0;
+uint64_t spl_bucket_non_pow2_allocs = 0;
 
 // allocator kstats
 uint64_t spl_vmem_unconditional_allocs = 0;
@@ -1101,9 +1101,6 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 	int hb, flist, resv;
 	uint32_t mtbf;
 
-	if (size > spl_minalloc)
-		spl_vmem_large_allocs++;
-
 	if ((align | phase | nocross) & (vmp->vm_quantum - 1))
 		panic("vmem_xalloc(%p, %lu, %lu, %lu, %lu, %p, %p, %x): "
 			  "parameters not vm_quantum aligned",
@@ -1440,9 +1437,6 @@ vmem_alloc(vmem_t *vmp, size_t size, int vmflag)
 	int hb;
 	int flist = 0;
 	uint32_t mtbf;
-
-	if (size > spl_minalloc)
-		spl_vmem_large_allocs++;
 
 	if (size - 1 < vmp->vm_qcache_max)
 		return (kmem_cache_alloc(vmp->vm_qcache[(size - 1) >>
@@ -2187,6 +2181,10 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 static void *
 vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 {
+
+	if (!ISP2(size))
+		atomic_inc_64(&spl_bucket_non_pow2_allocs);
+
 	int hb = highbit(size-1);
 
 	if (hb > VMEM_BUCKET_HIBIT)
