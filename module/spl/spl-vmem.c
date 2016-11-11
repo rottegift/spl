@@ -2001,8 +2001,6 @@ vmem_update(void *dummy)
 	}
 	mutex_exit(&vmem_list_lock);
 
-	atomic_swap_64(&spl_vmem_threads_waiting, 0ULL);
-
 	(void) bsd_timeout(vmem_update, dummy, &vmem_update_interval);
 }
 
@@ -2118,33 +2116,45 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 	if (vmflag & VM_NOSLEEP)
 		return (NULL);
 
+	static volatile uint32_t waiters = 0;
+
+	atomic_inc_32(&waiters);
 	for (int iter = 0; ; iter++) {
 		mutex_enter(&vmem_xnu_alloc_free_lock);
+		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
+		// have seen 8 waiters in real world, so this could be 4ms.
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv, &vmem_xnu_alloc_free_lock,
-		    USEC2NSEC(500), 0, 0);
+		    wait_time, 0, 0);
 		mutex_exit(&vmem_xnu_alloc_free_lock);
 
 		if (spl_vmem_xnu_useful_bytes_free() > size) {
 			void *a = spl_vmem_malloc_if_no_pressure(size);
 			if (a != NULL) {
-				cv_signal(&vmem_xnu_alloc_free_cv);
 				atomic_inc_64(&spl_xat_late_success);
 				if (now > hz)
 					atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+				atomic_dec_32(&waiters);
+				cv_signal(&vmem_xnu_alloc_free_cv);
 				return (a);
 			}
 		} else if (iter >= 20) {
-			// after ~ 10 milliseconds,
+			// after ~ 10 milliseconds (if no other waiters),
 			// bail out and let vmem_xalloc() deal with it
-			atomic_inc_64(&spl_xat_bailed);
-			return (xnu_allocate_throttled_bail(now, size, vmflag));
+
+			void *b = xnu_allocate_throttled_bail(now, size, vmflag);
+			atomic_dec_32(&waiters);
+			if (b != NULL) {
+				cv_signal(&vmem_xnu_alloc_free_cv);
+			}
+			return (b);
 		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
 			// set pressure after ~ 1 ms
-			// and then not on every iter
+			// and then every roughly 4 ms
 			spl_free_set_emergency_pressure(size);
 			atomic_inc_64(&spl_xat_pressured);
 		}
 	}
+	atomic_dec_32(&waiters);
 	return (NULL);
 }
 
@@ -2158,19 +2168,21 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	// PT teardowns
 	static volatile uint32_t waiters = 0;
 
-	mutex_enter(&vmem_xnu_alloc_free_lock);
 	atomic_inc_32(&waiters);
-	for (int i = 0; waiters > 1; i++) {
+	mutex_enter(&vmem_xnu_alloc_free_lock);
+	atomic_dec_32(&waiters);
+	while (waiters > 0) {
+		// there is a queue waiting for the mutex, sleep
+		// this gives up the mutex, admitting another through
+		// the mutex_enter->atomic_dec_32 path above
+		clock_t wait_time = USEC2NSEC(90UL + (10UL * MAX(waiters,1UL)));
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
 		    &vmem_xnu_alloc_free_lock,
-		    USEC2NSEC(100), 0, 0);
+		    wait_time, 0, 0);
 	}
 	osif_free(vaddr, size);
-	// cause other waiter(s) to exit their cv_timewait*s early
-	// so that at least 100 usec pass before the next osif_free()
-	// call from a xnu_free_throttled() is made.
-	atomic_dec_32(&waiters);
-	cv_broadcast(&vmem_xnu_alloc_free_cv);
+	// wake up a waiter on the alloc or free cv
+	cv_signal(&vmem_xnu_alloc_free_cv);
 	mutex_exit(&vmem_xnu_alloc_free_lock);
 
 	uint64_t now = zfs_lbolt();
@@ -2203,8 +2215,8 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 	// successively hitting a low-memory condition, or alternatively
 	// each successfully importing memory from xnu when they can share
 	// a single import.
-	mutex_enter(&bvmp->vm_lock);
 	atomic_inc_32(&waiters);
+	mutex_enter(&bvmp->vm_lock);
 	for (int iter = 0; waiters > 1; iter++) {
 		// we have the mutex here from the _enter() above
 		// or the cv_...wait_() below
