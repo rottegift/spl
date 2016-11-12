@@ -4810,8 +4810,6 @@ spl_kmem_fini(void)
 		kmem_log_fini(kmem_transaction_log);
 	}
 
-	segkmem_zio_fini();
-
 	// Destroy all the "general allocation" caches
 	kmem_alloc_caches_destroy();
 
@@ -4827,6 +4825,8 @@ spl_kmem_fini(void)
 	// they mutually reference each other.
 	// So we explicitly pull them apart piece-by-piece.
 	kmem_cache_fini();
+
+	segkmem_zio_fini();
 
 	// Now destroy the vmem arenas used by kmem.
 	vmem_destroy(kmem_default_arena);
