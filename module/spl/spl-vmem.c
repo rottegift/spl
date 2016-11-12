@@ -1066,7 +1066,7 @@ spl_vmem_malloc_unconditionally(size_t size)
 static void *
 spl_vmem_malloc_if_no_pressure(size_t size)
 {
-	if (spl_vmem_xnu_useful_bytes_free() > size) {
+	if (spl_vmem_xnu_useful_bytes_free() > (MAX(size,16ULL*1024ULL*1024ULL))) {
 		extern void *osif_malloc(uint64_t);
 		void *p = osif_malloc(size);
 		if (p != NULL) {
