@@ -950,9 +950,9 @@ vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 					0, 0, NULL, NULL, vmflag & (VM_KMFLAGS | VM_NEXTFIT)));
 			}
 			vmp->vm_kstat.vk_wait.value.ui64++;
-			printf("SPL: %s: waiting for %lu sized alloc after full circle of  %s, other threads waiting = %llu.\n",
-			    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
 			atomic_inc_64(&spl_vmem_threads_waiting);
+			printf("SPL: %s: waiting for %lu sized alloc after full circle of  %s, threads waiting = %llu.\n",
+			    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
 			cv_wait(&vmp->vm_cv, &vmp->vm_lock);
 			atomic_dec_64(&spl_vmem_threads_waiting);
 			vsp = rotor->vs_anext;
@@ -1324,9 +1324,9 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		if (vmflag & VM_NOSLEEP)
 			break;
 		vmp->vm_kstat.vk_wait.value.ui64++;
-		printf("SPL: %s: vmem waiting for %lu sized alloc for %s, other threads waiting = %llu\n",
-		    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
 		atomic_inc_64(&spl_vmem_threads_waiting);
+		printf("SPL: %s: vmem waiting for %lu sized alloc for %s, threads waiting = %llu\n",
+		    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
 		spl_free_set_emergency_pressure(size);
 		cv_wait(&vmp->vm_cv, &vmp->vm_lock);
 		atomic_dec_64(&spl_vmem_threads_waiting);
@@ -2137,15 +2137,24 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		atomic_inc_64(&spl_xat_success);
 		if (now > hz)
 			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+		// wake up a waiter on the alloc|free condvar
 		cv_signal(&vmem_xnu_alloc_free_cv);
+		// wake up waiters on the arena condvar
+		// since they now have memory they can use
+		cv_broadcast(&vmp->vm_cv);
 		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (m);
 	} else {
 		mutex_exit(&vmem_xnu_alloc_free_lock);
 	}
 
-	if (vmflag & VM_PANIC)
-		return (spl_vmem_malloc_unconditionally(size));
+	if (vmflag & VM_PANIC) {
+		void *p = spl_vmem_malloc_unconditionally(size);
+		// wake up arena waiters to let them know there is memory
+		// available
+		cv_broadcast(&vmp->vm_cv);
+		return (p);
+	}
 
 	if (vmflag & VM_NOSLEEP)
 		return (NULL);
@@ -2155,8 +2164,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 	atomic_inc_32(&waiters);
 	for (int iter = 0; ; iter++) {
 		mutex_enter(&vmem_xnu_alloc_free_lock);
-		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
-		// have seen 8 waiters in real world, so this could be 4ms.
+		clock_t wait_time = USEC2NSEC(500UL + 10UL * MAX(waiters,1UL));
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv, &vmem_xnu_alloc_free_lock,
 		    wait_time, 0, 0);
 		// still under mutex here
@@ -2167,7 +2175,11 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 				if (now > hz)
 					atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 				atomic_dec_32(&waiters);
+				// wake up a waiter on the alloc|free lock
 				cv_signal(&vmem_xnu_alloc_free_cv);
+				// wake up all waiters on the arena lock
+				// since they now have memory they can use
+				cv_broadcast(&vmp->vm_cv);
 				mutex_exit(&vmem_xnu_alloc_free_lock);
 				return (a);
 			} else {
@@ -2186,6 +2198,9 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			if (b != NULL) {
 				if (now > hz)
 					atomic_swap_64(&spl_xat_lastalloc, now / hz);
+				// wake up waiters on the arena lock
+				// since they now have memory they can use
+				cv_broadcast(&vmp->vm_cv);
 			}
 			return (b);
 		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
@@ -2225,13 +2240,15 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 		    wait_time, 0, 0);
 	}
 	osif_free(vaddr, size);
-	// wake up a waiter on the alloc or free cv
-	cv_signal(&vmem_xnu_alloc_free_cv);
-	mutex_exit(&vmem_xnu_alloc_free_lock);
-
 	uint64_t now = zfs_lbolt();
 	if (now > hz)
 		atomic_swap_64(&spl_xat_lastfree,  now / hz);
+	// wake up a waiter on the alloc|free condvar
+	cv_signal(&vmem_xnu_alloc_free_cv);
+	// wake up waiters on the arena just freed from
+	// so they can try an alloc
+	cv_broadcast(&vmp->vm_cv);
+	mutex_exit(&vmem_xnu_alloc_free_lock);
 }
 
 static void *
@@ -2243,8 +2260,13 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 
 	int hb = highbit(size-1);
 
-	if (hb > VMEM_BUCKET_HIBIT)
-		return (vmem_alloc(spl_default_arena, size, vmflags));
+	if (hb > VMEM_BUCKET_HIBIT) {
+		void *m = vmem_alloc(spl_default_arena, size, vmflags);
+		// wake up arena waiters to let them know there is memory
+		// available
+		cv_broadcast(&vmp->vm_cv);
+		return (m);
+	}
 
 	int bucket = hb - VMEM_BUCKET_LOWBIT;
 
@@ -2274,7 +2296,12 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 	}
 	atomic_dec_32(&waiters);
 	mutex_exit(&bvmp->vm_lock);
-	return (vmem_alloc(bvmp, size, vmflags));
+	void *m = vmem_alloc(bvmp, size, vmflags);
+	// if we did an allocation, wake up the arena cv waiters to
+	// let them know there's memory available
+	if (m != NULL)
+		cv_broadcast(&vmp->vm_cv);
+	return (m);
 }
 
 static void
@@ -2290,6 +2317,8 @@ vmem_bucket_free(vmem_t *vmp, void *vaddr, size_t size)
 			bucket = 0;
 		vmem_free(vmem_bucket_arena[bucket], vaddr, size);
 	}
+	// wake up arena waiters to let them try an alloc
+	cv_broadcast(&vmp->vm_cv);
 }
 
 static inline int64_t
