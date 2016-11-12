@@ -2025,12 +2025,20 @@ vmem_qcache_reap(vmem_t *vmp)
 static inline void *
 xnu_allocate_throttled_bail(uint64_t now_ticks, size_t size, int vmflags)
 {
-	static volatile uint32_t waiters = 0;
 
+	// turnstile variables; these either admit or exclude
+	// any bailed-out allocations into the more-expensive checks below
+	static volatile uint32_t waiters = 0;
+	static volatile uint64_t recently_asked_for = 0;
+
+	atomic_add_64(&recently_asked_for, size);
 	atomic_inc_32(&waiters);
 
-	if (waiters > 1) {
-		// only allow one forced-allocation at a time
+	if (waiters > 1 && recently_asked_for > 16ULL*1024ULL*1024ULL) {
+		// if no waiters, admit anyone
+		// but allow any number of waiters so long as the total
+		// being waited on is no more than 16 MiB
+		atomic_sub_64(&recently_asked_for, size);
 		atomic_dec_32(&waiters);
 		return (NULL);
 	}
@@ -2047,6 +2055,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, size_t size, int vmflags)
 	// wait at least one second from previous force
 	// now is prior to expiration, bail
 	if (now_ticks < lft + one_second) {
+		atomic_sub_64(&recently_asked_for, size);
 		atomic_dec_32(&waiters);
 		return (NULL);
 	}
@@ -2059,6 +2068,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, size_t size, int vmflags)
 	// not enough time has elapsed since the last successful
 	// allocation, so return NULL and let vmem_xalloc() deal with that.
 	if (now_ticks < last_success_ticks + pushpage_after) {
+		atomic_sub_64(&recently_asked_for, size);
 		atomic_dec_32(&waiters);
 		return (NULL);
 	}
@@ -2069,27 +2079,49 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, size_t size, int vmflags)
 
 	// if we freed in the last minute, bail
 	if (now_ticks < lastfree_ticks + one_minute) {
+		atomic_sub_64(&recently_asked_for, size);
 		atomic_dec_32(&waiters);
 		return (NULL);
 	}
 
 	// if now is after the threshold, allocate
+
+	// grab the alloc|free lock [a]
+	// call the unconditional allocator
+	// wake a single waiter (if any) on the alloc|free condvar
+	// open turnstile controlled by waiters and recently_asked_for
+	// drop alloc|free lock [b]
+
+	// a burst of xat bails can reach the lock (above at [a])
+	// and pile up waiting for the mutex; the burst will be
+	// for no more than 16MiB, since we adjust the turnstile
+	// before [b]
+
 	if ((vmflags & VM_PUSHPAGE) &&
 	    (now_ticks > last_success_ticks + pushpage_after)) {
+		mutex_enter(&vmem_xnu_alloc_free_lock);
 		void *push_m = spl_vmem_malloc_unconditionally(size);
+		cv_signal(&vmem_xnu_alloc_free_cv);
 		atomic_inc_64(&spl_xat_forced);
 		atomic_swap_64(&last_forced_ticks, now_ticks);
+		atomic_sub_64(&recently_asked_for, size);
 		atomic_dec_32(&waiters);
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (push_m);
 	} else if (now_ticks > last_success_ticks + non_pushpage_after) {
+		mutex_enter(&vmem_xnu_alloc_free_lock);
 		void *norm_m = spl_vmem_malloc_unconditionally(size);
+		cv_signal(&vmem_xnu_alloc_free_cv);
 		atomic_inc_64(&spl_xat_forced);
 		atomic_swap_64(&last_forced_ticks, now_ticks);
+		atomic_sub_64(&recently_asked_for, size);
 		atomic_dec_32(&waiters);
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (norm_m);
 	}
 
 	// now is not after the threshold, bail
+	atomic_sub_64(&recently_asked_for, size);
 	atomic_dec_32(&waiters);
 	return (NULL);
 }
@@ -2104,14 +2136,16 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 
 	mutex_enter(&vmem_xnu_alloc_free_lock);
 	void *m = spl_vmem_malloc_if_no_pressure(size);
-	mutex_exit(&vmem_xnu_alloc_free_lock);
 
 	if (m != NULL) {
-		cv_signal(&vmem_xnu_alloc_free_cv);
 		atomic_inc_64(&spl_xat_success);
 		if (now > hz)
 			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+		cv_signal(&vmem_xnu_alloc_free_cv);
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (m);
+	} else {
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 	}
 
 	if (vmflag & VM_PANIC)
@@ -2129,8 +2163,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		// have seen 8 waiters in real world, so this could be 4ms.
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv, &vmem_xnu_alloc_free_lock,
 		    wait_time, 0, 0);
-		mutex_exit(&vmem_xnu_alloc_free_lock);
-
+		// still under mutex here
 		if (spl_vmem_xnu_useful_bytes_free() > size) {
 			void *a = spl_vmem_malloc_if_no_pressure(size);
 			if (a != NULL) {
@@ -2139,23 +2172,34 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 					atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 				atomic_dec_32(&waiters);
 				cv_signal(&vmem_xnu_alloc_free_cv);
+				mutex_exit(&vmem_xnu_alloc_free_lock);
 				return (a);
+			} else {
+				mutex_exit(&vmem_xnu_alloc_free_lock);
 			}
 		} else if (iter >= 20) {
 			// after ~ 10 milliseconds (if no other waiters),
 			// bail out and let vmem_xalloc() deal with it
-
+			atomic_inc_64(&spl_xat_bailed);
+			// xnu_allocate_throttled_bail() acquires the mutex
+			// if it ends up doing an unconditional allocation
+			mutex_exit(&vmem_xnu_alloc_free_lock);
 			void *b = xnu_allocate_throttled_bail(now, size, vmflag);
+
 			atomic_dec_32(&waiters);
 			if (b != NULL) {
-				cv_signal(&vmem_xnu_alloc_free_cv);
+				if (now > hz)
+					atomic_swap_64(&spl_xat_lastalloc, now / hz);
 			}
 			return (b);
 		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
 			// set pressure after ~ 1 ms
 			// and then every roughly 4 ms
+			mutex_exit(&vmem_xnu_alloc_free_lock);
 			spl_free_set_emergency_pressure(size);
 			atomic_inc_64(&spl_xat_pressured);
+		} else {
+			mutex_exit(&vmem_xnu_alloc_free_lock);
 		}
 	}
 	atomic_dec_32(&waiters);
