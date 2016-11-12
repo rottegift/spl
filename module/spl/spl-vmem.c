@@ -951,8 +951,9 @@ vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 			}
 			vmp->vm_kstat.vk_wait.value.ui64++;
 			atomic_inc_64(&spl_vmem_threads_waiting);
-			printf("SPL: %s: waiting for %lu sized alloc after full circle of  %s, threads waiting = %llu.\n",
-			    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
+			if (spl_vmem_threads_waiting > 1)
+				printf("SPL: %s: waiting for %lu sized alloc after full circle of  %s, threads waiting = %llu.\n",
+				    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
 			cv_wait(&vmp->vm_cv, &vmp->vm_lock);
 			atomic_dec_64(&spl_vmem_threads_waiting);
 			vsp = rotor->vs_anext;
@@ -1064,7 +1065,7 @@ spl_vmem_malloc_unconditionally(size_t size)
 static void *
 spl_vmem_malloc_if_no_pressure(size_t size)
 {
-	if (spl_vmem_xnu_useful_bytes_free() > (MAX(size,16ULL*1024ULL*1024ULL))) {
+	if (spl_vmem_xnu_useful_bytes_free() > (MAX(size,8ULL*1024ULL*1024ULL))) {
 		extern void *osif_malloc(uint64_t);
 		void *p = osif_malloc(size);
 		if (p != NULL) {
@@ -1325,8 +1326,9 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 			break;
 		vmp->vm_kstat.vk_wait.value.ui64++;
 		atomic_inc_64(&spl_vmem_threads_waiting);
-		printf("SPL: %s: vmem waiting for %lu sized alloc for %s, threads waiting = %llu\n",
-		    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
+		if (spl_vmem_threads_waiting > 1)
+			printf("SPL: %s: vmem waiting for %lu sized alloc for %s, threads waiting = %llu\n",
+			    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
 		cv_wait(&vmp->vm_cv, &vmp->vm_lock);
 		atomic_dec_64(&spl_vmem_threads_waiting);
 	}
@@ -2148,10 +2150,14 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 	}
 
 	if (vmflag & VM_PANIC) {
+		mutex_enter(&vmem_xnu_alloc_free_lock);
 		void *p = spl_vmem_malloc_unconditionally(size);
+		// wake a waiter on alloc|free condvar
+		cv_signal(&vmem_xnu_alloc_free_cv);
 		// wake up arena waiters to let them know there is memory
 		// available
 		cv_broadcast(&vmp->vm_cv);
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (p);
 	}
 
@@ -2163,7 +2169,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 	atomic_inc_32(&waiters);
 	for (int iter = 0; ; iter++) {
 		mutex_enter(&vmem_xnu_alloc_free_lock);
-		clock_t wait_time = USEC2NSEC(500UL + 10UL * MAX(waiters,1UL));
+		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv, &vmem_xnu_alloc_free_lock,
 		    wait_time, 0, 0);
 		// still under mutex here
@@ -2192,15 +2198,17 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			// if it ends up doing an unconditional allocation
 			mutex_exit(&vmem_xnu_alloc_free_lock);
 			void *b = xnu_allocate_throttled_bail(now, size, vmflag);
-
-			atomic_dec_32(&waiters);
 			if (b != NULL) {
 				if (now > hz)
 					atomic_swap_64(&spl_xat_lastalloc, now / hz);
+				// wake up a waiter on the alloc|free cv
+				cv_signal(&vmem_xnu_alloc_free_cv);
 				// wake up waiters on the arena lock
 				// since they now have memory they can use
 				cv_broadcast(&vmp->vm_cv);
 			}
+			// turnstile after having bailed, rather than before
+			atomic_dec_32(&waiters);
 			return (b);
 		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
 			// set pressure after ~ 1 ms
