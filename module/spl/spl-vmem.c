@@ -393,7 +393,6 @@ vmem_seg_t *_vnext = (vsp)->vs_##type##next;			\
 /// vmem thread block count
 uint64_t spl_vmem_threads_waiting = 0;
 
-static uint64_t spl_minalloc = 1024ULL*1024ULL;
 // number of allocations > minalloc
 uint64_t spl_bucket_non_pow2_allocs = 0;
 uint64_t spl_xat_non_pow2_allocs = 0;
@@ -955,8 +954,7 @@ vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 			    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
 			atomic_inc_64(&spl_vmem_threads_waiting);
 			cv_wait(&vmp->vm_cv, &vmp->vm_lock);
-			if (spl_vmem_threads_waiting > 0)
-				atomic_dec_64(&spl_vmem_threads_waiting);
+			atomic_dec_64(&spl_vmem_threads_waiting);
 			vsp = rotor->vs_anext;
 		}
 	}
@@ -1326,14 +1324,12 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		if (vmflag & VM_NOSLEEP)
 			break;
 		vmp->vm_kstat.vk_wait.value.ui64++;
-		if (size != spl_minalloc && spl_vmem_threads_waiting != 0) {
-			printf("SPL: %s: vmem waiting for %lu sized alloc for %s, other threads waiting = %llu\n",
-			    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
-		}
+		printf("SPL: %s: vmem waiting for %lu sized alloc for %s, other threads waiting = %llu\n",
+		    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
 		atomic_inc_64(&spl_vmem_threads_waiting);
+		spl_free_set_emergency_pressure(size);
 		cv_wait(&vmp->vm_cv, &vmp->vm_lock);
-		if (spl_vmem_threads_waiting > 0)
-			atomic_dec_64(&spl_vmem_threads_waiting);
+		atomic_dec_64(&spl_vmem_threads_waiting);
 	}
 	if (vbest != NULL) {
 		ASSERT(vbest->vs_type == VMEM_FREE);
