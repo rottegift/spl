@@ -1327,7 +1327,6 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		atomic_inc_64(&spl_vmem_threads_waiting);
 		printf("SPL: %s: vmem waiting for %lu sized alloc for %s, threads waiting = %llu\n",
 		    __func__, size, vmp->vm_name, spl_vmem_threads_waiting);
-		spl_free_set_emergency_pressure(size);
 		cv_wait(&vmp->vm_cv, &vmp->vm_lock);
 		atomic_dec_64(&spl_vmem_threads_waiting);
 	}
