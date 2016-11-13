@@ -2288,8 +2288,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 
 	atomic_inc_32(&waiters);
 	mutex_enter(&vmem_xnu_alloc_free_lock);
-	atomic_dec_32(&waiters);
-	while (waiters > 0) {
+	for (uint32_t iter; waiters > 1; iter++) {
 		// there is a queue waiting for the mutex, sleep
 		// this gives up the mutex, admitting another through
 		// the mutex_enter->atomic_dec_32 path above
@@ -2297,17 +2296,19 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
 		    &vmem_xnu_alloc_free_lock,
 		    wait_time, 0, 0);
+		if (iter > waiters)
+			break;
 	}
+	atomic_dec_32(&waiters);
 	osif_free(vaddr, size);
 	uint64_t now = zfs_lbolt();
 	if (now > hz)
 		atomic_swap_64(&spl_xat_lastfree,  now / hz);
-	// wake up a waiter on the alloc|free condvar
-	cv_signal(&vmem_xnu_alloc_free_cv);
-	// wake up waiters on the arena just freed from
-	// so they can try an alloc
-	cv_broadcast(&vmp->vm_cv);
 	mutex_exit(&vmem_xnu_alloc_free_lock);
+	// since we just gave back xnu enough to satisfy an allocation
+	// in at least the smaller buckets, let's wake up anyone in
+	// the cv_wait() in vmem_xalloc([bucket_#], ...)
+	vmem_bucket_wake_all_waiters();
 }
 
 static void *
