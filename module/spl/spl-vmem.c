@@ -996,7 +996,7 @@ vmem_canalloc(vmem_t *vmp, size_t size)
 	if ((size & (size - 1)) == 0)
 		flist = lowbit(P2ALIGN(vmp->vm_freemap, size));
 	else if ((hb = highbit(size)) < VMEM_FREELISTS)
-		flist = lowbit(P2ALIGN(vmp->vm_freemap, 1UL << hb));
+		flist = lowbit(P2ALIGN(vmp->vm_freemap, 1ULL << hb));
 
 	return (flist);
 }
@@ -2337,6 +2337,29 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 		}
 		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
 		    USEC2NSEC(500), 0, 0);
+		// another thread may have caused memory to become
+		// available (notably in the spl_heap_arena_initial_alloc memory)
+		// and we should use that instead
+		if (vmem_canalloc_atomic(vmp, size)) {
+			// take the mutex to gate other threads
+			// waking up taking this early exit.
+			mutex_enter(&vmp->vm_lock);
+			// recheck canalloc, since it may have changed
+			// while waiting for the mutex
+			if (vmem_canalloc(vmp, size)) {
+				// when we are back in vmem_xalloc(), a proper
+				// vmem_canalloc() will be done, almost certainly
+				// resulting in a "goto do_alloc;",
+				// and at worst we end up in the arena cv_wait()
+				// with kstat.vmem.vmem.bucket_heap.wait incremented.
+				atomic_dec_32(&waiters);
+				mutex_exit(&bvmp->vm_lock);
+				mutex_exit(&vmp->vm_lock);
+				return(NULL);
+			} else {
+				mutex_exit(&vmp->vm_lock);
+			}
+		}
 	}
 	atomic_dec_32(&waiters);
 	mutex_exit(&bvmp->vm_lock);
