@@ -519,6 +519,8 @@ extern uint64_t spl_xat_bailed;
 extern uint64_t spl_xat_lastalloc;
 extern uint64_t spl_xat_lastfree;
 extern uint64_t spl_xat_forced;
+extern uint64_t spl_xat_memory_appeared;
+extern uint64_t spl_xat_lost_canalloc;
 
 extern uint64_t spl_bucket_tunable_large_span;
 extern uint64_t spl_bucket_tunable_small_span;
@@ -564,6 +566,8 @@ typedef struct spl_stats {
 	kstat_named_t spl_xat_lastalloc;
 	kstat_named_t spl_xat_lastfree;
 	kstat_named_t spl_xat_forced;
+	kstat_named_t spl_xat_memory_appeared;
+	kstat_named_t spl_xat_lost_canalloc;
 
 	kstat_named_t spl_bucket_tunable_large_span;
 	kstat_named_t spl_bucket_tunable_small_span;
@@ -607,6 +611,8 @@ static spl_stats_t spl_stats = {
 	{"spl_xat_lastalloc", KSTAT_DATA_UINT64},
 	{"spl_xat_lastfree", KSTAT_DATA_UINT64},
 	{"spl_xat_forced", KSTAT_DATA_UINT64},
+	{"spl_xat_memory_appeared", KSTAT_DATA_UINT64},
+	{"spl_xat_lost_canalloc", KSTAT_DATA_UINT64},
 
 	{"spl_tunable_large_span", KSTAT_DATA_UINT64},
 	{"spl_tunable_small_span", KSTAT_DATA_UINT64},
@@ -4597,6 +4603,8 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_xat_lastalloc.value.ui64 = spl_xat_lastalloc;
 		ks->spl_xat_lastfree.value.ui64 = spl_xat_lastfree;
 		ks->spl_xat_forced.value.ui64 = spl_xat_forced;
+		ks->spl_xat_memory_appeared.value.ui64 = spl_xat_memory_appeared;
+		ks->spl_xat_lost_canalloc.value.ui64 = spl_xat_lost_canalloc;
 
 		ks->spl_bucket_tunable_large_span.value.ui64 = spl_bucket_tunable_large_span;
 		ks->spl_bucket_tunable_small_span.value.ui64 = spl_bucket_tunable_small_span;
