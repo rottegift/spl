@@ -4099,22 +4099,28 @@ spl_free_set_fast_pressure(boolean_t state)
 }
 
 void
-spl_maybe_send_large_pressure(uint64_t now)
+spl_maybe_send_large_pressure(uint64_t now, uint64_t minutes, boolean_t full)
 {
 	static volatile uint64_t  spl_last_large_pressure = 0;
-	const uint64_t ten_minutes = 600ULL * hz;
+	const uint64_t interval_ticks = minutes * 60ULL * (uint64_t)hz;
 
-	if (spl_last_large_pressure + ten_minutes > now)
+	if (spl_last_large_pressure + interval_ticks > now)
 		return;
 
 	atomic_swap_64(&spl_last_large_pressure, now);
 
 	const int64_t sixteenth_physmem = (int64_t)real_total_memory / 16LL;
+	const int64_t sixtyfourth_physmem = sixteenth_physmem / 4LL;
+	int64_t howmuch = sixteenth_physmem;
+
+	if (full == true)
+		howmuch = sixtyfourth_physmem;
+
 
 	printf("SPL: %s: %lld bytes at time %llu\n",
-	    __func__, sixteenth_physmem, now);
+	    __func__, howmuch, now);
 
-	spl_free_set_emergency_pressure(sixteenth_physmem);
+	spl_free_set_emergency_pressure(howmuch);
 }
 
 static void
@@ -4541,7 +4547,7 @@ spl_free_thread()
 		// We do this outside the lock, as this function may
 		// need to take a mutex.
 		if (spl_free_is_negative)
-			spl_maybe_send_large_pressure(time_now);
+			spl_maybe_send_large_pressure(time_now, 10, true);
 
 		if (lowmem)
 			recent_lowmem = time_now;

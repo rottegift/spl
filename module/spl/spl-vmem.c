@@ -2171,8 +2171,9 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		return (m);
 	} else {
 		mutex_exit(&vmem_xnu_alloc_free_lock);
-		extern void spl_maybe_send_large_pressure(uint64_t);
-		spl_maybe_send_large_pressure(now);
+		extern void spl_maybe_send_large_pressure(uint64_t, uint64_t, boolean_t);
+		spl_maybe_send_large_pressure(now, 60, true);
+		spl_maybe_send_large_pressure(now, 10, false); // suppressed if previous succeeds
 	}
 
 	if (vmflag & VM_PANIC) {
@@ -2280,6 +2281,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		}
 	}
 	atomic_dec_32(&waiters);
+	spl_free_set_pressure(size);
 	return (NULL);
 }
 
