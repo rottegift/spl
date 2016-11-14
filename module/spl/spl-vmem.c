@@ -2748,6 +2748,11 @@ static void vmem_fini_freelist(void *vmp, void *start, size_t size)
 	list_insert_tail(&freelist, fs);
 }
 
+static void vmem_fini_void(void *vmp, void *start, size_t size)
+{
+	return;
+}
+
 void
 vmem_fini(vmem_t *heap)
 {
@@ -2764,59 +2769,136 @@ vmem_fini(vmem_t *heap)
 				offsetof(struct free_slab, next));
 
 	/* Walk to list of allocations */
+
+	// walking with VMEM_REENTRANT causes segment consolidation and freeing of spans
+	// the freelist contains a list of segments that are still allocated
+	// at the time of the walk; unfortunately the lists cannot be exact without
+	// complex multiple passes, locking,  and a more complex vmem_fini_freelist().
+	//
+	// Walking withoutu VMEM_REENTRANT can produce a nearly-exact list of unfreed
+	// spans, which Illumos would then free directly after the list is complete.
+	//
+	// Unfortunately in O3X, that lack of exactness can lead to a panic
+	// caused by attempting to free to xnu memory that we already freed to xnu.
+	// Fortunately, we can get a sense of what would have been destroyed
+	// after the (non-reentrant) walking, and we printf that at the end of this function.
+
+	// Walk all still-alive arenas from leaves to the root
+
+	vmem_walk(heap, VMEM_ALLOC | VMEM_REENTRANT, vmem_fini_void, heap);
+
+	vmem_walk(heap, VMEM_ALLOC, vmem_fini_freelist, heap);
+
+	printf("\nSPL: %s destroying heap\n", __func__);
+ 	vmem_destroy(heap); // PARENT: spl_heap_arena
+
+	printf("SPL: %s: walking spl_heap_arena, aka bucket_heap (pass 1)\n", __func__);
+
+	vmem_walk(spl_heap_arena, VMEM_ALLOC | VMEM_REENTRANT, vmem_fini_void, spl_heap_arena);
+
+	printf("SPL: %s: calling vmem_xfree(spl_default_arena, ptr, %llu\n",
+	    __func__, (uint64_t)spl_heap_arena_initial_alloc_size);
+
+	// forcibly remove the initial alloc from spl_heap_arena arena, whether
+	// or not it is empty.  below this point, any activity on spl_default_arena
+	// other than a non-reentrant(!) walk and a destroy is unsafe (UAF or MAF).
+
+	// However, all the children of spl_heap_arena should now be destroyed.
+
+	vmem_xfree(spl_default_arena, spl_heap_arena_initial_alloc,
+	    spl_heap_arena_initial_alloc_size);
+
+	printf("SPL: %s: walking spl_heap_arena, aka bucket_heap (pass 2)\n", __func__);
+
+	vmem_walk(spl_heap_arena, VMEM_ALLOC, vmem_fini_freelist, spl_heap_arena);
+
+	printf("SPL: %s: walking bucket arenas...\n", __func__);
+
+	for (int i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
+		const int bucket = i - VMEM_BUCKET_LOWBIT;
+		vmem_walk(vmem_bucket_arena[bucket], VMEM_ALLOC | VMEM_REENTRANT,
+		    vmem_fini_void, vmem_bucket_arena[bucket]);
+
+		vmem_walk(vmem_bucket_arena[bucket], VMEM_ALLOC,
+		    vmem_fini_freelist, vmem_bucket_arena[bucket]);
+	}
+
+	printf("SPL: %s: walking vmem metadata-related arenas...\n", __func__);
+
+	vmem_walk(vmem_vmem_arena, VMEM_ALLOC | VMEM_REENTRANT,
+	    vmem_fini_void, vmem_vmem_arena);
+
+	vmem_walk(vmem_vmem_arena, VMEM_ALLOC,
+	    vmem_fini_freelist, vmem_vmem_arena);
+
+	// We should not do VMEM_REENTRANT on vmem_seg_arena or vmem_hash_arena or below
+	// to avoid causing work in vmem_seg_arena and vmem_hash_arena.
+
 	vmem_walk(vmem_seg_arena, VMEM_ALLOC,
 			  vmem_fini_freelist, vmem_seg_arena);
 
 	vmem_walk(vmem_hash_arena, VMEM_ALLOC,
 			  vmem_fini_freelist, vmem_hash_arena);
 
-	vmem_walk(heap, VMEM_ALLOC,
-			  vmem_fini_freelist, heap);
+	vmem_walk(vmem_metadata_arena, VMEM_ALLOC,
+	    vmem_fini_freelist, vmem_metadata_arena);
 
-	printf("SPL: %s: calling vmem_xfree(spl_default_arena, ptr, %llu\n",
-	    __func__, (uint64_t)spl_heap_arena_initial_alloc_size);
+	printf("SPL: %s walking the root arena (spl_default_arena)...\n", __func__);
 
-	vmem_xfree(spl_default_arena, spl_heap_arena_initial_alloc,
-	    spl_heap_arena_initial_alloc_size);
-
-	printf("SPL: %s: walking spl_heap_arena\n", __func__);
-
-	vmem_walk(spl_heap_arena, VMEM_ALLOC, vmem_fini_freelist, spl_heap_arena);
+	vmem_walk(spl_default_arena, VMEM_ALLOC,
+	    vmem_fini_freelist, spl_default_arena);
 
 	printf("SPL: %s: looping vmem_xfree(vmem_vmem_arena, global_vmem_reap[0-%u], %llu... ",
 	    __func__, (uint32_t)NUMBER_OF_ARENAS_IN_VMEM_INIT, (uint64_t)sizeof(vmem_t));
 
 	for (id = 0; id < NUMBER_OF_ARENAS_IN_VMEM_INIT; id++) {// From vmem_init, 21 vmem_create macroized
 	  printf("%d ", id);
+	  // this will cause parent frees to vmem_metadata_arena
 		vmem_xfree(vmem_vmem_arena, global_vmem_reap[id], sizeof (vmem_t));
 	}
 
-	printf("\nSPL: %s destroying heap\n", __func__);
-	vmem_destroy_internal(heap);
+	printf("SPL: %s destroying bucket heap\n", __func__);
+	vmem_destroy(spl_heap_arena); // PARENT: spl_default_arena_parent (but depends on buckets)
 
 	printf("SPL: %s destroying spl_bucket_arenas...", __func__);
 	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
 		vmem_t *vmpt = vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT];
 		printf(" %llu", (1ULL << i));
-		vmem_destroy_internal(vmpt);
+		vmem_destroy(vmpt); // parent: spl_default_arena_parent
 	}
 
-	printf("SPL: %s destroying vmem_vmem_arena\n", __func__);
-	vmem_destroy_internal(vmem_vmem_arena);
-	printf("SPL: %s destroying vmem_hash_arena\n", __func__);
-	vmem_destroy_internal(vmem_hash_arena);
-	printf("SPL: %s destroying vmem_seg_arena\n", __func__);
-	vmem_destroy_internal(vmem_seg_arena);
-	printf("SPL: %s destroying vmem_metadata_arena\n", __func__);
-	vmem_destroy_internal(vmem_metadata_arena);
 	printf("SPL: %s destroying spl_heap_arena\n", __func__);
-	vmem_destroy_internal(spl_heap_arena);
+	vmem_destroy(spl_heap_arena); // parent: spl_default_arena
+
+	// destroying the vmem_vmem arena and any arena afterwards
+	// requires the use of vmem_destroy_internal(), which does
+	// not talk to vmem_vmem_arena like vmem_destroy() does.
+	printf("SPL: %s destroying vmem_vmem_arena\n", __func__);
+	vmem_destroy_internal(vmem_vmem_arena); // parent: vmem_metadata_arena
+
+	// destroying the seg arena means we must no longer
+	// talk to vmem_populate()
+	printf("SPL: %s destroying vmem_seg_arena\n", __func__);
+	vmem_destroy_internal(vmem_seg_arena); // parent: vmem_metadata_arena
+
+        // vmem_hash_arena may be freed-to in vmem_destroy_internal()
+	// so it should be just before the vmem_metadata_arena.
+	printf("SPL: %s destroying vmem_hash_arena\n", __func__);
+	vmem_destroy_internal(vmem_hash_arena); // parent: vmem_metadata_arena
+
+	// XXX: if we panic on unload below here due to destroyed mutex, vmem_init()
+	//      will need some reworking (e.g. have vmem_metadata_arena talk directly
+	//      to xnu), or alternatively a vmem_destroy_internal_internal()
+	//      function that does not touch vmem_hash_arena will need writing.
+
+	printf("SPL: %s destroying vmem_metadata_arena\n", __func__);
+	vmem_destroy_internal(vmem_metadata_arena); // parent: spl_default_arena
 
 	printf("\nSPL: %s destroying spl_default_arena\n", __func__);
-	vmem_destroy_internal(spl_default_arena);
+	vmem_destroy_internal(spl_default_arena); // parent: spl_default_arena_parent
 
 	printf("SPL: %s destroying spl_default_arena_parent\n", __func__);
-	vmem_destroy_internal(spl_default_arena_parent);
+	vmem_destroy_internal(spl_default_arena_parent); // parent: NONE
 
 	printf("SPL: arenas removed, now try destroying mutexes... ");
 
