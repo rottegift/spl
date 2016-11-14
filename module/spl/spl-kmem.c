@@ -4098,6 +4098,33 @@ spl_free_set_fast_pressure(boolean_t state)
 	mutex_exit(&spl_free_manual_pressure_lock);
 }
 
+boolean_t
+spl_maybe_send_large_pressure(uint64_t now, uint64_t minutes, boolean_t full)
+{
+	static volatile uint64_t  spl_last_large_pressure = 0;
+	const uint64_t interval_ticks = minutes * 60ULL * (uint64_t)hz;
+
+	if (spl_last_large_pressure + interval_ticks > now)
+		return (false);
+
+	atomic_swap_64(&spl_last_large_pressure, now);
+
+	const int64_t sixteenth_physmem = (int64_t)real_total_memory / 16LL;
+	const int64_t sixtyfourth_physmem = sixteenth_physmem / 4LL;
+	int64_t howmuch = sixteenth_physmem;
+
+	if (full == false)
+		howmuch = sixtyfourth_physmem;
+
+
+	printf("SPL: %s: %lld bytes at time %llu\n",
+	    __func__, howmuch, now);
+
+	spl_free_set_emergency_pressure(howmuch);
+
+	return(true);
+}
+
 static void
 spl_free_thread()
 {
@@ -4187,7 +4214,7 @@ spl_free_thread()
 
 		// do we have lots of memory in the bucket_arenas ?
 
-		extern int64_t vmem_buckets_size(int);
+		extern int64_t vmem_buckets_size(int); // non-locking
 		int64_t buckets_free = vmem_buckets_size(VMEM_FREE);
 		if ((uint64_t)buckets_free != spl_buckets_mem_free)
 			spl_buckets_mem_free = (uint64_t) buckets_free;
@@ -4327,14 +4354,21 @@ spl_free_thread()
 			if (emergency_lowmem)
 				elapsed = 15*hz; // minimum frequency from kmem_reap_interval
 			if (now - last_reap > elapsed) {
+				last_reap = now;
+				// these acquire locks and can take a while
+				// so set spl_free to a small positive value
+				// to stop arc shrinking too much during this period
+				// when we expect to be freeing up arc-usable memory.
+				const int64_t two_spamax = 32LL * 1024LL * 1024LL;
+				if (spl_free < two_spamax)
+					__sync_lock_test_and_set(&spl_free, two_spamax);
+				mutex_exit(&spl_free_lock);
 				vmem_qcache_reap(zio_arena);
 				vmem_qcache_reap(zio_metadata_arena);
 				vmem_qcache_reap(kmem_va_arena);
 				kmem_reap();
-				last_reap = now;
-				// drop the variable lock and jump to just before
-				// acquisition of the thread lock
-				mutex_exit(&spl_free_lock);
+				// we do not have any lock now, so we can jump
+				// to just before the thread-suspending code
 				goto justwait;
 			}
 		}
@@ -4500,13 +4534,42 @@ spl_free_thread()
 
 		double delta = (double)new_spl_free - (double)last_spl_free;
 
-		if (new_spl_free < 0LL)
+		boolean_t spl_free_is_negative = false;
+
+ 		if (new_spl_free < 0LL) {
 			spl_stats.spl_spl_free_negative_count.value.ui64++;
+			spl_free_is_negative = true;
+		}
 
 		// NOW atomically set spl_free from calculated new_spl_free
 		__sync_lock_test_and_set(&spl_free, new_spl_free);
 
 		mutex_exit(&spl_free_lock);
+
+		// Because we're already negative, arc is likely to have been
+		// signalled already. We can rely on the _maybe_ in
+		// spl-vmem.c:xnu_alloc_throttled() [XAT] to try to give arc a
+		// kick with greater probability.
+		// However, if we've gone negative several times, and have not
+		// tried a full kick in a long time, do so now; if the full kick
+		// is refused because there has been a kick too few minutes ago,
+		// try a gentler kick.
+		// We do this outside the lock, as spl_maybe_send_large_pressure
+		// may need to take a mutex, and we forbid further mutex entry when
+		// spl_free_lock is held.
+
+		if (spl_free_is_negative) {
+			static volatile uint32_t negatives_since_last_kick = 0;
+
+			atomic_inc_32(&negatives_since_last_kick);
+
+			if (negatives_since_last_kick > 8) {
+				if (spl_maybe_send_large_pressure(time_now, 360, true) ||
+				    spl_maybe_send_large_pressure(time_now, 60, false)) {
+					atomic_sub_32(&negatives_since_last_kick, negatives_since_last_kick);
+				}
+			}
+		}
 
 		if (lowmem)
 			recent_lowmem = time_now;
