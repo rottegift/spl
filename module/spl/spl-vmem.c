@@ -2171,9 +2171,12 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		return (m);
 	} else {
 		mutex_exit(&vmem_xnu_alloc_free_lock);
+		extern void spl_maybe_send_large_pressure(uint64_t);
+		spl_maybe_send_large_pressure(now);
 	}
 
 	if (vmflag & VM_PANIC) {
+		spl_free_set_emergency_pressure(4LL * (int64_t)size);
 		mutex_enter(&vmem_xnu_alloc_free_lock);
 		void *p = spl_vmem_malloc_unconditionally(size);
 		// wake all waiters on alloc|free condvar
@@ -2185,8 +2188,10 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		return (p);
 	}
 
-	if (vmflag & VM_NOSLEEP)
+	if (vmflag & VM_NOSLEEP) {
+		spl_free_set_emergency_pressure(2LL * (int64_t)size);
 		return (NULL);
+	}
 
 	static volatile uint32_t waiters = 0;
 
@@ -2258,6 +2263,8 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 				// wake up waiters on the arena lock,
 				// since they now have memory they can use.
 				cv_broadcast(&vmp->vm_cv);
+			} else {
+				spl_free_set_pressure(size);
 			}
 			// turnstile after having bailed, rather than before
 			atomic_dec_32(&waiters);
