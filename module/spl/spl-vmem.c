@@ -2288,7 +2288,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 
 	atomic_inc_32(&waiters);
 	mutex_enter(&vmem_xnu_alloc_free_lock);
-	for (uint32_t iter; waiters > 1; iter++) {
+	for (uint32_t iter = 0; waiters > 1; iter++) {
 		// there is a queue waiting for the mutex, sleep
 		// this gives up the mutex, admitting another through
 		// the mutex_enter->atomic_dec_32 path above
