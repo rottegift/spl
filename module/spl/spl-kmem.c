@@ -4111,6 +4111,9 @@ spl_maybe_send_large_pressure(uint64_t now)
 
 	const int64_t sixteenth_physmem = (int64_t)real_total_memory / 16LL;
 
+	printf("SPL: %s: %lld bytes at time %llu\n",
+	    __func__, sixteenth_physmem, now);
+
 	spl_free_set_emergency_pressure(sixteenth_physmem);
 }
 
