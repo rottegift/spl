@@ -4113,7 +4113,7 @@ spl_maybe_send_large_pressure(uint64_t now, uint64_t minutes, boolean_t full)
 	const int64_t sixtyfourth_physmem = sixteenth_physmem / 4LL;
 	int64_t howmuch = sixteenth_physmem;
 
-	if (full == true)
+	if (full == false)
 		howmuch = sixtyfourth_physmem;
 
 
