@@ -4546,8 +4546,10 @@ spl_free_thread()
 
 		// We do this outside the lock, as this function may
 		// need to take a mutex.
-		if (spl_free_is_negative)
-			spl_maybe_send_large_pressure(time_now, 10, true);
+		if (spl_free_is_negative) {
+			spl_maybe_send_large_pressure(time_now, 60, true);
+			spl_maybe_send_large_pressure(time_now, 10, false); // suppressed if previous fires
+		}
 
 		if (lowmem)
 			recent_lowmem = time_now;
