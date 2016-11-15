@@ -2165,7 +2165,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		// wake up all waiters on the alloc|free condvar
 		cv_broadcast(&vmem_xnu_alloc_free_cv);
 		// wake up waiters on all the arena condvars
-		// since they now have memory they can use
+		// since there is apparently no memory shortage.
 		vmem_bucket_wake_all_waiters();
 		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (m);
@@ -2182,18 +2182,31 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		spl_free_set_emergency_pressure(4LL * (int64_t)size);
 		mutex_enter(&vmem_xnu_alloc_free_lock);
 		void *p = spl_vmem_malloc_unconditionally(size);
-		// wake all waiters on alloc|free condvar
+		// p cannot be NULL (unconditional kernel malloc always works or panics)
+		// therefore: success, wake all waiters on alloc|free condvar
 		cv_broadcast(&vmem_xnu_alloc_free_cv);
 		// wake up arena waiters to let them know there is memory
-		// available
+		// available in the arena; let waiters on other bucket arenas
+		// continue sleeping.
 		cv_broadcast(&vmp->vm_cv);
 		mutex_exit(&vmem_xnu_alloc_free_lock);
+		if (now > hz)
+			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 		return (p);
 	}
 
 	if (vmflag & VM_NOSLEEP) {
 		spl_free_set_emergency_pressure(2LL * (int64_t)size);
-		return (NULL);
+		void *p = spl_vmem_malloc_if_no_pressure(size);
+		if (p != NULL) {
+			atomic_inc_64(&spl_xat_late_success);
+			cv_broadcast(&vmem_xnu_alloc_free_cv);
+			cv_broadcast(&vmp->vm_cv);
+			if (now > hz)
+				atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+		}
+		// if p == NULL, then there will be an increment in the fail kstat
+		return (p);
 	}
 
 	static volatile uint32_t waiters = 0;
