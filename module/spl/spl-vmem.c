@@ -363,7 +363,6 @@ static vmem_kstat_t vmem_kstat_template = {
 	{ "parent_xalloc",	KSTAT_DATA_UINT64 },
 	{ "parent_free",	KSTAT_DATA_UINT64 },
 	{ "nextfit_xalloc",	KSTAT_DATA_UINT64 },
-	{ "nextfit_root_wait",	KSTAT_DATA_UINT64 },
 };
 
 // Warning, we know its 10 from inside of vmem_init() - marcroized
@@ -922,7 +921,7 @@ vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 	 * satisfy the allocation.
 	 */
 	for (;;) {
-		vmp->vm_kstat.vk_search.value.ui64++;
+		atomic_inc_64(&vmp->vm_kstat.vk_search.value.ui64);
 		if (vsp->vs_type == VMEM_FREE && VS_SIZE(vsp) >= size)
 			break;
 		vsp = vsp->vs_anext;
@@ -946,12 +945,12 @@ vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 			 */
 			if (vmp->vm_source_alloc != NULL ||
 			    (vmflag & VM_NOSLEEP)) {
-				mutex_exit(&vmp->vm_lock);
 				vmp->vm_kstat.vk_nextfit_xalloc.value.ui64++;
+				mutex_exit(&vmp->vm_lock);
 				return (vmem_xalloc(vmp, size, vmp->vm_quantum,
 					0, 0, NULL, NULL, vmflag & (VM_KMFLAGS | VM_NEXTFIT)));
 			}
-			vmp->vm_kstat.vk_wait.value.ui64++;
+			atomic_inc_64(&vmp->vm_kstat.vk_wait.value.ui64);
 			atomic_inc_64(&spl_vmem_threads_waiting);
 			if (spl_vmem_threads_waiting > 1)
 				printf("SPL: %s: waiting for %lu sized alloc after full circle of  %s, threads waiting = %llu.\n",
@@ -1161,7 +1160,7 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		for (vbest = NULL, vsp = (flist == 0) ? NULL :
 			 vmp->vm_freelist[flist - 1].vs_knext;
 			 vsp != NULL; vsp = vsp->vs_knext) {
-			vmp->vm_kstat.vk_search.value.ui64++;
+			atomic_inc_64(&vmp->vm_kstat.vk_search.value.ui64);
 			if (vsp->vs_start == 0) {
 				/*
 				 * We're moving up to a larger freelist,
@@ -1255,7 +1254,7 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 			mutex_exit(&vmp->vm_lock);
 			if (vmp->vm_cflags & VMC_XALLOC) {
 				//size_t oasize = asize;
-				vmp->vm_kstat.vk_parent_xalloc.value.ui64++;
+				atomic_inc_64(&vmp->vm_kstat.vk_parent_xalloc.value.ui64);
 				vaddr = ((vmem_ximport_t *)
 						 vmp->vm_source_alloc)(vmp->vm_source,
 											   &asize, align, vmflag & VM_KMFLAGS);
@@ -1265,7 +1264,7 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 				ASSERT(!(vmp->vm_cflags & VMC_XALIGN) ||
 				    IS_P2ALIGNED(vaddr, align));
 			} else {
-				vmp->vm_kstat.vk_parent_alloc.value.ui64++;
+				atomic_inc_64(&vmp->vm_kstat.vk_parent_alloc.value.ui64);
 				vaddr = vmp->vm_source_alloc(vmp->vm_source,
 				    asize, vmflag & (VM_KMFLAGS | VM_NEXTFIT));
 			}
@@ -1322,7 +1321,7 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		mutex_enter(&vmp->vm_lock);
 		if (vmflag & VM_NOSLEEP)
 			break;
-		vmp->vm_kstat.vk_wait.value.ui64++;
+		atomic_inc_64(&vmp->vm_kstat.vk_wait.value.ui64);
 		atomic_inc_64(&spl_vmem_threads_waiting);
 		if (spl_vmem_threads_waiting > 1)
 			printf("SPL: %s: vmem waiting for %lu sized alloc for %s, threads waiting = %llu\n",
@@ -1341,7 +1340,7 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		(void) vmem_seg_alloc(vmp, vbest, addr, size);
 		mutex_exit(&vmp->vm_lock);
 		if (xvaddr) {
-			vmp->vm_kstat.vk_parent_free.value.ui64++;
+			atomic_inc_64(&vmp->vm_kstat.vk_parent_free.value.ui64);
 			vmp->vm_source_free(vmp->vm_source, xvaddr, xsize);
 		}
 		ASSERT(P2PHASE(addr, align) == phase);
