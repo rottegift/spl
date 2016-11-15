@@ -4098,14 +4098,14 @@ spl_free_set_fast_pressure(boolean_t state)
 	mutex_exit(&spl_free_manual_pressure_lock);
 }
 
-void
+boolean_t
 spl_maybe_send_large_pressure(uint64_t now, uint64_t minutes, boolean_t full)
 {
 	static volatile uint64_t  spl_last_large_pressure = 0;
 	const uint64_t interval_ticks = minutes * 60ULL * (uint64_t)hz;
 
 	if (spl_last_large_pressure + interval_ticks > now)
-		return;
+		return (false);
 
 	atomic_swap_64(&spl_last_large_pressure, now);
 
@@ -4121,6 +4121,8 @@ spl_maybe_send_large_pressure(uint64_t now, uint64_t minutes, boolean_t full)
 	    __func__, howmuch, now);
 
 	spl_free_set_emergency_pressure(howmuch);
+
+	return(true);
 }
 
 static void
@@ -4544,11 +4546,29 @@ spl_free_thread()
 
 		mutex_exit(&spl_free_lock);
 
-		// We do this outside the lock, as this function may
-		// need to take a mutex.
+		// Because we're already negative, arc is likely to have been
+		// signalled already. We can rely on the _maybe_ in
+		// spl-vmem.c:xnu_alloc_throttled() [XAT] to try to give arc a
+		// kick with greater probability.
+		// However, if we've gone negative several times, and have not
+		// tried a full kick in a long time, do so now; if the full kick
+		// is refused because there has been a kick too few minutes ago,
+		// try a gentler kick.
+		// We do this outside the lock, as spl_maybe_send_large_pressure
+		// may need to take a mutex, and we forbid further mutex entry when
+		// spl_free_lock is held.
+
 		if (spl_free_is_negative) {
-			spl_maybe_send_large_pressure(time_now, 60, true);
-			spl_maybe_send_large_pressure(time_now, 10, false); // suppressed if previous fires
+			static volatile uint32_t negatives_since_last_kick = 0;
+
+			atomic_inc_32(&negatives_since_last_kick);
+
+			if (negatives_since_last_kick > 8) {
+				if (spl_maybe_send_large_pressure(time_now, 360, true) ||
+				    spl_maybe_send_large_pressure(time_now, 60, false)) {
+					atomic_sub_32(&negatives_since_last_kick, negatives_since_last_kick);
+				}
+			}
 		}
 
 		if (lowmem)

@@ -2171,9 +2171,11 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		return (m);
 	} else {
 		mutex_exit(&vmem_xnu_alloc_free_lock);
-		extern void spl_maybe_send_large_pressure(uint64_t, uint64_t, boolean_t);
-		spl_maybe_send_large_pressure(now, 60, true);
-		spl_maybe_send_large_pressure(now, 10, false); // suppressed if previous succeeds
+		extern boolean_t spl_maybe_send_large_pressure(uint64_t, uint64_t, boolean_t);
+		// Try to kick arc.  If the full kick is refused because a kick
+		// has been administered too few minutes ago, try a gentler kick instead.
+		if (!spl_maybe_send_large_pressure(now, 60, true))
+			(void)spl_maybe_send_large_pressure(now, 10, false);
 	}
 
 	if (vmflag & VM_PANIC) {
