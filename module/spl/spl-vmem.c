@@ -2886,6 +2886,7 @@ vmem_fini(vmem_t *heap)
 	vmem_walk(spl_default_arena, VMEM_ALLOC,
 	    vmem_fini_freelist, spl_default_arena);
 
+#if 0
 	printf("SPL: %s: looping vmem_xfree(vmem_vmem_arena, global_vmem_reap[0-%u], %llu... ",
 	    __func__, (uint32_t)NUMBER_OF_ARENAS_IN_VMEM_INIT, (uint64_t)sizeof(vmem_t));
 
@@ -2894,6 +2895,7 @@ vmem_fini(vmem_t *heap)
 	  // this will cause parent frees to vmem_metadata_arena
 		vmem_xfree(vmem_vmem_arena, global_vmem_reap[id], sizeof (vmem_t));
 	}
+#endif
 
 	printf("SPL: %s destroying bucket heap\n", __func__);
 	vmem_destroy(spl_heap_arena); // PARENT: spl_default_arena_parent (but depends on buckets)
