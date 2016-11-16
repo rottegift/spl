@@ -364,9 +364,6 @@ static vmem_kstat_t vmem_kstat_template = {
 	{ "threads_waiting",	KSTAT_DATA_UINT64 },
 };
 
-// Warning, we know its 10 from inside of vmem_init() - marcroized
-static void *global_vmem_reap[NUMBER_OF_ARENAS_IN_VMEM_INIT] = {NULL};
-
 
 /*
  * Insert/delete from arena list (type 'a') or next-of-kin list (type 'k').
@@ -1769,14 +1766,12 @@ vmem_create_common(const char *name, void *base, size_t size, size_t quantum,
 		kstat_install(vmp->vm_ksp);
 	}
 
-	printf("SPL: %s about to lock %s\n", __func__, name);
 	mutex_enter(&vmem_list_lock);
 	vmpp = &vmem_list;
 	while ((cur = *vmpp) != NULL)
 		vmpp = &cur->vm_next;
 	*vmpp = vmp;
 	mutex_exit(&vmem_list_lock);
-	printf("SPL: %s unlocked %s\n", __func__, name);
 
 	if (vmp->vm_cflags & VMC_POPULATOR) {
 		ASSERT(vmem_populators < VMEM_INITIAL);
@@ -1893,6 +1888,7 @@ vmem_destroy_internal(vmem_t *vmp)
 			   "identifiers" : "bytes");
 
 	if (vmp->vm_hash_table != vmp->vm_hash0)
+	  if(vmem_hash_arena != NULL)
 		vmem_free(vmem_hash_arena, vmp->vm_hash_table,
 		    (vmp->vm_hash_mask + 1) * sizeof (void *));
 
@@ -1908,6 +1904,10 @@ vmem_destroy_internal(vmem_t *vmp)
 
 	while (vmp->vm_nsegfree > 0)
 		vmem_putseg_global(vmem_getseg(vmp));
+
+         if (!(vmp->vm_cflags & VMC_IDENTIFIER) && vmem_size(vmp, VMEM_ALLOC) != 0)
+	   printf("SPL: vmem_destroy('%s'): STILL %lu bytes at kstat_delete() time\n",
+		  vmp->vm_name, vmem_size(vmp, VMEM_ALLOC));
 
 	kstat_delete(vmp->vm_ksp);
 
@@ -2755,9 +2755,9 @@ vmem_init(const char *heap_name,
 
 	// 21 (0-based) vmem_create before this line. - macroized NUMBER_OF_ARENAS_IN_VMEM_INIT
 	for (id = 0; id < vmem_id; id++) {
-		global_vmem_reap[id] = vmem_xalloc(vmem_vmem_arena, sizeof (vmem_t),
-										   1, 0, 0, &vmem0[id], &vmem0[id + 1],
-										   VM_NOSLEEP | VM_BESTFIT | VM_PANIC);
+	  (void) vmem_xalloc(vmem_vmem_arena, sizeof (vmem_t),
+			     1, 0, 0, &vmem0[id], &vmem0[id + 1],
+			     VM_NOSLEEP | VM_BESTFIT | VM_PANIC);
 	}
 
 	printf("SPL: starting vmem_update() thread\n");
@@ -2794,7 +2794,6 @@ static void vmem_fini_void(void *vmp, void *start, size_t size)
 void
 vmem_fini(vmem_t *heap)
 {
-	uint32_t id;
 	struct free_slab *fs;
 	uint64_t total;
 
@@ -2834,7 +2833,7 @@ vmem_fini(vmem_t *heap)
 
 	vmem_walk(spl_heap_arena, VMEM_ALLOC | VMEM_REENTRANT, vmem_fini_void, spl_heap_arena);
 
-	printf("SPL: %s: calling vmem_xfree(spl_default_arena, ptr, %llu\n",
+	printf("SPL: %s: calling vmem_xfree(spl_default_arena, ptr, %llu);\n",
 	    __func__, (uint64_t)spl_heap_arena_initial_alloc_size);
 
 	// forcibly remove the initial alloc from spl_heap_arena arena, whether
@@ -2886,17 +2885,6 @@ vmem_fini(vmem_t *heap)
 	vmem_walk(spl_default_arena, VMEM_ALLOC,
 	    vmem_fini_freelist, spl_default_arena);
 
-#if 0
-	printf("SPL: %s: looping vmem_xfree(vmem_vmem_arena, global_vmem_reap[0-%u], %llu... ",
-	    __func__, (uint32_t)NUMBER_OF_ARENAS_IN_VMEM_INIT, (uint64_t)sizeof(vmem_t));
-
-	for (id = 0; id < NUMBER_OF_ARENAS_IN_VMEM_INIT; id++) {// From vmem_init, 21 vmem_create macroized
-	  printf("%d ", id);
-	  // this will cause parent frees to vmem_metadata_arena
-		vmem_xfree(vmem_vmem_arena, global_vmem_reap[id], sizeof (vmem_t));
-	}
-#endif
-
 	printf("SPL: %s destroying bucket heap\n", __func__);
 	vmem_destroy(spl_heap_arena); // PARENT: spl_default_arena_parent (but depends on buckets)
 
@@ -2906,9 +2894,7 @@ vmem_fini(vmem_t *heap)
 		printf(" %llu", (1ULL << i));
 		vmem_destroy(vmpt); // parent: spl_default_arena_parent
 	}
-
-	printf("SPL: %s destroying spl_heap_arena\n", __func__);
-	vmem_destroy(spl_heap_arena); // parent: spl_default_arena
+	printf("\n");
 
 	// destroying the vmem_vmem arena and any arena afterwards
 	// requires the use of vmem_destroy_internal(), which does
@@ -2925,6 +2911,7 @@ vmem_fini(vmem_t *heap)
 	// so it should be just before the vmem_metadata_arena.
 	printf("SPL: %s destroying vmem_hash_arena\n", __func__);
 	vmem_destroy_internal(vmem_hash_arena); // parent: vmem_metadata_arena
+	vmem_hash_arena = NULL;
 
 	// XXX: if we panic on unload below here due to destroyed mutex, vmem_init()
 	//      will need some reworking (e.g. have vmem_metadata_arena talk directly
@@ -2959,6 +2946,10 @@ vmem_fini(vmem_t *heap)
 
 	printf("\nSPL: %s: walking list of live slabs at time of call to %s\n",
 	       __func__, __func__);
+
+	// annoyingly, some of these should be returned to xnu, but
+	// we have no idea which have already been freed to xnu, and
+	// freeing a second time results in a panic.
 
 	/* Now release the list of allocs to built above */
 	total = 0;
