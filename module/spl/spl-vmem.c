@@ -2245,20 +2245,25 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			(void)spl_maybe_send_large_pressure(now, 10, false);
 	}
 
-	if (vmflag & VM_PANIC) {
+	const uint64_t force_alloc_deadline = (spl_xat_lastalloc + 60) * hz;
+
+	if (vmflag & VM_PANIC || now > force_alloc_deadline) {
+		// either we would panic, or we have not allocated memory
+		// in enough time that perhaps a mutex is stuck waiting
+		// on an allocation.   force an allocation now
+		atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 		spl_free_set_emergency_pressure(4LL * (int64_t)size);
 		mutex_enter(&vmem_xnu_alloc_free_lock);
 		void *p = spl_vmem_malloc_unconditionally(size);
 		// p cannot be NULL (unconditional kernel malloc always works or panics)
 		// therefore: success, wake all waiters on alloc|free condvar
 		cv_broadcast(&vmem_xnu_alloc_free_cv);
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 		// wake up arena waiters to let them know there is memory
 		// available in the arena; let waiters on other bucket arenas
 		// continue sleeping.
+		atomic_inc_64(&spl_xat_forced);
 		cv_broadcast(&vmp->vm_cv);
-		mutex_exit(&vmem_xnu_alloc_free_lock);
-		if (now > hz)
-			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 		return (p);
 	}
 
