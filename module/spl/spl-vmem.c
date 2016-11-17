@@ -1280,14 +1280,20 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 				 * order to save space, we return
 				 * excess imports immediately.
 				 */
+				// but if there are threads waiting below,
+				// do not return the excess import, rather
+				// wake those threads up so they can use it.
 				if (asize > aneeded &&
 					vmp->vm_source_free != NULL &&
+				        vmp->vm_kstat.vk_threads_waiting.value.ui64 == 0 &&
 					vmem_canalloc(vmp, aneeded)) {
 					ASSERT(resv >=
 					    VMEM_SEGS_PER_MIDDLE_ALLOC);
 					xvaddr = vaddr;
 					xsize = asize;
 					goto do_alloc;
+				} else if (vmp->vm_kstat.vk_threads_waiting.value.ui64 > 0) {
+					cv_broadcast(&vmp->vm_cv);
 				}
 				vbest = vmem_span_create(vmp, vaddr, asize, 1);
 				addr = P2PHASEUP(vbest->vs_start, align, phase);
