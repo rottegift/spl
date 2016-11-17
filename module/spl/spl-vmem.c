@@ -2038,6 +2038,51 @@ static inline void *
 xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vmflags)
 {
 
+
+	const uint64_t unstall_threshold = 8;
+
+	// if we have a long queue on this arena's cv_wait in vmem_xalloc()
+	// then we run the risk of stalling the whole I/O subsystem.  Force
+	// a single allocation here if so, then bounce the others back.
+
+	if (vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
+		spl_free_set_emergency_pressure(size * unstall_threshold);
+		static volatile uint32_t unstall_waiters = 0;
+		atomic_inc_32(&unstall_waiters);
+		// note that the unstall waiters can be from different arenas
+		for (; unstall_waiters > 1;) {
+			// wait on the arena cv
+			mutex_enter(&vmp->vm_lock);
+			(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
+			    USEC2NSEC(500UL * MAX(unstall_waiters,1UL)), 0, 0);
+			// we are likely to have been awakened by a cv_broadcast
+			if (vmp->vm_kstat.vk_threads_waiting.value.ui64 < unstall_threshold)
+				break;
+			mutex_exit(&vmp->vm_lock);
+			spl_free_set_emergency_pressure(size);
+		}
+		if (vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
+			// we're the only waiter
+			void *force_m = spl_vmem_malloc_unconditionally(size);
+			atomic_inc_64(&spl_xat_forced);
+			atomic_dec_32(&unstall_waiters);
+			mutex_exit(&vmp->vm_lock);
+			return (force_m);
+		} else {
+			// we exited the for loop and the cv_wait queue is now
+			// relatively short, so bounce back to vmem_xalloc(), but
+			// wake up a single other waiter, which might be in the for
+			// loop above, or might be in the xalloc cv_wait().
+			// the last one out of the for loop for this arena will
+			// almost certainly wake up a waiter in xalloc, so the queue
+			// will continue to try to be drained.
+			atomic_dec_32(&unstall_waiters);
+			cv_signal(&vmp->vm_cv);
+			mutex_exit(&vmp->vm_lock);
+			return (NULL);
+		}
+	}
+
 	static volatile uint64_t recently_asked_for = 0;
 
 	atomic_add_64(&recently_asked_for, size);
@@ -2272,8 +2317,10 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			} else {
 				mutex_exit(&vmem_xnu_alloc_free_lock);
 			}
-		} else if (iter >= 20 * MAX(waiters,1)) {
-			// After ~ 10 milliseconds (if no other waiters),
+		} else if (iter >= 20 * MAX(waiters,1) ||
+			vmp->vm_kstat.vk_threads_waiting.value.ui64 >= 8) {
+			// if there is a large cv_wait() queue already, or
+			// after ~ 10 milliseconds (if no other waiters),
 			// bail out and let vmem_xalloc() deal with it.
 			// We are VM_SLEEP here, so if there are many waiters,
 			// it is OK to loop them a bit longer before
