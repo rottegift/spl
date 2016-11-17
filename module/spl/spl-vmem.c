@@ -1332,7 +1332,7 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		atomic_inc_64(&vmp->vm_kstat.vk_wait.value.ui64);
 		atomic_inc_64(&vmp->vm_kstat.vk_threads_waiting.value.ui64);
 		atomic_inc_64(&spl_vmem_threads_waiting);
-		if (spl_vmem_threads_waiting > 1)
+		if (spl_vmem_threads_waiting > 0)
 			printf("SPL: %s: vmem waiting for %lu sized alloc for %s, "
 			    "waiting threads %llu, total threads waiting = %llu\n",
 			    __func__, size, vmp->vm_name,
