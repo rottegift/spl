@@ -362,6 +362,7 @@ static vmem_kstat_t vmem_kstat_template = {
 	{ "parent_alloc",	KSTAT_DATA_UINT64 },
 	{ "parent_free",	KSTAT_DATA_UINT64 },
 	{ "threads_waiting",	KSTAT_DATA_UINT64 },
+	{ "excess",	KSTAT_DATA_UINT64 },
 };
 
 
@@ -405,6 +406,7 @@ uint64_t spl_vmem_conditional_alloc_deny_bytes = 0;
 // bucket allocator kstat
 uint64_t spl_xat_success = 0;
 uint64_t spl_xat_late_success = 0;
+uint64_t spl_xat_late_success_nosleep = 0;
 uint64_t spl_xat_pressured = 0;
 uint64_t spl_xat_bailed = 0;
 uint64_t spl_xat_lastalloc = 0;
@@ -1293,6 +1295,7 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 					xsize = asize;
 					goto do_alloc;
 				} else if (vmp->vm_kstat.vk_threads_waiting.value.ui64 > 0) {
+					vmp->vm_kstat.vk_excess.value.ui64++;
 					cv_broadcast(&vmp->vm_cv);
 				}
 				vbest = vmem_span_create(vmp, vaddr, asize, 1);
@@ -2045,6 +2048,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 {
 
 
+	static volatile uint64_t last_forced_ticks = 0;
 	const uint64_t unstall_threshold = 8;
 
 	// if we have a long queue on this arena's cv_wait in vmem_xalloc()
@@ -2071,6 +2075,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 			// we're the only waiter
 			void *force_m = spl_vmem_malloc_unconditionally(size);
 			atomic_inc_64(&spl_xat_forced);
+			atomic_swap_64(&last_forced_ticks, now_ticks);
 			atomic_dec_32(&unstall_waiters);
 			mutex_exit(&vmp->vm_lock);
 			return (force_m);
@@ -2117,7 +2122,6 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 
 	static volatile uint64_t recently_allocated = 0;
 
-	static volatile uint64_t last_forced_ticks = 0;
 	uint64_t lft = 0;
 	atomic_swap_64(&lft, last_forced_ticks);
 
@@ -2262,7 +2266,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		spl_free_set_emergency_pressure(2LL * (int64_t)size);
 		void *p = spl_vmem_malloc_if_no_pressure(size);
 		if (p != NULL) {
-			atomic_inc_64(&spl_xat_late_success);
+			atomic_inc_64(&spl_xat_late_success_nosleep);
 			cv_broadcast(&vmem_xnu_alloc_free_cv);
 			cv_broadcast(&vmp->vm_cv);
 			if (now > hz)
@@ -2281,6 +2285,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv, &vmem_xnu_alloc_free_lock,
 		    wait_time, 0, 0);
 		// still under mutex
+		now = zfs_lbolt();
 		if (vmem_canalloc_atomic(vmp, size)) {
 			atomic_inc_64(&spl_xat_memory_appeared);
 			// Memory has appeared thanks to another thread.
@@ -2290,15 +2295,14 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			mutex_enter(&vmp->vm_lock);
 			if (vmem_canalloc(vmp, size)) {
 				atomic_dec_32(&waiters);
-				// Don't wake up another waiter, as it would
-				// just take this branch (canalloc cannot reflect
-				// our shortcut here).
+				// Let other waiters on vmem_xnu_alloc_free_cv
+				// continue sleeping; they'll wake up in no longer
+				// than milliseconds.
 				mutex_exit(&vmem_xnu_alloc_free_lock);
-				// Don't broadcast to the arena cv, because
-				// we don't want to lose this alloc to another
-				// thread in vmem_xalloc's() cv_wait().
-				// Once we return vmem_xalloc() will immediately
+				// Once we return, vmem_xalloc() will immediately
 				// enter the mutex, and will quickly "goto do_alloc;".
+				// We just woke up all the cv_wait() waiters, so we
+				// do not need to wake them up again now.
 				mutex_exit(&vmp->vm_lock);
 				return(NULL);
 			} else {
@@ -2323,14 +2327,25 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			} else {
 				mutex_exit(&vmem_xnu_alloc_free_lock);
 			}
-		} else if (iter >= 20 * MAX(waiters,1) ||
-			vmp->vm_kstat.vk_threads_waiting.value.ui64 >= 8) {
+		} else if ((iter >= 20 &&
+			iter >= 20 * waiters &&
+			iter >= 40 * vmp->vm_kstat.vk_threads_waiting.value.ui64 &&
+			iter >= 30 * spl_vmem_threads_waiting) ||
+		    vmp->vm_kstat.vk_threads_waiting.value.ui64 >= 8) {
 			// if there is a large cv_wait() queue already, or
 			// after ~ 10 milliseconds (if no other waiters),
-			// bail out and let vmem_xalloc() deal with it.
+			// bail out and let vmem_xalloc() deal with it,
+			// most likely by putting this thread into its cv_wait().
+			//
 			// We are VM_SLEEP here, so if there are many waiters,
-			// it is OK to loop them a bit longer before
-			// bouncing them back to the cv_wait() in vmem_xalloc().
+			// it is OK to loop them a bit longer in hopes
+			// that another thread frees to vmp or another thread
+			// successfully imports memory into vmp.
+			//
+			// Any or all of waiters the arena and global _threads_waiting
+			// may have changed during the cv_timedwait_hires at the top
+			// of the for loop, including going to zero.
+			//
 			atomic_inc_64(&spl_xat_bailed);
 			// xnu_allocate_throttled_bail() acquires the mutex
 			// if it ends up doing an unconditional allocation

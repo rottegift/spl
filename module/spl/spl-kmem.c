@@ -514,6 +514,7 @@ extern uint64_t spl_vmem_conditional_alloc_deny_bytes;
 
 extern uint64_t spl_xat_success;
 extern uint64_t spl_xat_late_success;
+extern uint64_t spl_xat_late_success_nosleep;
 extern uint64_t spl_xat_pressured;
 extern uint64_t spl_xat_bailed;
 extern uint64_t spl_xat_lastalloc;
@@ -561,6 +562,7 @@ typedef struct spl_stats {
 
 	kstat_named_t spl_xat_success;
 	kstat_named_t spl_xat_late_success;
+	kstat_named_t spl_xat_late_success_nosleep;
 	kstat_named_t spl_xat_pressured;
 	kstat_named_t spl_xat_bailed;
 	kstat_named_t spl_xat_lastalloc;
@@ -606,6 +608,7 @@ static spl_stats_t spl_stats = {
 
 	{"spl_xat_success", KSTAT_DATA_UINT64},
 	{"spl_xat_late_success", KSTAT_DATA_UINT64},
+	{"spl_xat_late_success_nosleep", KSTAT_DATA_UINT64},
 	{"spl_xat_pressured", KSTAT_DATA_UINT64},
 	{"spl_xat_bailed", KSTAT_DATA_UINT64},
 	{"spl_xat_lastalloc", KSTAT_DATA_UINT64},
@@ -4661,6 +4664,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 
 		ks->spl_xat_success.value.ui64 = spl_xat_success;
 		ks->spl_xat_late_success.value.ui64 = spl_xat_late_success;
+		ks->spl_xat_late_success_nosleep.value.ui64 = spl_xat_late_success_nosleep;
 		ks->spl_xat_pressured.value.ui64 = spl_xat_pressured;
 		ks->spl_xat_bailed.value.ui64 = spl_xat_bailed;
 		ks->spl_xat_lastalloc.value.ui64 = spl_xat_lastalloc;

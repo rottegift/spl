@@ -108,6 +108,7 @@ MAX(1 << highbit(3 * (max)), 64)
 		kstat_named_t	vk_parent_alloc;	/* called the source allocator */
 		kstat_named_t	vk_parent_free;	        /* called the source free function */
 		kstat_named_t   vk_threads_waiting;     /* threads in cv_wait in vmem allocator function */
+		kstat_named_t   vk_excess;              /* count of retained excess imports */
 	} vmem_kstat_t;
 
 	struct vmem {
