@@ -2037,6 +2037,7 @@ vmem_bucket_wake_all_waiters(void)
 		vmem_t *bvmp = vmem_bucket_arena[bucket];
 		cv_broadcast(&bvmp->vm_cv);
 	}
+	cv_broadcast(&spl_heap_arena->vm_cv);
 }
 
 /*
@@ -2223,6 +2224,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 	uint64_t now = zfs_lbolt();
 
 	mutex_enter(&vmem_xnu_alloc_free_lock);
+
 	void *m = spl_vmem_malloc_if_no_pressure(size);
 
 	if (m != NULL) {
@@ -2423,7 +2425,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 }
 
 static void *
-vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
+vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 {
 
 	if (!ISP2(size))
@@ -2435,7 +2437,8 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 		void *m = vmem_alloc(spl_default_arena, size, vmflags);
 		// wake up arena waiters to let them know there is memory
 		// available
-		cv_broadcast(&vmp->vm_cv);
+		if (m != NULL)
+			cv_broadcast(&vmp->vm_cv);
 		return (m);
 	}
 
@@ -2445,56 +2448,122 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, int vmflags)
 		bucket = 0;
 
 	vmem_t *bvmp = vmem_bucket_arena[bucket];
+
+	// there are 13 buckets, so use a 16-bit scalar to hold
+	// a set of bits, where each bit corresponds to an in-progress
+	// vmem_alloc(bucket, ...) below.
+
+	static volatile _Atomic uint16_t buckets_busy_allocating = 0;
+	const uint16_t bucket_bit = (uint16_t)1 << (uint16_t)bucket;
+
 	static volatile uint32_t waiters = 0;
 
 	// spin-sleep: if we would need to go to the xnu allocator.
-	// we want to avoid a burst of allocs from bucket_heap's children
+	//
+	// We want to avoid a burst of allocs from bucket_heap's children
 	// successively hitting a low-memory condition, or alternatively
 	// each successfully importing memory from xnu when they can share
 	// a single import.
+
 	atomic_inc_32(&waiters);
-	mutex_enter(&bvmp->vm_lock);
+
 	for (int iter = 0; waiters > 1; iter++) {
-		// we have the mutex here from the _enter() above
-		// or the cv_...wait_() below
-		if (vmem_canalloc(bvmp,size) ||
-		    vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT) ||
-		    iter >= 10) {
+		if (vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT)) {
+			// we should not wait, try to vmem_alloc(bvmp, size, vmflags).
+			// exclude VM_SLEEP allocations from going to the same bucket concurrently;
+			// this exclusion is released after the vmem_alloc below.
+			// Concurrent NOSLEEP-et-al is fine, however.
+			__c11_atomic_fetch_or(&buckets_busy_allocating,
+			    bucket_bit, __ATOMIC_SEQ_CST);
 			break;
 		}
-		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
-		    USEC2NSEC(500), 0, 0);
-		// another thread may have caused memory to become
-		// available (notably in the spl_heap_arena_initial_alloc memory)
-		// and we should use that instead
-		if (vmem_canalloc_atomic(vmp, size)) {
-			// take the mutex to gate other threads
-			// waking up taking this early exit.
-			mutex_enter(&vmp->vm_lock);
-			// recheck canalloc, since it may have changed
-			// while waiting for the mutex
-			if (vmem_canalloc(vmp, size)) {
-				// when we are back in vmem_xalloc(), a proper
-				// vmem_canalloc() will be done, almost certainly
-				// resulting in a "goto do_alloc;",
-				// and at worst we end up in the arena cv_wait()
-				// with kstat.vmem.vmem.bucket_heap.wait incremented.
-				atomic_dec_32(&waiters);
-				mutex_exit(&bvmp->vm_lock);
-				mutex_exit(&vmp->vm_lock);
-				return(NULL);
-			} else {
-				mutex_exit(&vmp->vm_lock);
+		if (vmem_canalloc_atomic(bvmp, size)) {
+			// We can probably vmem_alloc(bvmp, size, vmflags)
+			// at worst case it will give us a NULL and we will
+			// end up on the vmp's cv_wait.
+			//
+			// We can have threads with different bvmp
+			// taking this exit, and will proceed concurrently.
+			//
+			// However, we should protect against a burst of
+			// callers hitting the same bvmp before the allocation
+			// results are reflected in vmem_canalloc_atomic(bvmp, ...)
+			//
+			// We do this by atomically turning on the corresponding bit
+			// in buckets_busy_allocating if it is not set, then
+			// breaking out of the loop
+			if ((buckets_busy_allocating & bucket_bit) == 0) {
+				__c11_atomic_fetch_or(&buckets_busy_allocating,
+				    bucket_bit, __ATOMIC_SEQ_CST);
+				break;
+				// The vmem_alloc() should return extremely quickly from
+				// an INSTANTFIT allocation that canalloc predicts will succeed.
 			}
 		}
+		if (iter >= 10 &&
+		    ((buckets_busy_allocating & bucket_bit) == 0)) {
+			// Escape after at least ten iterations, iff the bucket
+			// is not already processing a vmem_alloc() driven by the canalloc
+			// test being true.
+			__c11_atomic_fetch_or(&buckets_busy_allocating,
+			    bucket_bit, __ATOMIC_SEQ_CST);
+			// The vmem_alloc() below is very likely to trigger an
+			// allocation request to xnu for this bucket.
+			break;
+		}
+		// The bucket is already allocating, or the bucket needs
+		// more memory to satisfy vmem_allocat(bvmp, size, VM_NOSLEEP), or
+		// we want to give the bucket some time to acquire more memory.
+		//
+		// substitute for the vmp arena's cv_wait in vmem_xalloc()
+		// (vmp is the bucket_heap AKA spl_heap_arena)
+		mutex_enter(&vmp->vm_lock);
+		(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
+		    USEC2NSEC(500*(waiters+1)), 0, 0);
+		// We may have exited because of a signal/broadcast.
+		if (vmem_canalloc(vmp, size)) {
+			// Another thread may has caused memory to become
+			// available in our own arena; when we have returned to
+			// vmem_xalloc(), it will almost certainly do a "goto do_alloc;",
+			// and at worst we end up in the arena cv_wait()
+			// with kstat.vmem.vmem.bucket_heap.wait incremented.
+			atomic_dec_32(&waiters);
+			mutex_exit(&vmp->vm_lock);
+			return(NULL);
+		} else {
+			mutex_exit(&vmp->vm_lock);
+		}
 	}
-	atomic_dec_32(&waiters);
-	mutex_exit(&bvmp->vm_lock);
+
+	// There is memory in this bucket, or there are no other waiters,
+	// or we aren't a VM_SLEEP allocation,  or we iterated out of the for loop.
+	//
+	// vmem_alloc() and vmem_xalloc() do their own mutex serializing
+	// on bvmp->vm_lock, so we don't have to here.
+	//
+	// vmem_alloc may take some time to return (especially for VM_SLEEP
+	// allocations where we did not take the vm_canalloc(bvmp...) break out
+	// of the for loop).  Therefore, if we didn't enter the for loop at all
+	// because waiters was 0 when we entered this function,
+	// subsequent callers will enter the for loop.
+
 	void *m = vmem_alloc(bvmp, size, vmflags);
-	// if we did an allocation, wake up the arena cv waiters to
-	// let them know there's memory available
-	if (m != NULL)
+
+	// allow another vmem_canalloc() through for this bucket
+	// by atomically turning off the appropriate bit
+
+	__c11_atomic_fetch_and(&buckets_busy_allocating,
+	    ~bucket_bit, __ATOMIC_SEQ_CST);
+
+	// if we got an allocation, wake up the arena cv waiters
+	// to let them try to exit the for(;;) loop above and
+	// exit the cv_wait() in vmem_xalloc(vmp, ...)
+
+	if (m != NULL) {
 		cv_broadcast(&vmp->vm_cv);
+	}
+
+	atomic_dec_32(&waiters);
 	return (m);
 }
 
