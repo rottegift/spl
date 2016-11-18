@@ -4462,13 +4462,6 @@ spl_free_thread()
 			} else if ((segkmem_total_mem_allocated * 100LL / real_total_memory) > 75) {
 				new_spl_free -= total_mem_used / 32;
 				lowmem = true;
-			} else if (!lowmem) {
-				// but if we have lots of memory free still, then bite into it a bit
-				int64_t total_freebytes =
-				    ((int64_t)real_total_memory - total_mem_used);
-				int64_t safe_freebytes = total_freebytes - 128ULL * 1024ULL * 1024ULL;
-				if (safe_freebytes > 0)
-					new_spl_free += safe_freebytes / 8;
 			}
 		}
 
