@@ -4449,10 +4449,17 @@ spl_free_thread()
 			int64_t combined_free = heap_free + buckets_free;
 
 			if (combined_free != 0) {
-				if (lowmem)
-					new_spl_free += combined_free / 8;
-				else
-					new_spl_free += combined_free / 2;
+				const int64_t mb = 1024*1024;
+				if (!lowmem && above_min_free_bytes > 16LL * mb) {
+					if (above_min_free_bytes < 32LL * mb)
+						new_spl_free += combined_free / 16;
+					else if (above_min_free_bytes < 64LL * mb)
+						new_spl_free += combined_free / 8;
+					else if (above_min_free_bytes < 128LL * mb)
+						new_spl_free += combined_free / 4;
+					else
+						new_spl_free += combined_free / 2;
+				}
 			}
 
 			// memory footprint has gotten really big, decrease spl_free substantially
