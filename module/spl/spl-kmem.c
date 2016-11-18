@@ -4450,15 +4450,17 @@ spl_free_thread()
 
 			if (combined_free != 0) {
 				const int64_t mb = 1024*1024;
-				if (!lowmem && above_min_free_bytes > 16LL * mb) {
-					if (above_min_free_bytes < 32LL * mb)
+				if (!lowmem && above_min_free_bytes > (int64_t)PAGESIZE * 10000LL) {
+					if (above_min_free_bytes < 64LL * mb)
 						new_spl_free += combined_free / 16;
-					else if (above_min_free_bytes < 64LL * mb)
-						new_spl_free += combined_free / 8;
 					else if (above_min_free_bytes < 128LL * mb)
+						new_spl_free += combined_free / 8;
+					else if (above_min_free_bytes < 256LL * mb)
 						new_spl_free += combined_free / 4;
 					else
 						new_spl_free += combined_free / 2;
+				} else {
+					new_spl_free -= 16LL * mb;
 				}
 			}
 
