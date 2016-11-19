@@ -2281,9 +2281,9 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		return (p);
 	}
 
-	static volatile uint32_t waiters = 0;
+	static volatile _Atomic uint32_t waiters = 0;
 
-	atomic_inc_32(&waiters);
+	waiters++;
 	for (int iter = 0; ; iter++) {
 		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
 		mutex_enter(&vmp->vm_lock);
@@ -2295,11 +2295,9 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			atomic_inc_64(&spl_xat_memory_appeared);
 			// Memory has appeared thanks to another thread.
 			// Wake up anything waiting on the arena cv in vmem_xalloc().
-			atomic_dec_32(&waiters);
+			waiters--;
 			// Once we return, vmem_xalloc() will immediately
 			// enter the mutex, and will quickly "goto do_alloc;".
-			// We just woke up all the cv_wait() waiters, so we
-			// do not need to wake them up again now.
 			mutex_exit(&vmp->vm_lock);
 			return(NULL);
 		} else {
@@ -2309,7 +2307,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		if (a != NULL) {
 			atomic_inc_64(&spl_xat_late_success);
 			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
-			atomic_dec_32(&waiters);
+			waiters--;
 			// Wake up all waiters on the bucket arena locks,
 			// since the system apparently has memory again.
 			vmem_bucket_wake_all_waiters();
@@ -2347,7 +2345,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 				spl_free_set_pressure(pressure);
 			}
 			// open turnstile after having bailed, rather than before
-			atomic_dec_32(&waiters);
+			waiters--;
 			return (b);
 		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
 			// set pressure after ~ 1 ms
@@ -2357,7 +2355,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			atomic_inc_64(&spl_xat_pressured);
 		}
 	}
-	atomic_dec_32(&waiters);
+	waiters--;
 	spl_free_set_pressure(size);
 	return (NULL);
 }
@@ -2429,7 +2427,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 	static volatile _Atomic uint16_t buckets_busy_allocating = 0;
 	const uint16_t bucket_bit = (uint16_t)1 << (uint16_t)bucket;
 
-	static volatile uint32_t waiters = 0;
+	static volatile _Atomic uint32_t waiters = 0;
 
 	// spin-sleep: if we would need to go to the xnu allocator.
 	//
@@ -2438,7 +2436,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 	// each successfully importing memory from xnu when they can share
 	// a single import.
 
-	atomic_inc_32(&waiters);
+	waiters++;
 
 	for (int iter = 0; waiters > 1; iter++) {
 		if (vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT)) {
@@ -2446,8 +2444,33 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// exclude VM_SLEEP allocations from going to the same bucket concurrently;
 			// this exclusion is released after the vmem_alloc below.
 			// Concurrent NOSLEEP-et-al is fine, however.
-			__c11_atomic_fetch_or(&buckets_busy_allocating,
-			    bucket_bit, __ATOMIC_SEQ_CST);
+			buckets_busy_allocating |= bucket_bit;
+			/*
+			 * could be written as:
+			 * __c11_atomic_fetch_or(&buckets_busy_allocating,
+			 * bucket_bit, __ATOMIC_SEQ_CST);
+			 * with the &= down below being written as
+			 * __c11_atomic_fetch_and(&buckets_busy_allocating,
+			 * ~bucket_bit, __ATOMIC_SEQ_CST);
+			 *
+			 * and this makes a difference with no optimization either
+			 * compiling the whole file or with __attribute((optnone))
+			 * in front of the function decl.   In particular, the non-
+			 * optimized version that uses the builtin __c11_atomic_fetch_{and,or}
+			 * preserves the C program order in the machine language output,
+			 * inersting cmpxchgws, while all optimized versions, and the
+			 * non-optimized version using the plainly-written version, reorder
+			 * the "orw regr, memory" and "andw register, memory" (these are atomic
+			 * RMW operations in x86-64 when the memory is 32-bit aligned) so that
+			 * the strong memory model x86-64 promise that later loads see the
+			 * results of earlier stores.
+			 *
+			 * clang+llvm simply are good at optimizing _Atomics and
+			 * the optimized code differs only in line numbers and
+			 * among all three approaches (as plainly written, using
+			 * the __c11_atomic_fetch_X, and
+			 *
+			 */
 			break;
 		}
 		if (vmem_canalloc_atomic(bvmp, size)) {
@@ -2466,8 +2489,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// in buckets_busy_allocating if it is not set, then
 			// breaking out of the loop
 			if ((buckets_busy_allocating & bucket_bit) == 0) {
-				__c11_atomic_fetch_or(&buckets_busy_allocating,
-				    bucket_bit, __ATOMIC_SEQ_CST);
+				buckets_busy_allocating |= bucket_bit;
 				break;
 				// The vmem_alloc() should return extremely quickly from
 				// an INSTANTFIT allocation that canalloc predicts will succeed.
@@ -2478,8 +2500,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// Escape after at least ten iterations, iff the bucket
 			// is not already processing a vmem_alloc() driven by the canalloc
 			// test being true.
-			__c11_atomic_fetch_or(&buckets_busy_allocating,
-			    bucket_bit, __ATOMIC_SEQ_CST);
+			buckets_busy_allocating |= bucket_bit;
 			// The vmem_alloc() below is very likely to trigger an
 			// allocation request to xnu for this bucket.
 			break;
@@ -2500,7 +2521,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// vmem_xalloc(), it will almost certainly do a "goto do_alloc;",
 			// and at worst we end up in the arena cv_wait()
 			// with kstat.vmem.vmem.bucket_heap.wait incremented.
-			atomic_dec_32(&waiters);
+			waiters--;
 			mutex_exit(&vmp->vm_lock);
 			return(NULL);
 		} else {
@@ -2525,8 +2546,13 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 	// allow another vmem_canalloc() through for this bucket
 	// by atomically turning off the appropriate bit
 
-	__c11_atomic_fetch_and(&buckets_busy_allocating,
-	    ~bucket_bit, __ATOMIC_SEQ_CST);
+	/*
+	 * Except clang+llvm DTRT because of _Atomic, could be written as:
+	 *__c11_atomic_fetch_and(&buckets_busy_allocating,
+	 *~bucket_bit, __ATOMIC_SEQ_CST);
+	 */
+
+	buckets_busy_allocating &= ~bucket_bit;
 
 	// if we got an allocation, wake up the arena cv waiters
 	// to let them try to exit the for(;;) loop above and
@@ -2536,7 +2562,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 		cv_broadcast(&vmp->vm_cv);
 	}
 
-	atomic_dec_32(&waiters);
+	waiters--;
 	return (m);
 }
 
