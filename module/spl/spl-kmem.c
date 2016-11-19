@@ -81,6 +81,7 @@ int64_t spl_free_delta_ema;
 
 static int64_t spl_free_manual_pressure = 0;
 static kmutex_t spl_free_manual_pressure_lock;
+static kcondvar_t spl_free_manual_pressure_cv;
 static boolean_t spl_free_fast_pressure = FALSE;
 
 // Start and end address of kernel memory
@@ -4061,17 +4062,29 @@ spl_free_wrapper(void)
 int64_t
 spl_free_manual_pressure_wrapper(void)
 {
+	cv_broadcast(&spl_free_manual_pressure_cv);
 	return (spl_free_manual_pressure);
+}
+
+void
+spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t wait_time)
+{
+	mutex_enter(&spl_free_manual_pressure_lock);
+	int64_t previous_highest_pressure = spl_free_manual_pressure;
+	if (new_p > previous_highest_pressure || new_p <= 0)
+		spl_free_manual_pressure = new_p;
+	cv_timedwait_hires(&spl_free_manual_pressure_cv,
+	    &spl_free_manual_pressure_lock, wait_time, 0, 0);
+	mutex_exit(&spl_free_manual_pressure_lock);
 }
 
 void
 spl_free_set_pressure(int64_t new_p)
 {
 	mutex_enter(&spl_free_manual_pressure_lock);
-	int64_t previous_highest_pressure = 0;
-	__sync_lock_test_and_set(&previous_highest_pressure, spl_free_manual_pressure);
+	int64_t previous_highest_pressure = spl_free_manual_pressure;
 	if (new_p > previous_highest_pressure || new_p <= 0)
-		__sync_lock_test_and_set(&spl_free_manual_pressure, new_p);
+		spl_free_manual_pressure = new_p;
 	mutex_exit(&spl_free_manual_pressure_lock);
 }
 
@@ -4079,11 +4092,35 @@ void
 spl_free_set_emergency_pressure(int64_t new_p)
 {
 	mutex_enter(&spl_free_manual_pressure_lock);
-        int64_t previous_highest_pressure = 0;
-	__sync_lock_test_and_set(&previous_highest_pressure, spl_free_manual_pressure);
+        int64_t previous_highest_pressure = spl_free_manual_pressure;
 	if (new_p > previous_highest_pressure || new_p <= 0)
-		__sync_lock_test_and_set(&spl_free_manual_pressure, new_p);
+		spl_free_manual_pressure = new_p;
 	spl_free_fast_pressure = TRUE;
+	mutex_exit(&spl_free_manual_pressure_lock);
+}
+
+static inline void
+spl_free_set_pressure_atomic(int64_t new_p, boolean_t fast)
+{
+	spl_free_fast_pressure = fast;
+	__c11_atomic_store((_Atomic int64_t *)&spl_free_manual_pressure,
+	    new_p, __ATOMIC_SEQ_CST);
+}
+
+void
+spl_free_set_emergency_pressure_additive(int64_t new_p)
+{
+	mutex_enter(&spl_free_manual_pressure_lock);
+	spl_free_manual_pressure += new_p;
+	spl_free_fast_pressure = TRUE;
+	mutex_exit(&spl_free_manual_pressure_lock);
+}
+
+void
+spl_free_set_pressure_additive(int64_t new_p)
+{
+	mutex_enter(&spl_free_manual_pressure_lock);
+	spl_free_manual_pressure += new_p;
 	mutex_exit(&spl_free_manual_pressure_lock);
 }
 
@@ -4176,8 +4213,7 @@ spl_free_thread()
 		// if there is pressure that has not yet reached arc_reclaim_thread()
 		// then start with a negative new_spl_free
 		if (spl_free_manual_pressure > 0) {
-			int64_t old_pressure = 0;
-			__sync_lock_test_and_set(&old_pressure, spl_free_manual_pressure);
+			int64_t old_pressure = spl_free_manual_pressure;
 			new_spl_free -= old_pressure * 2LL;
 			lowmem = true;
 			if (spl_free_fast_pressure) {
@@ -4273,11 +4309,13 @@ spl_free_thread()
 			// atomic swaps to set these variables used in .../zfs/arc.c
 			int64_t previous_highest_pressure = 0;
 			int64_t new_p = -bminus;
-			__sync_lock_test_and_set(&previous_highest_pressure, spl_free_manual_pressure);
-			if (new_p > previous_highest_pressure || new_p <= 0)
-				__sync_lock_test_and_set(&spl_free_manual_pressure, -16LL * new_spl_free);
-			if (vm_page_free_wanted > vm_page_free_min / 8)
-				__sync_lock_test_and_set(&spl_free_fast_pressure, TRUE);
+			previous_highest_pressure = spl_free_manual_pressure;
+			if (new_p > previous_highest_pressure || new_p <= 0) {
+				boolean_t fast = FALSE;
+				if (vm_page_free_wanted > vm_page_free_min / 8)
+					fast = TRUE;
+				spl_free_set_pressure_atomic(-16LL * new_spl_free, fast);
+			}
 			last_disequilibrium = time_now_seconds;
 		} else if (vm_page_free_wanted > 0) {
 			int64_t bytes_wanted = (int64_t)vm_page_free_wanted * (int64_t)PAGESIZE;
@@ -4318,19 +4356,20 @@ spl_free_thread()
 			!memory_equilibrium && !just_alloced) ||
 		    above_min_free_bytes <= -4LL*1024LL*1024LL) {
 			int64_t new_p = -1LL * above_min_free_bytes;
+			boolean_t fast = FALSE;
 			emergency_lowmem = true;
 			lowmem = true;
 			recent_lowmem = time_now;
 			last_disequilibrium = time_now_seconds;
-			int64_t previous_highest_pressure = 0;
-			__sync_lock_test_and_set(&previous_highest_pressure, spl_free_manual_pressure);
-			if (new_p > previous_highest_pressure || new_p <= 0)
-				__sync_lock_test_and_set(&spl_free_manual_pressure, new_p);
-			// force a stronger reaction from ARC if we are also low on
-			// speculative pages (xnu prefetched file blocks with no clients yet)
+			int64_t previous_highest_pressure = spl_free_manual_pressure;
 			int64_t spec_bytes = (int64_t)vm_page_speculative_count * (int64_t)PAGESIZE;
-			if (vm_page_free_wanted > 0 || new_p > spec_bytes)
-				__sync_lock_test_and_set(&spl_free_fast_pressure, TRUE);
+			if (vm_page_free_wanted > 0 || new_p > spec_bytes) {
+				// force a stronger reaction from ARC if we are also low on
+				// speculative pages (xnu prefetched file blocks with no clients yet)
+				fast = TRUE;
+			}
+			if (new_p > previous_highest_pressure)
+				spl_free_set_pressure_atomic(new_p, fast);
 		} else if (above_min_free_bytes < 0LL && !early_lots_free) {
 			lowmem = true;
 			if (recent_lowmem == 0)
@@ -4364,7 +4403,7 @@ spl_free_thread()
 				// when we expect to be freeing up arc-usable memory.
 				const int64_t two_spamax = 32LL * 1024LL * 1024LL;
 				if (spl_free < two_spamax)
-					__sync_lock_test_and_set(&spl_free, two_spamax);
+					spl_free = two_spamax;
 				mutex_exit(&spl_free_lock);
 				vmem_qcache_reap(zio_arena);
 				vmem_qcache_reap(zio_metadata_arena);
@@ -4384,7 +4423,8 @@ spl_free_thread()
 		if (!reserve_low || early_lots_free || memory_equilibrium || just_alloced) {
 			lowmem = false;
 			emergency_lowmem = false;
-			__sync_lock_test_and_set(&spl_free_fast_pressure, FALSE);
+			__c11_atomic_store((_Atomic boolean_t *)&spl_free_fast_pressure, FALSE,
+				__ATOMIC_SEQ_CST);
 		}
 
 		if (vm_page_speculative_count > 0) {
@@ -4393,11 +4433,13 @@ spl_free_thread()
 			// consumer
 			if (vm_page_speculative_count / 4 + vm_page_free_count > vm_page_free_min) {
 				emergency_lowmem = false;
-				__sync_lock_test_and_set(&spl_free_fast_pressure, FALSE);
+				__c11_atomic_store((_Atomic boolean_t *)&spl_free_fast_pressure, FALSE,
+				    __ATOMIC_SEQ_CST);
 			}
 			if (vm_page_speculative_count / 2 + vm_page_free_count > vm_page_free_min) {
 				lowmem = false;
-				__sync_lock_test_and_set(&spl_free_fast_pressure, FALSE);
+				__c11_atomic_store((_Atomic boolean_t *)&spl_free_fast_pressure, FALSE,
+				    __ATOMIC_SEQ_CST);
 			}
 		}
 
@@ -4425,12 +4467,10 @@ spl_free_thread()
 			// but recently we had lowmem... and still have lowmem.
 			// cure this condition with a dose of pressure.
 			if (above_min_free_bytes < 0) {
-				int64_t old_p;
-				__sync_lock_test_and_set(&old_p, spl_free_manual_pressure);
+				int64_t old_p = spl_free_manual_pressure;
 				if (old_p <= -above_min_free_bytes) {
-					__sync_lock_test_and_set(&spl_free_manual_pressure,
-						-above_min_free_bytes);
 					recent_lowmem = 0;
+					spl_free_manual_pressure = -above_min_free_bytes;
 					mutex_exit(&spl_free_lock);
 					goto justwait;
 				}
@@ -4546,8 +4586,8 @@ spl_free_thread()
 			spl_free_is_negative = true;
 		}
 
-		// NOW atomically set spl_free from calculated new_spl_free
-		__sync_lock_test_and_set(&spl_free, new_spl_free);
+		// NOW set spl_free from calculated new_spl_free
+		__c11_atomic_store((_Atomic int64_t *)&spl_free, new_spl_free, __ATOMIC_SEQ_CST);
 
 		mutex_exit(&spl_free_lock);
 
@@ -4966,6 +5006,7 @@ spl_kmem_thread_init(void)
 	mutex_init(&spl_free_thread_lock, "spl_free_thead_lock", MUTEX_DEFAULT, NULL);
 	mutex_init(&spl_free_lock, "spl_free_lock", MUTEX_DEFAULT, NULL);
 	mutex_init(&spl_free_manual_pressure_lock, "spl_free_manual_pressure_lock", MUTEX_DEFAULT, NULL);
+	(void) cv_init(&spl_free_manual_pressure_cv, NULL, CV_DEFAULT, NULL);
 
 	kmem_taskq = taskq_create("kmem_taskq", 1, minclsyspri,
 							  300, INT_MAX, TASKQ_PREPOPULATE);
@@ -4994,6 +5035,7 @@ spl_kmem_thread_fini(void)
 	cv_destroy(&spl_free_thread_cv);
 	mutex_destroy(&spl_free_thread_lock);
 	mutex_destroy(&spl_free_lock);
+	cv_destroy(&spl_free_manual_pressure_cv);
 	mutex_destroy(&spl_free_manual_pressure_lock);
 
 	printf("SPL: bsd_untimeout\n");

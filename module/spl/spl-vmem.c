@@ -1053,7 +1053,7 @@ spl_vmem_xnu_useful_bytes_free(void)
 }
 
 static void *
-spl_vmem_malloc_unconditionally(size_t size)
+spl_vmem_malloc_unconditionally_unlocked(size_t size)
 {
 	extern void *osif_malloc(uint64_t);
 	atomic_inc_64(&spl_vmem_unconditional_allocs);
@@ -1062,20 +1062,34 @@ spl_vmem_malloc_unconditionally(size_t size)
 }
 
 static void *
+spl_vmem_malloc_unconditionally(size_t size)
+{
+	mutex_enter(&vmem_xnu_alloc_free_lock);
+	void *m = spl_vmem_malloc_unconditionally_unlocked(size);
+	cv_broadcast(&vmem_xnu_alloc_free_cv);
+	mutex_exit(&vmem_xnu_alloc_free_lock);
+	return (m);
+}
+
+static void *
 spl_vmem_malloc_if_no_pressure(size_t size)
 {
+	mutex_enter(&vmem_xnu_alloc_free_lock);
 	if (spl_vmem_xnu_useful_bytes_free() > (MAX(size,16ULL*1024ULL*1024ULL))) {
 		extern void *osif_malloc(uint64_t);
 		void *p = osif_malloc(size);
 		if (p != NULL) {
 			atomic_inc_64(&spl_vmem_conditional_allocs);
 			atomic_add_64(&spl_vmem_conditional_alloc_bytes, size);
+			cv_broadcast(&vmem_xnu_alloc_free_cv);
 		} else {
 			atomic_inc_64(&spl_vmem_conditional_alloc_fail);
 			atomic_add_64(&spl_vmem_conditional_alloc_fail_bytes, size);
 		}
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (p);
 	} else {
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 		atomic_inc_64(&spl_vmem_conditional_alloc_deny);
 		atomic_add_64(&spl_vmem_conditional_alloc_deny_bytes, size);
 		return (NULL);
@@ -1338,6 +1352,8 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 			    __func__, size, vmp->vm_name,
 			    vmp->vm_kstat.vk_threads_waiting.value.ui64,
 			    spl_vmem_threads_waiting);
+		extern void spl_free_set_and_wait_pressure(int64_t, boolean_t, clock_t);
+		spl_free_set_and_wait_pressure(size, TRUE, MSEC2NSEC(1));
 		cv_wait(&vmp->vm_cv, &vmp->vm_lock);
 		atomic_dec_64(&spl_vmem_threads_waiting);
 		atomic_dec_64(&vmp->vm_kstat.vk_threads_waiting.value.ui64);
@@ -2223,26 +2239,21 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 
 	uint64_t now = zfs_lbolt();
 
-	mutex_enter(&vmem_xnu_alloc_free_lock);
-
 	void *m = spl_vmem_malloc_if_no_pressure(size);
 
 	if (m != NULL) {
 		atomic_inc_64(&spl_xat_success);
 		if (now > hz)
 			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
-		// wake up all waiters on the alloc|free condvar
-		cv_broadcast(&vmem_xnu_alloc_free_cv);
 		// wake up waiters on all the arena condvars
 		// since there is apparently no memory shortage.
 		vmem_bucket_wake_all_waiters();
-		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (m);
 	} else {
-		mutex_exit(&vmem_xnu_alloc_free_lock);
 		extern boolean_t spl_maybe_send_large_pressure(uint64_t, uint64_t, boolean_t);
 		// Try to kick arc.  If the full kick is refused because a kick
 		// has been administered too few minutes ago, try a gentler kick instead.
+		spl_free_set_emergency_pressure(size);
 		if (!spl_maybe_send_large_pressure(now, 60, true))
 			(void)spl_maybe_send_large_pressure(now, 10, false);
 	}
@@ -2255,12 +2266,9 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		// on an allocation.   force an allocation now
 		atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 		spl_free_set_emergency_pressure(4LL * (int64_t)size);
-		mutex_enter(&vmem_xnu_alloc_free_lock);
 		void *p = spl_vmem_malloc_unconditionally(size);
 		// p cannot be NULL (unconditional kernel malloc always works or panics)
 		// therefore: success, wake all waiters on alloc|free condvar
-		cv_broadcast(&vmem_xnu_alloc_free_cv);
-		mutex_exit(&vmem_xnu_alloc_free_lock);
 		// wake up arena waiters to let them know there is memory
 		// available in the arena; let waiters on other bucket arenas
 		// continue sleeping.
@@ -2274,7 +2282,6 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		void *p = spl_vmem_malloc_if_no_pressure(size);
 		if (p != NULL) {
 			atomic_inc_64(&spl_xat_late_success_nosleep);
-			cv_broadcast(&vmem_xnu_alloc_free_cv);
 			cv_broadcast(&vmp->vm_cv);
 			if (now > hz)
 				atomic_swap_64(&spl_xat_lastalloc,  now / hz);
@@ -2287,54 +2294,37 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 
 	atomic_inc_32(&waiters);
 	for (int iter = 0; ; iter++) {
-		mutex_enter(&vmem_xnu_alloc_free_lock);
 		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
-		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv, &vmem_xnu_alloc_free_lock,
+		mutex_enter(&vmp->vm_lock);
+		(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
 		    wait_time, 0, 0);
 		// still under mutex
 		now = zfs_lbolt();
-		if (vmem_canalloc_atomic(vmp, size)) {
+		if (vmem_canalloc(vmp, size)) {
 			atomic_inc_64(&spl_xat_memory_appeared);
 			// Memory has appeared thanks to another thread.
 			// Wake up anything waiting on the arena cv in vmem_xalloc().
-			cv_broadcast(&vmp->vm_cv);
-			// now we see if we can get the memory ourselves
-			mutex_enter(&vmp->vm_lock);
-			if (vmem_canalloc(vmp, size)) {
-				atomic_dec_32(&waiters);
-				// Let other waiters on vmem_xnu_alloc_free_cv
-				// continue sleeping; they'll wake up in no longer
-				// than milliseconds.
-				mutex_exit(&vmem_xnu_alloc_free_lock);
-				// Once we return, vmem_xalloc() will immediately
-				// enter the mutex, and will quickly "goto do_alloc;".
-				// We just woke up all the cv_wait() waiters, so we
-				// do not need to wake them up again now.
-				mutex_exit(&vmp->vm_lock);
-				return(NULL);
-			} else {
-				atomic_inc_64(&spl_xat_lost_canalloc);
-				mutex_exit(&vmp->vm_lock);
-			}
-			mutex_exit(&vmem_xnu_alloc_free_lock);
-		} else if (spl_vmem_xnu_useful_bytes_free() > size) {
-			void *a = spl_vmem_malloc_if_no_pressure(size);
-			if (a != NULL) {
-				atomic_inc_64(&spl_xat_late_success);
-				if (now > hz)
-					atomic_swap_64(&spl_xat_lastalloc,  now / hz);
-				atomic_dec_32(&waiters);
-				// success! wake up all waiters on the alloc|free lock
-				cv_broadcast(&vmem_xnu_alloc_free_cv);
-				// Wake up all waiters on the bucket arena locks,
-				// since the system apparently has memory again.
-				vmem_bucket_wake_all_waiters();
-				mutex_exit(&vmem_xnu_alloc_free_lock);
-				return (a);
-			} else {
-				mutex_exit(&vmem_xnu_alloc_free_lock);
-			}
-		} else if ((iter >= 20 &&
+			atomic_dec_32(&waiters);
+			// Once we return, vmem_xalloc() will immediately
+			// enter the mutex, and will quickly "goto do_alloc;".
+			// We just woke up all the cv_wait() waiters, so we
+			// do not need to wake them up again now.
+			mutex_exit(&vmp->vm_lock);
+			return(NULL);
+		} else {
+			mutex_exit(&vmp->vm_lock);
+		}
+		void *a = spl_vmem_malloc_if_no_pressure(size);
+		if (a != NULL) {
+			atomic_inc_64(&spl_xat_late_success);
+			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+			atomic_dec_32(&waiters);
+			// Wake up all waiters on the bucket arena locks,
+			// since the system apparently has memory again.
+			vmem_bucket_wake_all_waiters();
+			return (a);
+		}
+		if ((iter >= 20 &&
 			iter >= 20 * waiters &&
 			iter >= 40 * vmp->vm_kstat.vk_threads_waiting.value.ui64 &&
 			iter >= 30 * spl_vmem_threads_waiting) ||
@@ -2354,15 +2344,9 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			// of the for loop, including going to zero.
 			//
 			atomic_inc_64(&spl_xat_bailed);
-			// xnu_allocate_throttled_bail() acquires the mutex
-			// if it ends up doing an unconditional allocation
-			mutex_exit(&vmem_xnu_alloc_free_lock);
 			void *b = xnu_allocate_throttled_bail(now, vmp, size, vmflag);
 			if (b != NULL) {
-				if (now > hz)
-					atomic_swap_64(&spl_xat_lastalloc, now / hz);
-				// wake up a waiter on the alloc|free cv
-				cv_signal(&vmem_xnu_alloc_free_cv);
+				atomic_swap_64(&spl_xat_lastalloc, now / hz);
 				// wake up waiters on the arena lock,
 				// since they now have memory they can use.
 				cv_broadcast(&vmp->vm_cv);
@@ -2371,17 +2355,15 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 				    size * (1LL + vmp->vm_kstat.vk_threads_waiting.value.ui64);
 				spl_free_set_pressure(pressure);
 			}
-			// turnstile after having bailed, rather than before
+			// open turnstile after having bailed, rather than before
 			atomic_dec_32(&waiters);
 			return (b);
 		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
 			// set pressure after ~ 1 ms
 			// and then every roughly 4 ms
-			mutex_exit(&vmem_xnu_alloc_free_lock);
-			spl_free_set_emergency_pressure(size);
+			extern void spl_free_set_emergency_pressure_additive(int64_t);
+			spl_free_set_emergency_pressure_additive(size);
 			atomic_inc_64(&spl_xat_pressured);
-		} else {
-			mutex_exit(&vmem_xnu_alloc_free_lock);
 		}
 	}
 	atomic_dec_32(&waiters);
@@ -2417,6 +2399,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	uint64_t now = zfs_lbolt();
 	if (now > hz)
 		atomic_swap_64(&spl_xat_lastfree,  now / hz);
+	cv_broadcast(&vmem_xnu_alloc_free_cv);
 	mutex_exit(&vmem_xnu_alloc_free_lock);
 	// since we just gave back xnu enough to satisfy an allocation
 	// in at least the smaller buckets, let's wake up anyone in
