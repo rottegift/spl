@@ -2352,7 +2352,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			// set pressure after ~ 1 ms
 			// and then every roughly 4 ms
 			extern void spl_free_set_emergency_pressure_additive(int64_t);
-			spl_free_set_emergency_pressure_additive(size);
+			spl_free_set_emergency_pressure(size * (iter / 2));
 			atomic_inc_64(&spl_xat_pressured);
 		}
 	}
