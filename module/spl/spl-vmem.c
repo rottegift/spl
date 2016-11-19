@@ -2379,26 +2379,29 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	// Serialize behind a (short) spin-sleep delay, giving
 	// xnu time to do freelist management and
 	// PT teardowns
-	static volatile uint32_t waiters = 0;
+	static volatile _Atomic uint32_t a_waiters = 0;
+	static volatile _Atomic bool is_freeing = false;
 
-	atomic_inc_32(&waiters);
+	a_waiters++; // generates "lock incl ..."
 	mutex_enter(&vmem_xnu_alloc_free_lock);
-	for (uint32_t iter = 0; waiters > 1; iter++) {
+	for (uint32_t iter = 0; a_waiters > 1; iter++) {
 		// there is a queue waiting for the mutex, sleep
 		// this gives up the mutex, admitting another through
 		// the mutex_enter->atomic_dec_32 path above
-		clock_t wait_time = USEC2NSEC(90UL + (10UL * MAX(waiters,1UL)));
+		clock_t wait_time = USEC2NSEC(90UL + (10UL * MAX(a_waiters,1UL)));
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
 		    &vmem_xnu_alloc_free_lock,
 		    wait_time, 0, 0);
-		if (iter > waiters)
+		if (iter > a_waiters && is_freeing == false) {
+			is_freeing = true;
 			break;
+		}
 	}
-	atomic_dec_32(&waiters);
+	a_waiters--;
 	osif_free(vaddr, size);
 	uint64_t now = zfs_lbolt();
-	if (now > hz)
-		atomic_swap_64(&spl_xat_lastfree,  now / hz);
+	atomic_swap_64(&spl_xat_lastfree,  now / hz);
+	is_freeing = false;
 	cv_broadcast(&vmem_xnu_alloc_free_cv);
 	mutex_exit(&vmem_xnu_alloc_free_lock);
 	// since we just gave back xnu enough to satisfy an allocation
