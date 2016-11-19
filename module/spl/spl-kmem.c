@@ -75,8 +75,7 @@ extern volatile unsigned int vm_page_free_count; // will tend to vm_page_free_mi
 static kcondvar_t spl_free_thread_cv;
 static kmutex_t spl_free_thread_lock;
 static boolean_t spl_free_thread_exit;
-int64_t spl_free;
-static kmutex_t spl_free_lock;
+static _Atomic int64_t spl_free;
 int64_t spl_free_delta_ema;
 
 static int64_t spl_free_manual_pressure = 0;
@@ -4177,10 +4176,8 @@ spl_free_thread()
 
 	CALLB_CPR_INIT(&cpr, &spl_free_thread_lock, callb_generic_cpr, FTAG);
 
-	mutex_enter(&spl_free_lock);
 	spl_free = (int64_t)PAGESIZE *
 	    (int64_t)(vm_page_free_count - vm_page_free_min);
-	mutex_exit(&spl_free_lock);
 
 	mutex_enter(&spl_free_thread_lock);
 
@@ -4198,8 +4195,6 @@ spl_free_thread()
 		int64_t new_spl_free = 0LL;
 
 		spl_stats.spl_free_wake_count.value.ui64++;
-
-		mutex_enter(&spl_free_lock);
 
 		uint64_t time_now = zfs_lbolt();
 		uint64_t time_now_seconds = 0;
@@ -4403,8 +4398,7 @@ spl_free_thread()
 				// when we expect to be freeing up arc-usable memory.
 				const int64_t two_spamax = 32LL * 1024LL * 1024LL;
 				if (spl_free < two_spamax)
-					spl_free = two_spamax;
-				mutex_exit(&spl_free_lock);
+					spl_free = two_spamax; // atomic!
 				vmem_qcache_reap(zio_arena);
 				vmem_qcache_reap(zio_metadata_arena);
 				vmem_qcache_reap(kmem_va_arena);
@@ -4471,7 +4465,6 @@ spl_free_thread()
 				if (old_p <= -above_min_free_bytes) {
 					recent_lowmem = 0;
 					spl_free_manual_pressure = -above_min_free_bytes;
-					mutex_exit(&spl_free_lock);
 					goto justwait;
 				}
 			}
@@ -4587,9 +4580,10 @@ spl_free_thread()
 		}
 
 		// NOW set spl_free from calculated new_spl_free
-		__c11_atomic_store((_Atomic int64_t *)&spl_free, new_spl_free, __ATOMIC_SEQ_CST);
+                spl_free = new_spl_free;
+		// the direct equivalent of :
+		// __c11_atomic_store(&spl_free, new_spl_free, __ATOMIC_SEQ_CST);
 
-		mutex_exit(&spl_free_lock);
 
 		// Because we're already negative, arc is likely to have been
 		// signalled already. We can rely on the _maybe_ in
@@ -5004,7 +4998,6 @@ spl_kmem_thread_init(void)
 
 	// Initialize the spl_free locks
 	mutex_init(&spl_free_thread_lock, "spl_free_thead_lock", MUTEX_DEFAULT, NULL);
-	mutex_init(&spl_free_lock, "spl_free_lock", MUTEX_DEFAULT, NULL);
 	mutex_init(&spl_free_manual_pressure_lock, "spl_free_manual_pressure_lock", MUTEX_DEFAULT, NULL);
 	(void) cv_init(&spl_free_manual_pressure_cv, NULL, CV_DEFAULT, NULL);
 
@@ -5034,7 +5027,6 @@ spl_kmem_thread_fini(void)
 	printf("SPL: spl_free_thread stop: destroying cv and mutex\n");
 	cv_destroy(&spl_free_thread_cv);
 	mutex_destroy(&spl_free_thread_lock);
-	mutex_destroy(&spl_free_lock);
 	cv_destroy(&spl_free_manual_pressure_cv);
 	mutex_destroy(&spl_free_manual_pressure_lock);
 
