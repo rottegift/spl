@@ -1353,7 +1353,8 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 			    vmp->vm_kstat.vk_threads_waiting.value.ui64,
 			    spl_vmem_threads_waiting);
 		extern void spl_free_set_and_wait_pressure(int64_t, boolean_t, clock_t);
-		spl_free_set_and_wait_pressure(size, TRUE, MSEC2NSEC(1));
+		spl_free_set_and_wait_pressure(size, TRUE, USEC2NSEC(500));
+		printf("SPL: %s: pressure %lld delivered\n", __func__, (uint64_t)size);
 		cv_wait(&vmp->vm_cv, &vmp->vm_lock);
 		atomic_dec_64(&spl_vmem_threads_waiting);
 		atomic_dec_64(&vmp->vm_kstat.vk_threads_waiting.value.ui64);

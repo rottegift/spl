@@ -75,13 +75,11 @@ extern volatile unsigned int vm_page_free_count; // will tend to vm_page_free_mi
 static kcondvar_t spl_free_thread_cv;
 static kmutex_t spl_free_thread_lock;
 static boolean_t spl_free_thread_exit;
-static _Atomic int64_t spl_free;
+static volatile _Atomic int64_t spl_free;
 int64_t spl_free_delta_ema;
 
-static int64_t spl_free_manual_pressure = 0;
-static kmutex_t spl_free_manual_pressure_lock;
-static kcondvar_t spl_free_manual_pressure_cv;
-static boolean_t spl_free_fast_pressure = FALSE;
+static volatile _Atomic int64_t spl_free_manual_pressure = 0;
+static volatile _Atomic boolean_t spl_free_fast_pressure = FALSE;
 
 // Start and end address of kernel memory
 extern vm_offset_t virtual_space_start;
@@ -4061,66 +4059,73 @@ spl_free_wrapper(void)
 int64_t
 spl_free_manual_pressure_wrapper(void)
 {
-	cv_broadcast(&spl_free_manual_pressure_cv);
 	return (spl_free_manual_pressure);
 }
 
 void
-spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t wait_time)
+spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t check_interval)
 {
-	mutex_enter(&spl_free_manual_pressure_lock);
-	int64_t previous_highest_pressure = spl_free_manual_pressure;
-	if (new_p > previous_highest_pressure || new_p <= 0)
+	spl_free_fast_pressure = fast;
+	if (new_p > spl_free_manual_pressure || new_p <= 0)
 		spl_free_manual_pressure = new_p;
-	cv_timedwait_hires(&spl_free_manual_pressure_cv,
-	    &spl_free_manual_pressure_lock, wait_time, 0, 0);
-	mutex_exit(&spl_free_manual_pressure_lock);
+	// wait for another thread to reset pressure
+	const uint64_t start = zfs_lbolt();
+	const uint64_t end_by = start + (hz*60);
+	uint64_t now;
+	for  (; spl_free_manual_pressure != 0; ) {
+		mutex_enter(&spl_free_thread_lock);
+		cv_timedwait_hires(&spl_free_thread_cv,
+		    &spl_free_thread_lock, check_interval, 0, 0);
+		mutex_exit(&spl_free_thread_lock);
+	        now = zfs_lbolt();
+		if (now > end_by) {
+			printf("%s: ERROR: timed out after one minute!\n", __func__);
+			break;
+		}
+	}
 }
 
+// routinely called by arc_reclaim_thread() with new_p == 0
 void
 spl_free_set_pressure(int64_t new_p)
 {
-	mutex_enter(&spl_free_manual_pressure_lock);
-	int64_t previous_highest_pressure = spl_free_manual_pressure;
-	if (new_p > previous_highest_pressure || new_p <= 0)
+	if (new_p > spl_free_manual_pressure || new_p <= 0)
 		spl_free_manual_pressure = new_p;
-	mutex_exit(&spl_free_manual_pressure_lock);
+	if (new_p == 0) {
+		spl_free_fast_pressure = FALSE;
+		// wake up both spl_free_thread() to recalculate spl_free
+		// and any spl_free_set_and_wait_pressure() threads
+		cv_broadcast(&spl_free_thread_cv);
+	}
+}
+
+void
+spl_free_set_pressure_both(int64_t new_p, boolean_t fast)
+{
+	spl_free_fast_pressure = fast;
+	if (new_p > spl_free_manual_pressure || new_p <= 0)
+		spl_free_manual_pressure = new_p;
 }
 
 void
 spl_free_set_emergency_pressure(int64_t new_p)
 {
-	mutex_enter(&spl_free_manual_pressure_lock);
-        int64_t previous_highest_pressure = spl_free_manual_pressure;
-	if (new_p > previous_highest_pressure || new_p <= 0)
-		spl_free_manual_pressure = new_p;
 	spl_free_fast_pressure = TRUE;
-	mutex_exit(&spl_free_manual_pressure_lock);
-}
-
-static inline void
-spl_free_set_pressure_atomic(int64_t new_p, boolean_t fast)
-{
-	spl_free_fast_pressure = fast;
-	__c11_atomic_store((_Atomic int64_t *)&spl_free_manual_pressure,
-	    new_p, __ATOMIC_SEQ_CST);
+	if (new_p > spl_free_manual_pressure || new_p <= 0)
+		spl_free_manual_pressure = new_p;
 }
 
 void
 spl_free_set_emergency_pressure_additive(int64_t new_p)
 {
-	mutex_enter(&spl_free_manual_pressure_lock);
-	spl_free_manual_pressure += new_p;
 	spl_free_fast_pressure = TRUE;
-	mutex_exit(&spl_free_manual_pressure_lock);
+	spl_free_manual_pressure += new_p;
 }
 
 void
 spl_free_set_pressure_additive(int64_t new_p)
 {
-	mutex_enter(&spl_free_manual_pressure_lock);
 	spl_free_manual_pressure += new_p;
-	mutex_exit(&spl_free_manual_pressure_lock);
 }
 
 boolean_t
@@ -4129,12 +4134,10 @@ spl_free_fast_pressure_wrapper()
 	return (spl_free_fast_pressure);
 }
 
-inline void
+void
 spl_free_set_fast_pressure(boolean_t state)
 {
-	mutex_enter(&spl_free_manual_pressure_lock);
 	spl_free_fast_pressure = state;
-	mutex_exit(&spl_free_manual_pressure_lock);
 }
 
 boolean_t
@@ -4309,7 +4312,7 @@ spl_free_thread()
 				boolean_t fast = FALSE;
 				if (vm_page_free_wanted > vm_page_free_min / 8)
 					fast = TRUE;
-				spl_free_set_pressure_atomic(-16LL * new_spl_free, fast);
+				spl_free_set_pressure_both(-16LL * new_spl_free, fast);
 			}
 			last_disequilibrium = time_now_seconds;
 		} else if (vm_page_free_wanted > 0) {
@@ -4356,15 +4359,13 @@ spl_free_thread()
 			lowmem = true;
 			recent_lowmem = time_now;
 			last_disequilibrium = time_now_seconds;
-			int64_t previous_highest_pressure = spl_free_manual_pressure;
 			int64_t spec_bytes = (int64_t)vm_page_speculative_count * (int64_t)PAGESIZE;
 			if (vm_page_free_wanted > 0 || new_p > spec_bytes) {
 				// force a stronger reaction from ARC if we are also low on
 				// speculative pages (xnu prefetched file blocks with no clients yet)
 				fast = TRUE;
 			}
-			if (new_p > previous_highest_pressure)
-				spl_free_set_pressure_atomic(new_p, fast);
+			spl_free_set_pressure_both(new_p, fast);
 		} else if (above_min_free_bytes < 0LL && !early_lots_free) {
 			lowmem = true;
 			if (recent_lowmem == 0)
@@ -4635,6 +4636,7 @@ spl_free_thread()
 	spl_free_thread_exit = FALSE;
 	printf("SPL: spl_free_thread_exit set to FALSE " \
 		   "and exiting: cv_broadcasting\n");
+	spl_free_manual_pressure = 0;
 	cv_broadcast(&spl_free_thread_cv);
 	CALLB_CPR_EXIT(&cpr);
 	printf("SPL: %s thread_exit\n", __func__);
@@ -4998,8 +5000,6 @@ spl_kmem_thread_init(void)
 
 	// Initialize the spl_free locks
 	mutex_init(&spl_free_thread_lock, "spl_free_thead_lock", MUTEX_DEFAULT, NULL);
-	mutex_init(&spl_free_manual_pressure_lock, "spl_free_manual_pressure_lock", MUTEX_DEFAULT, NULL);
-	(void) cv_init(&spl_free_manual_pressure_cv, NULL, CV_DEFAULT, NULL);
 
 	kmem_taskq = taskq_create("kmem_taskq", 1, minclsyspri,
 							  300, INT_MAX, TASKQ_PREPOPULATE);
@@ -5027,8 +5027,6 @@ spl_kmem_thread_fini(void)
 	printf("SPL: spl_free_thread stop: destroying cv and mutex\n");
 	cv_destroy(&spl_free_thread_cv);
 	mutex_destroy(&spl_free_thread_lock);
-	cv_destroy(&spl_free_manual_pressure_cv);
-	mutex_destroy(&spl_free_manual_pressure_lock);
 
 	printf("SPL: bsd_untimeout\n");
 	bsd_untimeout(kmem_update,  0);
