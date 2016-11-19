@@ -2064,20 +2064,26 @@ static inline void *
 xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vmflags)
 {
 
+	// we can allocate up to this much in a short time period
+	const uint64_t recent_threshold = 16ULL*1024ULL*1024ULL;
 
-	static volatile uint64_t last_forced_ticks = 0;
-	const uint64_t unstall_threshold = 8;
+	static volatile _Atomic uint64_t recently_allocated = 0;
+
+	static volatile _Atomic uint64_t last_forced_ticks = 0;
 
 	// if we have a long queue on this arena's cv_wait in vmem_xalloc()
 	// then we run the risk of stalling the whole I/O subsystem.  Force
 	// a single allocation here if so, then bounce the others back.
 
+	const uint64_t unstall_threshold = 8;
+
 	if (vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
 		spl_free_set_emergency_pressure(size * unstall_threshold);
-		static volatile uint32_t unstall_waiters = 0;
-		atomic_inc_32(&unstall_waiters);
+		static volatile _Atomic uint32_t unstall_waiters = 0;
+		static volatile _Atomic bool another_processing = false;
+		unstall_waiters++;
 		// note that the unstall waiters can be from different arenas
-		for (; unstall_waiters > 1;) {
+		for (int iter = 0; unstall_waiters > 1; iter++) {
 			// wait on the arena cv
 			mutex_enter(&vmp->vm_lock);
 			(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
@@ -2085,15 +2091,22 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 			// we are likely to have been awakened by a cv_broadcast
 			if (vmp->vm_kstat.vk_threads_waiting.value.ui64 < unstall_threshold)
 				break;
+			if (iter >= 10 && another_processing == false) {
+				another_processing = true;
+				break;
+			}
 			mutex_exit(&vmp->vm_lock);
 			spl_free_set_emergency_pressure(size);
 		}
+		// still have the mutex
 		if (vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
 			// we're the only waiter
 			void *force_m = spl_vmem_malloc_unconditionally(size);
 			atomic_inc_64(&spl_xat_forced);
-			atomic_swap_64(&last_forced_ticks, now_ticks);
-			atomic_dec_32(&unstall_waiters);
+			last_forced_ticks = now_ticks;
+			recently_allocated += size;
+			unstall_waiters--;
+			another_processing = false;
 			mutex_exit(&vmp->vm_lock);
 			return (force_m);
 		} else {
@@ -2104,19 +2117,20 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 			// the last one out of the for loop for this arena will
 			// almost certainly wake up a waiter in xalloc, so the queue
 			// will continue to try to be drained.
-			atomic_dec_32(&unstall_waiters);
+			unstall_waiters--;
+			another_processing = false;
 			cv_signal(&vmp->vm_cv);
 			mutex_exit(&vmp->vm_lock);
-			return (NULL);
+			if (recently_allocated >= recent_threshold)
+				return (NULL);
+			else
+				now_ticks = zfs_lbolt();
 		}
 	}
 
 	static volatile uint64_t recently_asked_for = 0;
 
 	atomic_add_64(&recently_asked_for, size);
-
-	// we can allocate up to this much in a short time period
-	const uint64_t recent_threshold = 16ULL*1024ULL*1024ULL;
 
 	// if this arena has  a queue at the cv_wait in vmem_xalloc() that
 	// is this long, a forced allocation will be efficient.
@@ -2137,26 +2151,21 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 	const uint64_t pushpage_after = ten_second;
 	const uint64_t non_pushpage_after = 3ULL * ten_second;
 
-	static volatile uint64_t recently_allocated = 0;
-
-	uint64_t lft = 0;
-	atomic_swap_64(&lft, last_forced_ticks);
-
 	// wait at least one second from previous force
-	// now is prior to expiration, bail
-	if (now_ticks < lft + one_second) {
+	// unless we haven't allocated over the recent_threshold yet
+
+	if (now_ticks < last_forced_ticks + one_second) {
 		if (recently_allocated >= recent_threshold) {
 			atomic_sub_64(&recently_asked_for, size);
 			return (NULL);
 		} else {
 			// it has been a second, clear out recently_allocated
-			atomic_swap_64(&recently_allocated, 0ULL);
+			recently_allocated = 0;
 		}
 	}
 
-	uint64_t last_success_seconds = 0;
-	atomic_swap_64(&last_success_seconds, spl_xat_lastalloc);
-        uint64_t last_success_ticks = last_success_seconds * 60ULL;
+	const uint64_t last_success_seconds = spl_xat_lastalloc;
+	const uint64_t last_success_ticks = last_success_seconds * 60ULL;
 
 	// if XAT has done any successful allocation in the past
 	// second, don't allocate now unless we have a long queue
@@ -2171,9 +2180,8 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 		}
 	}
 
-	uint64_t lastfree_seconds = 0;
-	atomic_swap_64(&lastfree_seconds, spl_xat_lastfree);
-	uint64_t lastfree_ticks = lastfree_seconds * 60ULL;
+	const uint64_t lastfree_seconds = spl_xat_lastfree;
+	const uint64_t lastfree_ticks = lastfree_seconds * 60ULL;
 
 	// if we have freed in the past second, then bail out
 	// unless there is already a big queue at the cv_wait.
@@ -2190,39 +2198,22 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 
 	// if now is after the appropriate threshold below, allocate
 
-	// grab the alloc|free lock [a]
-	// call the unconditional allocator
-	// wake a single waiter (if any) on the alloc|free condvar
-	// open turnstile controlled by waiters and recently_asked_for
-	// drop alloc|free lock [b]
-
-	// a burst of xat bails can reach the lock (above at [a])
-	// and pile up waiting for the mutex; the burst will be
-	// for no more than 16MiB, since we adjust the turnstile
-	// before [b]
-
 	if ((vmflags & VM_PUSHPAGE) &&
 	    (now_ticks > last_success_ticks + pushpage_after ||
 		recently_allocated < recent_threshold)) {
-		mutex_enter(&vmem_xnu_alloc_free_lock);
-		void *push_m = spl_vmem_malloc_unconditionally(size);
-		cv_signal(&vmem_xnu_alloc_free_cv);
-		atomic_inc_64(&spl_xat_forced);
-		atomic_swap_64(&last_forced_ticks, now_ticks);
-		atomic_add_64(&recently_allocated, size);
+		recently_allocated += size;
+		last_forced_ticks = now_ticks;
 		atomic_sub_64(&recently_asked_for, size);
-		mutex_exit(&vmem_xnu_alloc_free_lock);
+		void *push_m = spl_vmem_malloc_unconditionally(size);
+		atomic_inc_64(&spl_xat_forced);
 		return (push_m);
 	} else if (now_ticks > last_success_ticks + non_pushpage_after ||
 	    recently_allocated < recent_threshold) {
-		mutex_enter(&vmem_xnu_alloc_free_lock);
-		void *norm_m = spl_vmem_malloc_unconditionally(size);
-		cv_signal(&vmem_xnu_alloc_free_cv);
-		atomic_inc_64(&spl_xat_forced);
-		atomic_swap_64(&last_forced_ticks, now_ticks);
-		atomic_add_64(&recently_allocated, size);
+		recently_allocated += size;
+		last_forced_ticks = now_ticks;
 		atomic_sub_64(&recently_asked_for, size);
-		mutex_exit(&vmem_xnu_alloc_free_lock);
+		void *norm_m = spl_vmem_malloc_unconditionally(size);
+		atomic_inc_64(&spl_xat_forced);
 		return (norm_m);
 	}
 
