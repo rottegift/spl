@@ -2408,19 +2408,15 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 	if (!ISP2(size))
 		atomic_inc_64(&spl_bucket_non_pow2_allocs);
 
-	int hb = highbit(size-1);
-
-	if (hb > VMEM_BUCKET_HIBIT) {
-		void *m = vmem_alloc(spl_default_arena, size, vmflags);
-		// wake up arena waiters to let them know there is memory
-		// available
-		if (m != NULL)
-			cv_broadcast(&vmp->vm_cv);
-		return (m);
-	}
+	const int hb = highbit(size-1);
 
 	int bucket = hb - VMEM_BUCKET_LOWBIT;
 
+	// very large allocations go into the 16 MiB bucket
+	if (hb > VMEM_BUCKET_HIBIT)
+		bucket = VMEM_BUCKET_HIBIT - VMEM_BUCKET_LOWBIT;
+
+	// very small allocations go into the 4 kiB bucket
 	if (bucket < 0)
 		bucket = 0;
 
@@ -2697,6 +2693,20 @@ spl_set_bucket_tunable_small_span(uint64_t size)
 	spl_printf_bucket_span_sizes();
 }
 
+static void *
+spl_vmem_default_alloc(vmem_t *vmp, size_t size, int vmflags)
+{
+	extern void *osif_malloc(uint64_t);
+	return(osif_malloc(size));
+}
+
+static void
+spl_vmem_default_free(vmem_t *vmp, void *vaddr, size_t size)
+{
+	extern void osif_free(void *, uint64_t);
+	osif_free(vaddr, size);
+}
+
 vmem_t *
 vmem_init(const char *heap_name,
 		  void *heap_start, size_t heap_size, size_t heap_quantum,
@@ -2743,7 +2753,7 @@ vmem_init(const char *heap_name,
 
 	spl_default_arena = vmem_create("spl_default_arena", // id 1
 	    initial_default_block, 16ULL*1024ULL*1024ULL,
-	    heap_quantum, xnu_alloc_throttled, xnu_free_throttled,
+	    heap_quantum, spl_vmem_default_alloc, spl_vmem_default_free,
 	    spl_default_arena_parent, 16ULL*1024ULL*1024ULL, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
 
 	// create arenas for the VMEM_BUCKETS, id 2 - id 14
