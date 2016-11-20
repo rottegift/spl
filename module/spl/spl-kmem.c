@@ -4418,8 +4418,7 @@ spl_free_thread()
 		if (!reserve_low || early_lots_free || memory_equilibrium || just_alloced) {
 			lowmem = false;
 			emergency_lowmem = false;
-			__c11_atomic_store((_Atomic boolean_t *)&spl_free_fast_pressure, FALSE,
-				__ATOMIC_SEQ_CST);
+			spl_free_fast_pressure = FALSE;
 		}
 
 		if (vm_page_speculative_count > 0) {
@@ -4428,13 +4427,11 @@ spl_free_thread()
 			// consumer
 			if (vm_page_speculative_count / 4 + vm_page_free_count > vm_page_free_min) {
 				emergency_lowmem = false;
-				__c11_atomic_store((_Atomic boolean_t *)&spl_free_fast_pressure, FALSE,
-				    __ATOMIC_SEQ_CST);
+				spl_free_fast_pressure = FALSE;
 			}
 			if (vm_page_speculative_count / 2 + vm_page_free_count > vm_page_free_min) {
 				lowmem = false;
-				__c11_atomic_store((_Atomic boolean_t *)&spl_free_fast_pressure, FALSE,
-				    __ATOMIC_SEQ_CST);
+				spl_free_fast_pressure = FALSE;
 			}
 		}
 
