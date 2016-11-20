@@ -4596,14 +4596,12 @@ spl_free_thread()
 		// spl_free_lock is held.
 
 		if (spl_free_is_negative) {
-			static volatile uint32_t negatives_since_last_kick = 0;
+			static volatile _Atomic uint32_t negatives_since_last_kick = 0;
 
-			atomic_inc_32(&negatives_since_last_kick);
-
-			if (negatives_since_last_kick > 8) {
+			if (negatives_since_last_kick++ > 8) {
 				if (spl_maybe_send_large_pressure(time_now, 360, true) ||
 				    spl_maybe_send_large_pressure(time_now, 60, false)) {
-					atomic_sub_32(&negatives_since_last_kick, negatives_since_last_kick);
+					negatives_since_last_kick = 0;
 				}
 			}
 		}
