@@ -4143,13 +4143,13 @@ spl_free_set_fast_pressure(boolean_t state)
 boolean_t
 spl_maybe_send_large_pressure(uint64_t now, uint64_t minutes, boolean_t full)
 {
-	static volatile uint64_t  spl_last_large_pressure = 0;
+	static volatile _Atomic uint64_t  spl_last_large_pressure = 0;
 	const uint64_t interval_ticks = minutes * 60ULL * (uint64_t)hz;
 
 	if (spl_last_large_pressure + interval_ticks > now)
 		return (false);
 
-	atomic_swap_64(&spl_last_large_pressure, now);
+	spl_last_large_pressure = now;
 
 	const int64_t sixteenth_physmem = (int64_t)real_total_memory / 16LL;
 	const int64_t sixtyfourth_physmem = sixteenth_physmem / 4LL;
