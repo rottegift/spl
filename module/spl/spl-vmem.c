@@ -2335,8 +2335,15 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			// may have changed during the cv_timedwait_hires at the top
 			// of the for loop, including going to zero.
 			//
+			static volatile _Atomic uint16_t bailers = 0;
+			bailers++;
+			if (bailers > 1) {
+				bailers--;
+				continue;
+			}
 			atomic_inc_64(&spl_xat_bailed);
 			void *b = xnu_allocate_throttled_bail(now, vmp, size, vmflag);
+			bailers--;
 			if (b != NULL) {
 				atomic_swap_64(&spl_xat_lastalloc, now / hz);
 				// wake up waiters on the arena lock,
