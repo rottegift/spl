@@ -2273,6 +2273,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 
 	if (vmflag & VM_NOSLEEP) {
 		spl_free_set_emergency_pressure(2LL * (int64_t)size);
+		kpreempt(KPREEMPT_SYNC); /* cheating a bit, but not really waiting */
 		void *p = spl_vmem_malloc_if_no_pressure(size);
 		if (p != NULL) {
 			atomic_inc_64(&spl_xat_late_success_nosleep);
@@ -2283,6 +2284,21 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		// if p == NULL, then there will be an increment in the fail kstat
 		return (p);
 	}
+
+	/*
+	 * Loop for a while trying to satisfy VM_SLEEP allocations.
+	 *
+	 * If we are able to allocate memory, then return the pointer.
+	 *
+	 * We return NULL if some other thread's activity has caused
+	 * sufficient memory to appear in this arena that we can satisfy
+	 * the allocation.
+	 *
+	 * We call xnu_allocate_throttle_bail() after a few milliseconds of waiting;
+	 * it will either return a pointer to newly allocated memory or NULL.  We
+	 * return the result.
+	 *
+	 */
 
 	static volatile _Atomic uint32_t waiters = 0;
 
