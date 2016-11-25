@@ -2819,10 +2819,26 @@ vmem_init(const char *heap_name,
 
 	static char initial_default_block[16ULL*1024ULL*1024ULL] __attribute__((aligned(4096))) = { 0 };
 
+	// The default arena is very low-bandwidth; it supplies the initial large
+	// allocation for the heap arena below, and it serves as the parent of the
+	// vmem_metadata arena.   It will typically do only 2 or 3 parent_alloc calls
+	// (to spl_vmem_default_alloc) in total.
+
 	spl_default_arena = vmem_create("spl_default_arena", // id 1
 	    initial_default_block, 16ULL*1024ULL*1024ULL,
 	    heap_quantum, spl_vmem_default_alloc, spl_vmem_default_free,
 	    spl_default_arena_parent, 16ULL*1024ULL*1024ULL, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
+
+	// The bucket arenas satisfy allocations & frees from the bucket heap
+	// that are dispatched to the bucket whose power-of-two label is the
+	// smallest allocation that vmem_bucket_allocate will ask for.
+	//
+	// The bucket arenas in turn exchange memory with XNU's allocator/freer in
+	// large spans (> 1MiB).
+	//
+	// Segregating by size constrains internal fragmentation within the bucket and
+	// provides kstat.vmem visiblity and span-size policy to be applied to particular
+	// buckets (notably the 128k one).
 
 	// create arenas for the VMEM_BUCKETS, id 2 - id 14
 	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
@@ -2894,12 +2910,18 @@ vmem_init(const char *heap_name,
 
 	// spl_heap_arena, the bucket heap, is the primary interface to the vmem system
 
+	// all arenas not rooted to vmem_metadata will be rooted to spl_heap arena.
+
 	spl_heap_arena = vmem_create("bucket_heap", // id 15
 	    NULL, 0, heap_quantum,
 	    vmem_bucket_alloc, vmem_bucket_free, spl_default_arena_parent, 0,
 	    VM_SLEEP);
 
-	// add a fixed-sized allocation to spl_heap_arena
+	// add a fixed-sized allocation to spl_heap_arena; this reduces the
+	// need to talk to the bucket arenas by a substantial margin
+	// (kstat.vmem.vmem.bucket_heap.{alloc+free} is much greater than
+	// kstat.vmem.vmem.bucket_heap.parent_{alloc+free}, and improves with
+	// increasing initial fixed allocation size.
 
 	const size_t mib = 1024ULL * 1024ULL;
 	const size_t gib = 1024ULL * mib;
@@ -2922,14 +2944,17 @@ vmem_init(const char *heap_name,
 
 	spl_heap_arena_initial_alloc_size = resv_size;
 
+	// kstat.vmem.vmem.heap : kmem_cache_alloc() and similar calls
+	// to handle in-memory datastructures other than arc and zio buffers.
+
 	heap = vmem_create(heap_name,  // id 16
 	    NULL, 0, heap_quantum,
 	    vmem_alloc, vmem_free, spl_heap_arena, 0,
 	    VM_SLEEP);
 
-		// Root all the low bandwidth metadata arenas off the reserve arena.
-	// The allocations will all be 32 kiB or larger, and are only on the
-	// order of 24 MiB.
+	// Root all the low bandwidth metadata arenas to the default arena.
+	// The vmem_metadata allocations will all be 32 kiB or larger,
+	// and the total allocation will generally cap off around 24 MiB.
 
 	vmem_metadata_arena = vmem_create("vmem_metadata", // id 17
 	    NULL, 0, heap_quantum, vmem_alloc, vmem_free, spl_default_arena,
