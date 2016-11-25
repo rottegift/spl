@@ -2613,14 +2613,18 @@ vmem_bucket_free(vmem_t *vmp, void *vaddr, size_t size)
 {
 	int hb = highbit(size-1);
 
-	if (hb > VMEM_BUCKET_HIBIT) {
-		vmem_free(spl_default_arena, vaddr, size);
-	} else {
-		int bucket = hb - VMEM_BUCKET_LOWBIT;
-		if (bucket < 0)
-			bucket = 0;
-		vmem_free(vmem_bucket_arena[bucket], vaddr, size);
-	}
+	int bucket = hb - VMEM_BUCKET_LOWBIT;
+
+	// very large allocations came from the 16 Mib bucket
+	if (hb > VMEM_BUCKET_HIBIT)
+		bucket = VMEM_BUCKET_HIBIT - VMEM_BUCKET_LOWBIT;
+
+	// very small allocations came from the 4 kiB bucket
+	if (bucket < 0)
+		bucket = 0;
+
+	vmem_free(vmem_bucket_arena[bucket], vaddr, size);
+
 	// wake up arena waiters to let them try an alloc
 	cv_broadcast(&vmp->vm_cv);
 }
