@@ -2449,7 +2449,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// Concurrent NOSLEEP-et-al is fine, however.
 			buckets_busy_allocating |= bucket_bit;
 			/*
-			 * could be written as:
+			 * This |= could be written as:
 			 * __c11_atomic_fetch_or(&buckets_busy_allocating,
 			 * bucket_bit, __ATOMIC_SEQ_CST);
 			 * with the &= down below being written as
@@ -2464,21 +2464,24 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			 * inersting cmpxchgws, while all optimized versions, and the
 			 * non-optimized version using the plainly-written version, reorder
 			 * the "orw regr, memory" and "andw register, memory" (these are atomic
-			 * RMW operations in x86-64 when the memory is 32-bit aligned) so that
+			 * RMW operations in x86-64 when the memory is naturally aligned) so that
 			 * the strong memory model x86-64 promise that later loads see the
 			 * results of earlier stores.
 			 *
 			 * clang+llvm simply are good at optimizing _Atomics and
 			 * the optimized code differs only in line numbers and
 			 * among all three approaches (as plainly written, using
-			 * the __c11_atomic_fetch_X, and
+			 * the __c11_atomic_fetch_{or,and} with sequential consistency,
+			 * or when compiling with at least -O optimization so an
+			 * atomic_or_16(&buckets_busy_allocating) built with GCC intrinsics
+			 * is actually inlined rather than a function call).
 			 *
 			 */
 			break;
 		}
 		if (vmem_canalloc_atomic(bvmp, size)) {
-			// We can probably vmem_alloc(bvmp, size, vmflags)
-			// at worst case it will give us a NULL and we will
+			// We can probably vmem_alloc(bvmp, size, vmflags).
+			// At worst case it will give us a NULL and we will
 			// end up on the vmp's cv_wait.
 			//
 			// We can have threads with different bvmp
@@ -2489,7 +2492,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// results are reflected in vmem_canalloc_atomic(bvmp, ...)
 			//
 			// We do this by atomically turning on the corresponding bit
-			// in buckets_busy_allocating if it is not set, then
+			// in buckets_busy_allocating if it is not already set, then
 			// breaking out of the loop
 			if ((buckets_busy_allocating & bucket_bit) == 0) {
 				buckets_busy_allocating |= bucket_bit;
@@ -2505,7 +2508,11 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// test being true.
 			buckets_busy_allocating |= bucket_bit;
 			// The vmem_alloc() below is very likely to trigger an
-			// allocation request to xnu for this bucket.
+			// allocation request to xnu for this bucket, so the
+			// bit may be set for up to milliseconds.  Keeping
+			// allocations to the same bucket in this loop reduces
+			// trips through the "vk_excess" and and "vk_wait" paths,
+			// and might avoid a trip through vmem_alloc(bvmp, ...) altogether.
 			break;
 		}
 		// The bucket is already allocating, or the bucket needs
@@ -2517,13 +2524,17 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 		mutex_enter(&vmp->vm_lock);
 		(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
 		    USEC2NSEC(500*(waiters+1)), 0, 0);
-		// We may have exited because of a signal/broadcast.
+		// We may have exited because of a signal/broadcast,
+		// or just timed out.  Either way, recheck memory.
 		if (vmem_canalloc(vmp, size)) {
 			// Another thread may has caused memory to become
 			// available in our own arena; when we have returned to
 			// vmem_xalloc(), it will almost certainly do a "goto do_alloc;",
 			// and at worst we end up in the arena cv_wait()
 			// with kstat.vmem.vmem.bucket_heap.wait incremented.
+			// However, we don't want to wake up other sleepers
+			// on vmp->vm_cv, as we don't know at this point whether
+			// they would make any useful progress.
 			waiters--;
 			mutex_exit(&vmp->vm_lock);
 			return(NULL);
@@ -2553,6 +2564,11 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 	 * Except clang+llvm DTRT because of _Atomic, could be written as:
 	 *__c11_atomic_fetch_and(&buckets_busy_allocating,
 	 *~bucket_bit, __ATOMIC_SEQ_CST);
+	 *
+	 * On processors with more relaxed memory models, it might be
+	 * more efficient to do so with release semantics here, and
+	 * in the atomic |= above, with acquire semantics in the bit tests,
+	 * but on the other hand it may be hard to do better than clang+llvm.
 	 */
 
 	buckets_busy_allocating &= ~bucket_bit;
