@@ -2375,8 +2375,8 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	static volatile _Atomic bool is_freeing = false;
 
 	a_waiters++; // generates "lock incl ..."
-	mutex_enter(&vmem_xnu_alloc_free_lock);
 	for (uint32_t iter = 0; a_waiters > 1; iter++) {
+		mutex_enter(&vmem_xnu_alloc_free_lock);
 		// there is a queue waiting for the mutex, sleep
 		// this gives up the mutex, admitting another through
 		// the mutex_enter->atomic_dec_32 path above
@@ -2384,6 +2384,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
 		    &vmem_xnu_alloc_free_lock,
 		    wait_time, 0, 0);
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 		if (iter > a_waiters && is_freeing == false) {
 			is_freeing = true;
 			break;
@@ -2395,7 +2396,6 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	atomic_swap_64(&spl_xat_lastfree,  now / hz);
 	is_freeing = false;
 	cv_broadcast(&vmem_xnu_alloc_free_cv);
-	mutex_exit(&vmem_xnu_alloc_free_lock);
 	// since we just gave back xnu enough to satisfy an allocation
 	// in at least the smaller buckets, let's wake up anyone in
 	// the cv_wait() in vmem_xalloc([bucket_#], ...)
