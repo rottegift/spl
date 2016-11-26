@@ -1074,6 +1074,8 @@ spl_vmem_malloc_unconditionally(size_t size)
 static void *
 spl_vmem_malloc_if_no_pressure(size_t size)
 {
+	// The mutex serializes concurrent callers, providing time for
+	// the variables in spl_vmem_xnu_useful_bytes_free() to be updated.
 	mutex_enter(&vmem_xnu_alloc_free_lock);
 	if (spl_vmem_xnu_useful_bytes_free() > (MAX(size,16ULL*1024ULL*1024ULL))) {
 		extern void *osif_malloc(uint64_t);
@@ -2326,15 +2328,30 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		} else {
 			mutex_exit(&vmp->vm_lock);
 		}
-		void *a = spl_vmem_malloc_if_no_pressure(size);
-		if (a != NULL) {
-			atomic_inc_64(&spl_xat_late_success);
-			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
-			waiters--;
-			// Wake up all waiters on the bucket arena locks,
-			// since the system apparently has memory again.
-			vmem_bucket_wake_all_waiters();
-			return (a);
+		// We may be here because of a broadcast to &vmp->vm_cv,
+		// causing xnu to schedule all the sleepers in priority-weighted FIFO
+		// order.  Because of the mutex_exit(), the sections below here may
+		// be entered concurrently.
+
+		// spl_vmem_malloc_if_no_pressure does a mutex, so avoid calling it
+		// unless there is a chance it will succeed.
+		if (spl_vmem_xnu_useful_bytes_free() > (MAX(size,16ULL*1024ULL*1024ULL))) {
+			void *a = spl_vmem_malloc_if_no_pressure(size);
+			if (a != NULL) {
+				atomic_inc_64(&spl_xat_late_success);
+				atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+				waiters--;
+				// Wake up all waiters on the bucket arena locks,
+				// since the system apparently has memory again.
+				vmem_bucket_wake_all_waiters();
+				return (a);
+			} else {
+				// Probably vm_page_free_count changed while we were
+				// in the mutex queue in spl_vmem_malloc_if_no_pressure().
+				// There is therefore no point in doing the bail-out check
+				// below, so go back to the top of the for loop.
+				continue;
+			}
 		}
 		if ((iter >= 20 &&
 			iter >= 20 * (int)waiters &&
