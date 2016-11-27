@@ -2256,12 +2256,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		vmem_bucket_wake_all_waiters();
 		return (m);
 	} else {
-		extern boolean_t spl_maybe_send_large_pressure(uint64_t, uint64_t, boolean_t);
-		// Try to kick arc.  If the full kick is refused because a kick
-		// has been administered too few minutes ago, try a gentler kick instead.
 		spl_free_set_emergency_pressure((int64_t)size);
-		if (!spl_maybe_send_large_pressure(now, 60, true))
-			(void)spl_maybe_send_large_pressure(now, 10, false);
 	}
 
 	const uint64_t force_alloc_deadline = (spl_xat_lastalloc + 60) * hz;
