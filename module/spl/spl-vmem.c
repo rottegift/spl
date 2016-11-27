@@ -2387,11 +2387,8 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			// open turnstile after having bailed, rather than before
 			waiters--;
 			return (b);
-		} else if (iter == 2 || ((iter % 8) == 0 && iter > 0)) {
-			// set pressure after ~ 1 ms
-			// and then every roughly 4 ms
-			extern void spl_free_set_emergency_pressure_additive(int64_t);
-			spl_free_set_emergency_pressure(size * (iter / 2));
+		} else if (iter == 20 || ((iter % 8) == 0 && iter > 20)) {
+			spl_free_set_emergency_pressure(size * (iter / 8));
 			atomic_inc_64(&spl_xat_pressured);
 		}
 	}
