@@ -2405,30 +2405,59 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	// Serialize behind a (short) spin-sleep delay, giving
 	// xnu time to do freelist management and
 	// PT teardowns
+
+	// In the usual case there is only one thread in this function,
+	// so we proceed waitlessly to osif_free().
+
+	// When there are multiple threads here, we delay the 2nd and later.
+
+	// Explict race:
+	// The osif_free() is not protected by the vmem_xnu_alloc_free_lock
+	// mutex; that is just used for implementing the delay.   Consequently,
+	// the waiters on the same lock in spl_vmem_malloc_if_no_pressure may
+	// falsely see too small a value for vm_page_free_count.   We don't
+	// care in part because xnu performs poorly when doing
+	// free-then-allocate anwyay.
+
+	// a_waiters gauges the loop exit checking and sleep duration;
+	// it is a count of the number of threads trying to do work
+	// in this function.
 	static volatile _Atomic uint32_t a_waiters = 0;
+
+	// is_freeing protects the osif_free() call; see comment below
 	static volatile _Atomic bool is_freeing = false;
 
 	a_waiters++; // generates "lock incl ..."
 	for (uint32_t iter = 0; a_waiters > 1; iter++) {
-		mutex_enter(&vmem_xnu_alloc_free_lock);
-		// there is a queue waiting for the mutex, sleep
-		// this gives up the mutex, admitting another through
-		// the mutex_enter->atomic_dec_32 path above
-		clock_t wait_time = USEC2NSEC(90UL + (10UL * MAX(a_waiters,1UL)));
-		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
-		    &vmem_xnu_alloc_free_lock,
-		    wait_time, 0, 0);
-		mutex_exit(&vmem_xnu_alloc_free_lock);
+		// If are growing old in this loop, then see if
+		// anyone else is still in osif_free.  If not, we can exit.
 		if (iter > a_waiters && is_freeing == false) {
 			is_freeing = true;
 			break;
 		}
+		// There is a queue waiting for the mutex, sleep.
+		mutex_enter(&vmem_xnu_alloc_free_lock);
+		clock_t wait_time = USEC2NSEC(90UL + (10UL * MAX(a_waiters,1UL)));
+		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
+		    &vmem_xnu_alloc_free_lock,
+		    wait_time, 0, 0);
+		// We may have been awakened by a cv_broadcast or by
+		// a timeout.   If we are now the only waiter, we will
+		// simply exit the loop after the mutex drop.
+		// However, if we are in a gang of awakened waiters,
+		// then only one may exit, and this is decided by xnu's
+		// wake-and-get-mutex order, which is hignly fair.
+		mutex_exit(&vmem_xnu_alloc_free_lock);
 	}
-	a_waiters--;
+	// If there is more than one thread in this function, osif_free() is
+	// protected by is_freeing.   Release it after the osif_free()
+	// call has been made and the lastfree bookkeeping has been done.
 	osif_free(vaddr, size);
 	uint64_t now = zfs_lbolt();
 	atomic_swap_64(&spl_xat_lastfree,  now / hz);
 	is_freeing = false;
+	a_waiters--;
+	// Schedule all other threads in this function.
 	cv_broadcast(&vmem_xnu_alloc_free_cv);
 	// since we just gave back xnu enough to satisfy an allocation
 	// in at least the smaller buckets, let's wake up anyone in
