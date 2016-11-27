@@ -1348,17 +1348,23 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		atomic_inc_64(&vmp->vm_kstat.vk_wait.value.ui64);
 		atomic_inc_64(&vmp->vm_kstat.vk_threads_waiting.value.ui64);
 		atomic_inc_64(&spl_vmem_threads_waiting);
-		if (spl_vmem_threads_waiting > 0)
+		if (spl_vmem_threads_waiting > 0) {
 			printf("SPL: %s: vmem waiting for %lu sized alloc for %s, "
 			    "waiting threads %llu, total threads waiting = %llu\n",
 			    __func__, size, vmp->vm_name,
 			    vmp->vm_kstat.vk_threads_waiting.value.ui64,
 			    spl_vmem_threads_waiting);
-		extern void spl_free_set_and_wait_pressure(int64_t, boolean_t, clock_t);
-		mutex_exit(&vmp->vm_lock);
-		spl_free_set_and_wait_pressure(size, TRUE, USEC2NSEC(500));
-		printf("SPL: %s: pressure %lld delivered\n", __func__, (uint64_t)size);
-		mutex_enter(&vmp->vm_lock);
+			extern int64_t spl_free_set_and_wait_pressure(int64_t, boolean_t, clock_t);
+			extern int64_t spl_free_manual_pressure_wrapper(void);
+			mutex_exit(&vmp->vm_lock);
+			spl_free_set_pressure(0); // release other waiting threads
+			int64_t target_pressure = size * spl_vmem_threads_waiting;
+			int64_t delivered_pressure = spl_free_set_and_wait_pressure(target_pressure,
+			    TRUE, USEC2NSEC(500));
+			printf("SPL: %s: pressure %lld targeted, %lld delivered\n",
+			    __func__, target_pressure, delivered_pressure);
+			mutex_enter(&vmp->vm_lock);
+		}
 		cv_wait(&vmp->vm_cv, &vmp->vm_lock);
 		atomic_dec_64(&spl_vmem_threads_waiting);
 		atomic_dec_64(&vmp->vm_kstat.vk_threads_waiting.value.ui64);

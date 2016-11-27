@@ -4062,9 +4062,12 @@ spl_free_manual_pressure_wrapper(void)
 	return (spl_free_manual_pressure);
 }
 
-void
+int64_t
 spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t check_interval)
 {
+
+	int64_t snapshot_pressure = 0;
+
 	spl_free_fast_pressure = fast;
 	if (new_p > spl_free_manual_pressure || new_p <= 0)
 		spl_free_manual_pressure = new_p;
@@ -4073,6 +4076,7 @@ spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t check_inte
 	const uint64_t end_by = start + (hz*60);
 	uint64_t now;
 	for  (; spl_free_manual_pressure != 0; ) {
+		snapshot_pressure = spl_free_manual_pressure;
 		mutex_enter(&spl_free_thread_lock);
 		cv_timedwait_hires(&spl_free_thread_cv,
 		    &spl_free_thread_lock, check_interval, 0, 0);
@@ -4083,6 +4087,7 @@ spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t check_inte
 			break;
 		}
 	}
+	return (snapshot_pressure);
 }
 
 // routinely called by arc_reclaim_thread() with new_p == 0
