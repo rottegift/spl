@@ -1057,7 +1057,7 @@ spl_vmem_malloc_unconditionally_unlocked(size_t size)
 {
 	extern void *osif_malloc(uint64_t);
 	atomic_inc_64(&spl_vmem_unconditional_allocs);
-	atomic_inc_64(&spl_vmem_unconditional_alloc_bytes);
+	atomic_add_64(&spl_vmem_unconditional_alloc_bytes, size);
 	return(osif_malloc(size));
 }
 
