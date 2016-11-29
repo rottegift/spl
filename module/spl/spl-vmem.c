@@ -2470,6 +2470,11 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 	if (!ISP2(size))
 		atomic_inc_64(&spl_bucket_non_pow2_allocs);
 
+	// For VMEM_BUCKET_HIBIT == 12,
+	// vmem_bucket_arena[n] holds allocations from 2^[n+11]+1 to  2^[n+12],
+	// so for [n] = 0, 2049-4096, for [n]=5 65537-131072, for [n]=7 (256k+1)-512k
+
+	// set hb: 512k == 19, 256k+1 == 19, 256k == 18, ...
 	const int hb = highbit(size-1);
 
 	int bucket = hb - VMEM_BUCKET_LOWBIT;
@@ -2881,13 +2886,20 @@ vmem_init(const char *heap_name,
 	// Segregating by size constrains internal fragmentation within the bucket and
 	// provides kstat.vmem visiblity and span-size policy to be applied to particular
 	// buckets (notably the 128k one).
+	//
+	// For VMEM_BUCKET_HIBIT == 12,
+	// vmem_bucket_arena[n] holds allocations from 2^[n+11]+1 to  2^[n+12],
+	// so for [n] = 0, 2049-4096, for [n]=5 65537-131072, for [n]=7 (256k+1)-512k
+	//
+	// so "kstat.vmvm.vmem.bucket_1048576" should be read as the bucket arena containing
+	// allocations 1 MiB and smaller, but larger than 512 kiB.
 
 	// create arenas for the VMEM_BUCKETS, id 2 - id 14
 	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
-		const uint64_t bucket_smallest_size = (1ULL << (uint64_t)i);
+		const uint64_t bucket_largest_size = (1ULL << (uint64_t)i);
 		char *buf = vmem_alloc(spl_default_arena, VMEM_NAMELEN + 21, VM_SLEEP);
 		(void) snprintf(buf, VMEM_NAMELEN + 20, "%s_%llu",
-		    "bucket", bucket_smallest_size);
+		    "bucket", bucket_largest_size);
 		printf("SPL: %s creating arena %s (i == %d)\n", __func__, buf, i);
 		extern uint64_t real_total_memory;
 		if (real_total_memory > 0) {
@@ -2928,7 +2940,7 @@ vmem_init(const char *heap_name,
 			// The 64k bucket is typically very low bandwidth and often holds just
 			// one or two spans thanks to qcaching so does not need to be large.
 			minimum_allocsize = MAX(spl_bucket_tunable_small_span,
-			    bucket_smallest_size * 2);
+			    bucket_largest_size * 2);
 			break;
 		default:
 			// 16 MiB has proven to be a decent choice, with surprisingly
@@ -2939,7 +2951,7 @@ vmem_init(const char *heap_name,
 			// not be very worthwhile), the 64k bucket (see above), and the
 			// 2 MiB bucket (which will typically occupy only one span anyway).
 			minimum_allocsize = MAX(spl_bucket_tunable_large_span,
-			    bucket_smallest_size * 2);
+			    bucket_largest_size * 2);
 			break;
 		}
 		printf("SPL: %s setting bucket %d (%d) to size %llu\n",
