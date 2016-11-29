@@ -2940,7 +2940,7 @@ vmem_init(const char *heap_name,
 			// The 64k bucket is typically very low bandwidth and often holds just
 			// one or two spans thanks to qcaching so does not need to be large.
 			minimum_allocsize = MAX(spl_bucket_tunable_small_span,
-			    bucket_largest_size * 2);
+			    bucket_largest_size * 4);
 			break;
 		default:
 			// 16 MiB has proven to be a decent choice, with surprisingly
@@ -2951,7 +2951,7 @@ vmem_init(const char *heap_name,
 			// not be very worthwhile), the 64k bucket (see above), and the
 			// 2 MiB bucket (which will typically occupy only one span anyway).
 			minimum_allocsize = MAX(spl_bucket_tunable_large_span,
-			    bucket_largest_size * 2);
+			    bucket_largest_size * 4);
 			break;
 		}
 		printf("SPL: %s setting bucket %d (%d) to size %llu\n",
