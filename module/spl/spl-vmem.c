@@ -413,7 +413,8 @@ uint64_t spl_xat_lastalloc = 0;
 uint64_t spl_xat_lastfree = 0;
 uint64_t spl_xat_forced = 0;
 uint64_t spl_xat_memory_appeared = 0;
-uint64_t spl_xat_lost_canalloc = 0;
+uint64_t spl_vba_memory_appeared = 0;
+uint64_t spl_vba_parent_memory_appeared = 0;
 
 // bucket minimum span size tunables
 uint64_t spl_bucket_tunable_large_span = 0;
@@ -2055,6 +2056,38 @@ vmem_qcache_reap(vmem_t *vmp)
 			kmem_cache_reap_now(vmp->vm_qcache[i]);
 }
 
+/* given a size, return the appropriate vmem_bucket_arena[] entry */
+
+static inline uint16_t
+vmem_bucket_number(size_t size)
+{
+	// For VMEM_BUCKET_HIBIT == 12,
+        // vmem_bucket_arena[n] holds allocations from 2^[n+11]+1 to  2^[n+12],
+        // so for [n] = 0, 2049-4096, for [n]=5 65537-131072, for [n]=7 (256k+1)-512k
+
+        // set hb: 512k == 19, 256k+1 == 19, 256k == 18, ...
+        const int hb = highbit(size-1);
+
+        int bucket = hb - VMEM_BUCKET_LOWBIT;
+
+        // very large allocations go into the 16 MiB bucket
+        if (hb > VMEM_BUCKET_HIBIT)
+                bucket = VMEM_BUCKET_HIBIT - VMEM_BUCKET_LOWBIT;
+
+        // very small allocations go into the 4 kiB bucket
+        if (bucket < 0)
+                bucket = 0;
+
+	return (bucket);
+}
+
+static inline vmem_t *
+vmem_bucket_arena_by_size(size_t size)
+{
+	uint16_t bucket = vmem_bucket_number(size);
+
+        return(vmem_bucket_arena[bucket]);
+}
 
 static inline void
 vmem_bucket_wake_all_waiters(void)
@@ -2072,8 +2105,11 @@ vmem_bucket_wake_all_waiters(void)
  * stuck waiting for an allocation for a long time
  */
 static inline void *
-xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vmflags)
+xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, int vmflags)
 {
+
+	// caller will be a bucket arena looking for memory
+	// vmp will be spl_default_arena_parent, which is just a placeholder.
 
 	// we can allocate up to this much in a short time period
 	const int32_t recent_threshold = 16ULL*1024ULL*1024ULL;
@@ -2094,7 +2130,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 
 	const int64_t unstall_threshold = 8;
 
-	if (vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
+	if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
 		spl_free_set_emergency_pressure((int64_t)size * unstall_threshold);
 		static volatile _Atomic uint32_t unstall_waiters = 0;
 		static volatile _Atomic bool another_processing = false;
@@ -2102,21 +2138,21 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 		// note that the unstall waiters can be from different arenas
 		for (int iter = 0; unstall_waiters > 1; iter++) {
 			// wait on the arena cv
-			mutex_enter(&vmp->vm_lock);
-			(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
+			mutex_enter(&calling_vmp->vm_lock);
+			(void) cv_timedwait_hires(&calling_vmp->vm_cv, &calling_vmp->vm_lock,
 			    USEC2NSEC(500UL * MAX(unstall_waiters,1UL)), 0, 0);
 			// we are likely to have been awakened by a cv_broadcast
-			if (vmp->vm_kstat.vk_threads_waiting.value.ui64 < unstall_threshold)
+			if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 < unstall_threshold)
 				break;
 			if (iter >= 10 && another_processing == false) {
 				another_processing = true;
 				break;
 			}
-			mutex_exit(&vmp->vm_lock);
+			mutex_exit(&calling_vmp->vm_lock);
 			spl_free_set_emergency_pressure((int64_t)size);
 		}
 		// still have the mutex
-		if (vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
+		if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
 			// we're the only waiter
 			void *force_m = spl_vmem_malloc_unconditionally(size);
 			atomic_inc_64(&spl_xat_forced);
@@ -2124,7 +2160,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 			recently_allocated += size;
 			unstall_waiters--;
 			another_processing = false;
-			mutex_exit(&vmp->vm_lock);
+			mutex_exit(&calling_vmp->vm_lock);
 			alloc_bytes_in_flight -= size;
 			return (force_m);
 		} else {
@@ -2137,8 +2173,8 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 			// will continue to try to be drained.
 			unstall_waiters--;
 			another_processing = false;
-			cv_signal(&vmp->vm_cv);
-			mutex_exit(&vmp->vm_lock);
+			cv_signal(&calling_vmp->vm_cv);
+			mutex_exit(&calling_vmp->vm_lock);
 			if (recently_allocated >= recent_threshold) {
 				alloc_bytes_in_flight -= size;
 				return (NULL);
@@ -2155,7 +2191,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 	// deny this thread entry unless we have a long queue at the arena cv_wait
 
 	if (alloc_bytes_in_flight > recent_threshold) {
-		if (vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
+		if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
 			alloc_bytes_in_flight -= size;
                         return (NULL);
 		}
@@ -2189,7 +2225,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 	// satisfy this one.
 
 	if (now_ticks < last_success_ticks + one_second) {
-		if (vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
+		if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
 			alloc_bytes_in_flight -= size;
 			return (NULL);
 		}
@@ -2205,7 +2241,7 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 	// which XAT can allocate non-forcibly soon enough.
 
 	if (now_ticks < lastfree_ticks + one_second) {
-		if (vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
+		if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
 			alloc_bytes_in_flight -= size;
 			return (NULL);
 		}
@@ -2238,8 +2274,14 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *vmp, size_t size, int vm
 }
 
 static void *
-xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
+xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 {
+
+	// the caller is one of the bucket arenas.
+	// null_vmp will be spl_default_arena_parent, which is just a placeholder.
+
+	vmem_t *bvmp = vmem_bucket_arena_by_size(size);
+
 	if (!ISP2(size))
 		atomic_inc_64(&spl_xat_non_pow2_allocs);
 
@@ -2274,7 +2316,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		// available in the arena; let waiters on other bucket arenas
 		// continue sleeping.
 		atomic_inc_64(&spl_xat_forced);
-		cv_broadcast(&vmp->vm_cv);
+		cv_broadcast(&bvmp->vm_cv);
 		return (p);
 	}
 
@@ -2284,7 +2326,7 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		void *p = spl_vmem_malloc_if_no_pressure(size);
 		if (p != NULL) {
 			atomic_inc_64(&spl_xat_late_success_nosleep);
-			cv_broadcast(&vmp->vm_cv);
+			cv_broadcast(&bvmp->vm_cv);
 			if (now > hz)
 				atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 		}
@@ -2312,22 +2354,22 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 	waiters++;
 	for (int iter = 0; ; iter++) {
 		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
-		mutex_enter(&vmp->vm_lock);
-		(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
+		mutex_enter(&bvmp->vm_lock);
+		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
 		    wait_time, 0, 0);
 		// still under mutex
 		now = zfs_lbolt();
-		if (vmem_canalloc(vmp, size)) {
+		if (vmem_canalloc(bvmp, size)) {
 			atomic_inc_64(&spl_xat_memory_appeared);
 			// Memory has appeared thanks to another thread.
 			// Wake up anything waiting on the arena cv in vmem_xalloc().
 			waiters--;
 			// Once we return, vmem_xalloc() will immediately
 			// enter the mutex, and will quickly "goto do_alloc;".
-			mutex_exit(&vmp->vm_lock);
+			mutex_exit(&bvmp->vm_lock);
 			return(NULL);
 		} else {
-			mutex_exit(&vmp->vm_lock);
+			mutex_exit(&bvmp->vm_lock);
 		}
 		// We may be here because of a broadcast to &vmp->vm_cv,
 		// causing xnu to schedule all the sleepers in priority-weighted FIFO
@@ -2356,9 +2398,9 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 		}
 		if ((iter >= 20 &&
 			iter >= 20 * (int)waiters &&
-			iter >= 40 * (int)vmp->vm_kstat.vk_threads_waiting.value.ui64 &&
+			iter >= 40 * (int)bvmp->vm_kstat.vk_threads_waiting.value.ui64 &&
 			iter >= 30 * (int)spl_vmem_threads_waiting) ||
-		    vmp->vm_kstat.vk_threads_waiting.value.ui64 >= 8) {
+		    bvmp->vm_kstat.vk_threads_waiting.value.ui64 >= 8) {
 			// if there is a large cv_wait() queue already, or
 			// after ~ 10 milliseconds (if no other waiters),
 			// bail out and let vmem_xalloc() deal with it,
@@ -2374,15 +2416,15 @@ xnu_alloc_throttled(vmem_t *vmp, size_t size, int vmflag)
 			// of the for loop, including going to zero.
 			//
 			atomic_inc_64(&spl_xat_bailed);
-			void *b = xnu_allocate_throttled_bail(now, vmp, size, vmflag);
+			void *b = xnu_allocate_throttled_bail(now, bvmp, size, vmflag);
 			if (b != NULL) {
 				atomic_swap_64(&spl_xat_lastalloc, now / hz);
 				// wake up waiters on the arena lock,
 				// since they now have memory they can use.
-				cv_broadcast(&vmp->vm_cv);
+				cv_broadcast(&bvmp->vm_cv);
 			} else {
 				const int64_t pressure =
-				    size * (1LL + vmp->vm_kstat.vk_threads_waiting.value.ui64);
+				    size * (1LL + bvmp->vm_kstat.vk_threads_waiting.value.ui64);
 				spl_free_set_pressure(pressure);
 			}
 			// open turnstile after having bailed, rather than before
@@ -2464,37 +2506,25 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 }
 
 static void *
-vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
+vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 {
+
+	// caller is spl_heap_arena looking for memory.
+	// null_vmp will be spl_default_arena_parent, and so is just a placeholder.
+
+	vmem_t *calling_arena = spl_heap_arena;
 
 	if (!ISP2(size))
 		atomic_inc_64(&spl_bucket_non_pow2_allocs);
 
-	// For VMEM_BUCKET_HIBIT == 12,
-	// vmem_bucket_arena[n] holds allocations from 2^[n+11]+1 to  2^[n+12],
-	// so for [n] = 0, 2049-4096, for [n]=5 65537-131072, for [n]=7 (256k+1)-512k
-
-	// set hb: 512k == 19, 256k+1 == 19, 256k == 18, ...
-	const int hb = highbit(size-1);
-
-	int bucket = hb - VMEM_BUCKET_LOWBIT;
-
-	// very large allocations go into the 16 MiB bucket
-	if (hb > VMEM_BUCKET_HIBIT)
-		bucket = VMEM_BUCKET_HIBIT - VMEM_BUCKET_LOWBIT;
-
-	// very small allocations go into the 4 kiB bucket
-	if (bucket < 0)
-		bucket = 0;
-
-	vmem_t *bvmp = vmem_bucket_arena[bucket];
+	vmem_t *bvmp = vmem_bucket_arena_by_size(size);
 
 	// there are 13 buckets, so use a 16-bit scalar to hold
 	// a set of bits, where each bit corresponds to an in-progress
 	// vmem_alloc(bucket, ...) below.
 
 	static volatile _Atomic uint16_t buckets_busy_allocating = 0;
-	const uint16_t bucket_bit = (uint16_t)1 << (uint16_t)bucket;
+	const uint16_t bucket_bit = (uint16_t)1 << vmem_bucket_number(size);
 
 	static volatile _Atomic uint32_t waiters = 0;
 
@@ -2562,6 +2592,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// breaking out of the loop
 			if ((buckets_busy_allocating & bucket_bit) == 0) {
 				buckets_busy_allocating |= bucket_bit;
+				atomic_inc_64(&spl_vba_parent_memory_appeared);
 				break;
 				// The vmem_alloc() should return extremely quickly from
 				// an INSTANTFIT allocation that canalloc predicts will succeed.
@@ -2587,12 +2618,12 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 		//
 		// substitute for the vmp arena's cv_wait in vmem_xalloc()
 		// (vmp is the bucket_heap AKA spl_heap_arena)
-		mutex_enter(&vmp->vm_lock);
-		(void) cv_timedwait_hires(&vmp->vm_cv, &vmp->vm_lock,
+		mutex_enter(&calling_arena->vm_lock);
+		(void) cv_timedwait_hires(&calling_arena->vm_cv, &calling_arena->vm_lock,
 		    USEC2NSEC(500*(waiters+1)), 0, 0);
 		// We may have exited because of a signal/broadcast,
 		// or just timed out.  Either way, recheck memory.
-		if (vmem_canalloc(vmp, size)) {
+		if (vmem_canalloc(calling_arena, size)) {
 			// Another thread may has caused memory to become
 			// available in our own arena; when we have returned to
 			// vmem_xalloc(), it will almost certainly do a "goto do_alloc;",
@@ -2601,11 +2632,12 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 			// However, we don't want to wake up other sleepers
 			// on vmp->vm_cv, as we don't know at this point whether
 			// they would make any useful progress.
+			spl_vba_memory_appeared++; // under mutex and before lock decw, so normal inc.
 			waiters--;
-			mutex_exit(&vmp->vm_lock);
+			mutex_exit(&calling_arena->vm_lock);
 			return(NULL);
 		} else {
-			mutex_exit(&vmp->vm_lock);
+			mutex_exit(&calling_arena->vm_lock);
 		}
 	}
 
@@ -2644,7 +2676,7 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 	// exit the cv_wait() in vmem_xalloc(vmp, ...)
 
 	if (m != NULL) {
-		cv_broadcast(&vmp->vm_cv);
+		cv_broadcast(&calling_arena->vm_cv);
 	}
 
 	waiters--;
@@ -2652,24 +2684,14 @@ vmem_bucket_alloc(vmem_t *vmp, size_t size, const int vmflags)
 }
 
 static void
-vmem_bucket_free(vmem_t *vmp, void *vaddr, size_t size)
+vmem_bucket_free(vmem_t *null_vmp, void *vaddr, size_t size)
 {
-	int hb = highbit(size-1);
+	vmem_t *calling_arena = spl_heap_arena;
 
-	int bucket = hb - VMEM_BUCKET_LOWBIT;
-
-	// very large allocations came from the 16 Mib bucket
-	if (hb > VMEM_BUCKET_HIBIT)
-		bucket = VMEM_BUCKET_HIBIT - VMEM_BUCKET_LOWBIT;
-
-	// very small allocations came from the 4 kiB bucket
-	if (bucket < 0)
-		bucket = 0;
-
-	vmem_free(vmem_bucket_arena[bucket], vaddr, size);
+	vmem_free(vmem_bucket_arena_by_size(size), vaddr, size);
 
 	// wake up arena waiters to let them try an alloc
-	cv_broadcast(&vmp->vm_cv);
+	cv_broadcast(&calling_arena->vm_cv);
 }
 
 static inline int64_t
