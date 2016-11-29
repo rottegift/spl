@@ -485,12 +485,10 @@ struct {
 
 extern uint64_t stat_osif_malloc_success;
 extern uint64_t stat_osif_malloc_bytes;
-extern uint64_t stat_osif_malloc_fail;
 extern uint64_t stat_osif_free;
 extern uint64_t stat_osif_free_bytes;
 
 extern uint64_t spl_bucket_non_pow2_allocs;
-extern uint64_t spl_xat_non_pow2_allocs;
 
 // stats for spl_root_allocator();
 extern uint64_t spl_root_allocator_calls;
@@ -504,9 +502,7 @@ extern uint64_t spl_root_allocator_recovered_bytes;
 extern uint64_t spl_vmem_unconditional_allocs;
 extern uint64_t spl_vmem_unconditional_alloc_bytes;
 extern uint64_t spl_vmem_conditional_allocs;
-extern uint64_t spl_vmem_conditional_alloc_fail;
 extern uint64_t spl_vmem_conditional_alloc_bytes;
-extern uint64_t spl_vmem_conditional_alloc_fail_bytes;
 extern uint64_t spl_vmem_conditional_alloc_deny;
 extern uint64_t spl_vmem_conditional_alloc_deny_bytes;
 
@@ -519,7 +515,19 @@ extern uint64_t spl_xat_lastalloc;
 extern uint64_t spl_xat_lastfree;
 extern uint64_t spl_xat_forced;
 extern uint64_t spl_xat_memory_appeared;
-extern uint64_t spl_xat_lost_canalloc;
+extern uint64_t spl_xat_sleep;
+extern uint64_t spl_xat_late_deny;
+extern uint64_t spl_xat_no_waiters;
+
+extern uint64_t spl_vba_memory_appeared;
+extern uint64_t spl_vba_parent_memory_appeared;
+extern uint64_t spl_vba_parent_memory_blocked;
+extern uint64_t spl_vba_cv_timeout;
+extern uint64_t spl_vba_loop_timeout;
+extern uint64_t spl_vba_cv_timeout_blocked;
+extern uint64_t spl_vba_loop_timeout_blocked;
+extern uint64_t spl_vba_sleep;
+extern uint64_t spl_vba_loop_entries;
 
 extern uint64_t spl_bucket_tunable_large_span;
 extern uint64_t spl_bucket_tunable_small_span;
@@ -543,18 +551,14 @@ typedef struct spl_stats {
 	kstat_named_t spl_spl_free_negative_count;
 	kstat_named_t spl_osif_malloc_success;
 	kstat_named_t spl_osif_malloc_bytes;
-	kstat_named_t spl_osif_malloc_fail;
 	kstat_named_t spl_osif_free;
 	kstat_named_t spl_osif_free_bytes;
 	kstat_named_t spl_bucket_non_pow2_allocs;
-	kstat_named_t spl_xat_non_pow2_allocs;
 
 	kstat_named_t spl_vmem_unconditional_allocs;
 	kstat_named_t spl_vmem_unconditional_alloc_bytes;
 	kstat_named_t spl_vmem_conditional_allocs;
-	kstat_named_t spl_vmem_conditional_alloc_fail;
 	kstat_named_t spl_vmem_conditional_alloc_bytes;
-	kstat_named_t spl_vmem_conditional_alloc_fail_bytes;
 	kstat_named_t spl_vmem_conditional_alloc_deny;
 	kstat_named_t spl_vmem_conditional_alloc_deny_bytes;
 
@@ -567,7 +571,19 @@ typedef struct spl_stats {
 	kstat_named_t spl_xat_lastfree;
 	kstat_named_t spl_xat_forced;
 	kstat_named_t spl_xat_memory_appeared;
-	kstat_named_t spl_xat_lost_canalloc;
+	kstat_named_t spl_xat_sleep;
+	kstat_named_t spl_xat_late_deny;
+	kstat_named_t spl_xat_no_waiters;
+
+	kstat_named_t spl_vba_memory_appeared;
+	kstat_named_t spl_vba_parent_memory_appeared;
+	kstat_named_t spl_vba_parent_memory_blocked;
+	kstat_named_t spl_vba_cv_timeout;
+	kstat_named_t spl_vba_loop_timeout;
+	kstat_named_t spl_vba_cv_timeout_blocked;
+	kstat_named_t spl_vba_loop_timeout_blocked;
+	kstat_named_t spl_vba_sleep;
+	kstat_named_t spl_vba_loop_entries;
 
 	kstat_named_t spl_bucket_tunable_large_span;
 	kstat_named_t spl_bucket_tunable_small_span;
@@ -589,18 +605,14 @@ static spl_stats_t spl_stats = {
 	{"spl_spl_free_negative_count", KSTAT_DATA_UINT64},
 	{"spl_osif_malloc_success", KSTAT_DATA_UINT64},
 	{"spl_osif_malloc_bytes", KSTAT_DATA_UINT64},
-	{"spl_osif_malloc_fail", KSTAT_DATA_UINT64},
 	{"spl_osif_free", KSTAT_DATA_UINT64},
 	{"spl_osif_free_bytes", KSTAT_DATA_UINT64},
 	{"spl_bucket_non_pow2_allocs", KSTAT_DATA_UINT64},
-	{"spl_xat_non_pow2_allocs", KSTAT_DATA_UINT64},
 
 	{"vmem_unconditional_allocs", KSTAT_DATA_UINT64},
 	{"vmem_unconditional_alloc_bytes", KSTAT_DATA_UINT64},
 	{"vmem_conditional_allocs", KSTAT_DATA_UINT64},
-	{"vmem_conditional_alloc_fail", KSTAT_DATA_UINT64},
 	{"vmem_conditional_alloc_bytes", KSTAT_DATA_UINT64},
-	{"vmem_conditional_alloc_fail_bytes", KSTAT_DATA_UINT64},
 	{"vmem_conditional_alloc_deny", KSTAT_DATA_UINT64},
 	{"vmem_conditional_alloc_deny_bytes", KSTAT_DATA_UINT64},
 
@@ -613,7 +625,19 @@ static spl_stats_t spl_stats = {
 	{"spl_xat_lastfree", KSTAT_DATA_UINT64},
 	{"spl_xat_forced", KSTAT_DATA_UINT64},
 	{"spl_xat_memory_appeared", KSTAT_DATA_UINT64},
-	{"spl_xat_lost_canalloc", KSTAT_DATA_UINT64},
+	{"spl_xat_sleep", KSTAT_DATA_UINT64},
+	{"spl_xat_late_deny", KSTAT_DATA_UINT64},
+	{"spl_xat_no_waiters", KSTAT_DATA_UINT64},
+
+	{"spl_vba_memory_appeared", KSTAT_DATA_UINT64},
+	{"spl_vba_parent_memory_appeared", KSTAT_DATA_UINT64},
+	{"spl_vba_parent_memory_blocked", KSTAT_DATA_UINT64},
+	{"spl_vba_cv_timeout", KSTAT_DATA_UINT64},
+	{"spl_vba_loop_timeout", KSTAT_DATA_UINT64},
+	{"spl_vba_cv_timeout_blocked", KSTAT_DATA_UINT64},
+	{"spl_vba_loop_timeout_blocked", KSTAT_DATA_UINT64},
+	{"spl_vba_sleep", KSTAT_DATA_UINT64},
+	{"spl_vba_loop_entries", KSTAT_DATA_UINT64},
 
 	{"spl_tunable_large_span", KSTAT_DATA_UINT64},
 	{"spl_tunable_small_span", KSTAT_DATA_UINT64},
@@ -4685,18 +4709,14 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_spl_free_delta_ema.value.i64 = spl_free_delta_ema;
 		ks->spl_osif_malloc_success.value.ui64 = stat_osif_malloc_success;
 		ks->spl_osif_malloc_bytes.value.ui64 = stat_osif_malloc_bytes;
-		ks->spl_osif_malloc_fail.value.ui64 = stat_osif_malloc_fail;
 		ks->spl_osif_free.value.ui64 = stat_osif_free;
 		ks->spl_osif_free_bytes.value.ui64 = stat_osif_free_bytes;
 		ks->spl_bucket_non_pow2_allocs.value.ui64 = spl_bucket_non_pow2_allocs;
-		ks->spl_xat_non_pow2_allocs.value.ui64 = spl_xat_non_pow2_allocs;
 
 		ks->spl_vmem_unconditional_allocs.value.ui64 = spl_vmem_unconditional_allocs;
 		ks->spl_vmem_unconditional_alloc_bytes.value.ui64 = spl_vmem_unconditional_alloc_bytes;
 		ks->spl_vmem_conditional_allocs.value.ui64 = spl_vmem_conditional_allocs;
-		ks->spl_vmem_conditional_alloc_fail.value.ui64 = spl_vmem_conditional_alloc_fail;
 		ks->spl_vmem_conditional_alloc_bytes.value.ui64 = spl_vmem_conditional_alloc_bytes;
-		ks->spl_vmem_conditional_alloc_fail_bytes.value.ui64 = spl_vmem_conditional_alloc_fail_bytes;
 		ks->spl_vmem_conditional_alloc_deny.value.ui64 = spl_vmem_conditional_alloc_deny;
 		ks->spl_vmem_conditional_alloc_deny_bytes.value.ui64 = spl_vmem_conditional_alloc_deny_bytes;
 
@@ -4709,7 +4729,19 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_xat_lastfree.value.ui64 = spl_xat_lastfree;
 		ks->spl_xat_forced.value.ui64 = spl_xat_forced;
 		ks->spl_xat_memory_appeared.value.ui64 = spl_xat_memory_appeared;
-		ks->spl_xat_lost_canalloc.value.ui64 = spl_xat_lost_canalloc;
+		ks->spl_xat_sleep.value.ui64 = spl_xat_sleep;
+		ks->spl_xat_late_deny.value.ui64 = spl_xat_late_deny;
+		ks->spl_xat_no_waiters.value.ui64 = spl_xat_no_waiters;
+
+		ks->spl_vba_memory_appeared.value.ui64 = spl_vba_memory_appeared;
+		ks->spl_vba_parent_memory_appeared.value.ui64 = spl_vba_parent_memory_appeared;
+		ks->spl_vba_parent_memory_blocked.value.ui64 = spl_vba_parent_memory_blocked;
+		ks->spl_vba_cv_timeout.value.ui64 = spl_vba_cv_timeout;
+		ks->spl_vba_loop_timeout.value.ui64 = spl_vba_loop_timeout;
+		ks->spl_vba_cv_timeout_blocked.value.ui64 = spl_vba_cv_timeout_blocked;
+		ks->spl_vba_loop_timeout_blocked.value.ui64 = spl_vba_loop_timeout_blocked;
+		ks->spl_vba_sleep.value.ui64 = spl_vba_sleep;
+		ks->spl_vba_loop_entries.value.ui64 = spl_vba_loop_entries;
 
 		ks->spl_bucket_tunable_large_span.value.ui64 = spl_bucket_tunable_large_span;
 		ks->spl_bucket_tunable_small_span.value.ui64 = spl_bucket_tunable_small_span;

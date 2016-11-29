@@ -139,7 +139,6 @@ vmem_t *zio_metadata_arena;                                             /* and f
 #ifdef _KERNEL
 extern uint64_t total_memory;
 uint64_t stat_osif_malloc_success = 0;
-uint64_t stat_osif_malloc_fail = 0;
 uint64_t stat_osif_free = 0;
 uint64_t stat_osif_malloc_bytes = 0;
 uint64_t stat_osif_free_bytes = 0;
@@ -161,7 +160,8 @@ osif_malloc(uint64_t size)
 		atomic_add_64(&stat_osif_malloc_bytes, size);
 		return(tr);
 	} else {
-		atomic_inc_64(&stat_osif_malloc_fail);
+		// well, this can't really happen, kernel_memory_allocate
+		// would panic instead
 		return(NULL);
 	}
 #else
