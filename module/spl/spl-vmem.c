@@ -391,7 +391,6 @@ uint64_t spl_vmem_threads_waiting = 0;
 
 // number of allocations > minalloc
 uint64_t spl_bucket_non_pow2_allocs = 0;
-uint64_t spl_xat_non_pow2_allocs = 0;
 
 // allocator kstats
 uint64_t spl_vmem_unconditional_allocs = 0;
@@ -2281,9 +2280,6 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	// null_vmp will be spl_default_arena_parent, which is just a placeholder.
 
 	vmem_t *bvmp = vmem_bucket_arena_by_size(size);
-
-	if (!ISP2(size))
-		atomic_inc_64(&spl_xat_non_pow2_allocs);
 
 	uint64_t now = zfs_lbolt();
 
