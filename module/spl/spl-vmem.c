@@ -396,9 +396,7 @@ uint64_t spl_bucket_non_pow2_allocs = 0;
 uint64_t spl_vmem_unconditional_allocs = 0;
 uint64_t spl_vmem_unconditional_alloc_bytes = 0;
 uint64_t spl_vmem_conditional_allocs = 0;
-uint64_t spl_vmem_conditional_alloc_fail = 0;
 uint64_t spl_vmem_conditional_alloc_bytes = 0;
-uint64_t spl_vmem_conditional_alloc_fail_bytes = 0;
 uint64_t spl_vmem_conditional_alloc_deny = 0;
 uint64_t spl_vmem_conditional_alloc_deny_bytes = 0;
 
@@ -412,8 +410,17 @@ uint64_t spl_xat_lastalloc = 0;
 uint64_t spl_xat_lastfree = 0;
 uint64_t spl_xat_forced = 0;
 uint64_t spl_xat_memory_appeared = 0;
+uint64_t spl_xat_sleep = 0;
+uint64_t spl_xat_late_deny = 0;
+uint64_t spl_xat_no_waiters = 0;
+
 uint64_t spl_vba_memory_appeared = 0;
 uint64_t spl_vba_parent_memory_appeared = 0;
+uint64_t spl_vba_reset_loop = 0;
+uint64_t spl_vba_iter_exit = 0;
+uint64_t spl_vba_timeout_busy = 0;
+uint64_t spl_vba_sleep = 0;
+uint64_t spl_vba_no_waiters = 0;
 
 // bucket minimum span size tunables
 uint64_t spl_bucket_tunable_large_span = 0;
@@ -1084,9 +1091,6 @@ spl_vmem_malloc_if_no_pressure(size_t size)
 			atomic_inc_64(&spl_vmem_conditional_allocs);
 			atomic_add_64(&spl_vmem_conditional_alloc_bytes, size);
 			cv_broadcast(&vmem_xnu_alloc_free_cv);
-		} else {
-			atomic_inc_64(&spl_vmem_conditional_alloc_fail);
-			atomic_add_64(&spl_vmem_conditional_alloc_fail_bytes, size);
 		}
 		mutex_exit(&vmem_xnu_alloc_free_lock);
 		return (p);
@@ -2297,12 +2301,8 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 		spl_free_set_emergency_pressure((int64_t)size);
 	}
 
-	const uint64_t force_alloc_deadline = (spl_xat_lastalloc + 60) * hz;
-
-	if (vmflag & VM_PANIC || now > force_alloc_deadline) {
-		// either we would panic, or we have not allocated memory
-		// in enough time that perhaps a mutex is stuck waiting
-		// on an allocation.   force an allocation now
+	if (vmflag & VM_PANIC) {
+		// force an allocation now to avoid a panic
 		atomic_swap_64(&spl_xat_lastalloc,  now / hz);
 		spl_free_set_emergency_pressure(4LL * (int64_t)size);
 		void *p = spl_vmem_malloc_unconditionally(size);
@@ -2311,7 +2311,6 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 		// wake up arena waiters to let them know there is memory
 		// available in the arena; let waiters on other bucket arenas
 		// continue sleeping.
-		atomic_inc_64(&spl_xat_forced);
 		cv_broadcast(&bvmp->vm_cv);
 		return (p);
 	}
@@ -2348,9 +2347,14 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	static volatile _Atomic uint32_t waiters = 0;
 
 	waiters++;
+
+	if (waiters == 1)
+		atomic_inc_64(&spl_xat_no_waiters);
+
 	for (int iter = 0; ; iter++) {
 		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
 		mutex_enter(&bvmp->vm_lock);
+		spl_xat_sleep = 0;
 		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
 		    wait_time, 0, 0);
 		// still under mutex
@@ -2389,6 +2393,7 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 				// in the mutex queue in spl_vmem_malloc_if_no_pressure().
 				// There is therefore no point in doing the bail-out check
 				// below, so go back to the top of the for loop.
+				atomic_inc_64(&spl_xat_late_deny);
 				continue;
 			}
 		}
@@ -2533,6 +2538,9 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 
 	waiters++;
 
+	if (waiters == 1)
+		atomic_inc_64(&spl_vba_no_waiters);
+
 	for (int iter = 0; waiters > 1; iter++) {
 		if (vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT)) {
 			// we should not wait, try to vmem_alloc(bvmp, size, vmflags).
@@ -2592,6 +2600,13 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				break;
 				// The vmem_alloc() should return extremely quickly from
 				// an INSTANTFIT allocation that canalloc predicts will succeed.
+			} else {
+				// another thread is trying to use the free memory in the
+				// bucket_## arena; there might still be free memory there after
+				// its allocation is completed, and there might be excess in the
+				// bucket_heap arena, so stick around in this loop.
+				atomic_inc_64(&spl_vba_reset_loop);
+				iter = 0;
 			}
 		}
 		if (iter >= 10 &&
@@ -2606,7 +2621,10 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			// allocations to the same bucket in this loop reduces
 			// trips through the "vk_excess" and and "vk_wait" paths,
 			// and might avoid a trip through vmem_alloc(bvmp, ...) altogether.
+			atomic_inc_64(&spl_vba_iter_exit);
 			break;
+		} else if (iter >= 10) {
+			atomic_inc_64(&spl_vba_timeout_busy);
 		}
 		// The bucket is already allocating, or the bucket needs
 		// more memory to satisfy vmem_allocat(bvmp, size, VM_NOSLEEP), or
@@ -2615,6 +2633,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		// substitute for the vmp arena's cv_wait in vmem_xalloc()
 		// (vmp is the bucket_heap AKA spl_heap_arena)
 		mutex_enter(&calling_arena->vm_lock);
+		spl_vba_sleep++;
 		(void) cv_timedwait_hires(&calling_arena->vm_cv, &calling_arena->vm_lock,
 		    USEC2NSEC(500*(waiters+1)), 0, 0);
 		// We may have exited because of a signal/broadcast,
