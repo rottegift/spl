@@ -2354,7 +2354,7 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	for (int iter = 0; ; iter++) {
 		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
 		mutex_enter(&bvmp->vm_lock);
-		spl_xat_sleep = 0;
+		spl_xat_sleep++;
 		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
 		    wait_time, 0, 0);
 		// still under mutex
