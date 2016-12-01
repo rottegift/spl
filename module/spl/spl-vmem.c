@@ -2544,39 +2544,6 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	for (int iter = 0; waiters > 1; iter++) {
 		if (vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT)) {
 			// we should not wait, try to vmem_alloc(bvmp, size, vmflags).
-			// exclude VM_SLEEP allocations from going to the same bucket concurrently;
-			// this exclusion is released after the vmem_alloc below.
-			// Concurrent NOSLEEP-et-al is fine, however.
-			buckets_busy_allocating |= bucket_bit;
-			/*
-			 * This |= could be written as:
-			 * __c11_atomic_fetch_or(&buckets_busy_allocating,
-			 * bucket_bit, __ATOMIC_SEQ_CST);
-			 * with the &= down below being written as
-			 * __c11_atomic_fetch_and(&buckets_busy_allocating,
-			 * ~bucket_bit, __ATOMIC_SEQ_CST);
-			 *
-			 * and this makes a difference with no optimization either
-			 * compiling the whole file or with __attribute((optnone))
-			 * in front of the function decl.   In particular, the non-
-			 * optimized version that uses the builtin __c11_atomic_fetch_{and,or}
-			 * preserves the C program order in the machine language output,
-			 * inersting cmpxchgws, while all optimized versions, and the
-			 * non-optimized version using the plainly-written version, reorder
-			 * the "orw regr, memory" and "andw register, memory" (these are atomic
-			 * RMW operations in x86-64 when the memory is naturally aligned) so that
-			 * the strong memory model x86-64 promise that later loads see the
-			 * results of earlier stores.
-			 *
-			 * clang+llvm simply are good at optimizing _Atomics and
-			 * the optimized code differs only in line numbers and
-			 * among all three approaches (as plainly written, using
-			 * the __c11_atomic_fetch_{or,and} with sequential consistency,
-			 * or when compiling with at least -O optimization so an
-			 * atomic_or_16(&buckets_busy_allocating) built with GCC intrinsics
-			 * is actually inlined rather than a function call).
-			 *
-			 */
 			break;
 		}
 		if (vmem_canalloc_atomic(bvmp, size)) {
@@ -2591,11 +2558,15 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			// callers hitting the same bvmp before the allocation
 			// results are reflected in vmem_canalloc_atomic(bvmp, ...)
 			//
-			// We do this by atomically turning on the corresponding bit
-			// in buckets_busy_allocating if it is not already set, then
-			// breaking out of the loop
-			if ((buckets_busy_allocating & bucket_bit) == 0) {
-				buckets_busy_allocating |= bucket_bit;
+			// We use a test-and-set of the appropriate bit
+			// in buckets_busy_allocating; if it was not set,
+			// then break out of the loop.
+			//
+			// This compiles into an orl, cmpxchgw instruction pair.
+			// the return from __c11_atomic_fetch_or() is the
+			// previous value of buckets_busy_allocating.
+			if (0 == (__c11_atomic_fetch_or(&buckets_busy_allocating,
+				    bucket_bit, __ATOMIC_SEQ_CST) & bucket_bit)) {
 				atomic_inc_64(&spl_vba_parent_memory_appeared);
 				break;
 				// The vmem_alloc() should return extremely quickly from
@@ -2610,11 +2581,11 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			}
 		}
 		if (iter >= 100 &&
-		    ((buckets_busy_allocating & bucket_bit) == 0)) {
-			// Escape after at least ten iterations, iff the bucket
+		    (0 == (__c11_atomic_fetch_or(&buckets_busy_allocating,
+			    bucket_bit, __ATOMIC_SEQ_CST) & bucket_bit))) {
+			// Escape after at least 100 iterations, iff the bucket
 			// is not already processing a vmem_alloc() driven by the canalloc
 			// test being true.
-			buckets_busy_allocating |= bucket_bit;
 			// The vmem_alloc() below is very likely to trigger an
 			// allocation request to xnu for this bucket, so the
 			// bit may be set for up to milliseconds.  Keeping
@@ -2634,10 +2605,14 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		// (vmp is the bucket_heap AKA spl_heap_arena)
 		mutex_enter(&calling_arena->vm_lock);
 		spl_vba_sleep++;
+		clock_t wait_time = USEC2NSEC(500*(waiters+1));
+		if ((vmflags & VM_PUSHPAGE) == 0) {
+			wait_time *= 2; // lower-priority allocs to back of queue
+		}
 		(void) cv_timedwait_hires(&calling_arena->vm_cv, &calling_arena->vm_lock,
-		    USEC2NSEC(500*(waiters+1)), 0, 0);
-		// We may have exited because of a signal/broadcast,
-		// or just timed out.  Either way, recheck memory.
+		    wait_time, 0, 0);
+		// We almostg certainly have exited because of a signal/broadcast,
+		// but maybe just timed out.  Either way, recheck memory.
 		if (vmem_canalloc(calling_arena, size)) {
 			// Another thread may has caused memory to become
 			// available in our own arena; when we have returned to
@@ -2655,6 +2630,56 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			mutex_exit(&calling_arena->vm_lock);
 		}
 	}
+
+	/*
+	 * Turn on the exclusion bit in buckets_busy_allocating, to
+	 * prevent multiple threads from calling vmem_alloc() on the
+	 * same bucket arena concurrently rather than serially.
+	 *
+	 * This principally reduces the liklihood of asking xnu for
+	 * more memory when other memory is or becomes available.
+	 *
+	 * This exclusion only applies to VM_SLEEP allocations;
+	 * others (VM_PANIC, VM_NOSLEEP, VM_ABORT) will go to
+	 * vmem_alloc() concurrently with any other threads.
+	 *
+	 * Since we aren't doing a test-and-set operation like above,
+	 * we can just use |= and &= below and get correct atomic
+	 * results, instead of using:
+	 *
+	 * __c11_atomic_fetch_or(&buckets_busy_allocating,
+	 * bucket_bit, __ATOMIC_SEQ_CST);
+	 * with the &= down below being written as
+	 * __c11_atomic_fetch_and(&buckets_busy_allocating,
+	 * ~bucket_bit, __ATOMIC_SEQ_CST);
+	 *
+	 * and this makes a difference with no optimization either
+	 * compiling the whole file or with __attribute((optnone))
+	 * in front of the function decl.   In particular, the non-
+	 * optimized version that uses the builtin __c11_atomic_fetch_{and,or}
+	 * preserves the C program order in the machine language output,
+	 * inersting cmpxchgws, while all optimized versions, and the
+	 * non-optimized version using the plainly-written version, reorder
+	 * the "orw regr, memory" and "andw register, memory" (these are atomic
+	 * RMW operations in x86-64 when the memory is naturally aligned) so that
+	 * the strong memory model x86-64 promise that later loads see the
+	 * results of earlier stores.
+	 *
+	 * clang+llvm simply are good at optimizing _Atomics and
+	 * the optimized code differs only in line numbers and
+	 * among all three approaches (as plainly written, using
+	 * the __c11_atomic_fetch_{or,and} with sequential consistency,
+	 * or when compiling with at least -O optimization so an
+	 * atomic_or_16(&buckets_busy_allocating) built with GCC intrinsics
+	 * is actually inlined rather than a function call).
+	 *
+	 */
+
+	// in case we left the loop by being the only waiter, stop the
+	// next thread arriving from leaving the for loop because
+	// vmem_canalloc(bvmp, that_thread's_size) is true.
+
+	buckets_busy_allocating |= bucket_bit;
 
 	// There is memory in this bucket, or there are no other waiters,
 	// or we aren't a VM_SLEEP allocation,  or we iterated out of the for loop.
