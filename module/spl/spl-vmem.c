@@ -2609,7 +2609,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				iter = 0;
 			}
 		}
-		if (iter >= 10 &&
+		if (iter >= 100 &&
 		    ((buckets_busy_allocating & bucket_bit) == 0)) {
 			// Escape after at least ten iterations, iff the bucket
 			// is not already processing a vmem_alloc() driven by the canalloc
@@ -2623,7 +2623,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			// and might avoid a trip through vmem_alloc(bvmp, ...) altogether.
 			atomic_inc_64(&spl_vba_iter_exit);
 			break;
-		} else if (iter >= 10) {
+		} else if (iter >= 100) {
 			atomic_inc_64(&spl_vba_timeout_busy);
 		}
 		// The bucket is already allocating, or the bucket needs
