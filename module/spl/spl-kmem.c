@@ -521,11 +521,13 @@ extern uint64_t spl_xat_no_waiters;
 
 extern uint64_t spl_vba_memory_appeared;
 extern uint64_t spl_vba_parent_memory_appeared;
-extern uint64_t spl_vba_reset_loop;
-extern uint64_t spl_vba_iter_exit;
-extern uint64_t spl_vba_timeout_busy;
+extern uint64_t spl_vba_parent_memory_blocked;
+extern uint64_t spl_vba_cv_timeout;
+extern uint64_t spl_vba_loop_timeout;
+extern uint64_t spl_vba_cv_timeout_blocked;
+extern uint64_t spl_vba_loop_timeout_blocked;
 extern uint64_t spl_vba_sleep;
-extern uint64_t spl_vba_no_waiters;
+extern uint64_t spl_vba_loop_entries;
 
 extern uint64_t spl_bucket_tunable_large_span;
 extern uint64_t spl_bucket_tunable_small_span;
@@ -575,11 +577,13 @@ typedef struct spl_stats {
 
 	kstat_named_t spl_vba_memory_appeared;
 	kstat_named_t spl_vba_parent_memory_appeared;
-	kstat_named_t spl_vba_reset_loop;
-	kstat_named_t spl_vba_iter_exit;
-	kstat_named_t spl_vba_timeout_busy;
+	kstat_named_t spl_vba_parent_memory_blocked;
+	kstat_named_t spl_vba_cv_timeout;
+	kstat_named_t spl_vba_loop_timeout;
+	kstat_named_t spl_vba_cv_timeout_blocked;
+	kstat_named_t spl_vba_loop_timeout_blocked;
 	kstat_named_t spl_vba_sleep;
-	kstat_named_t spl_vba_no_waiters;
+	kstat_named_t spl_vba_loop_entries;
 
 	kstat_named_t spl_bucket_tunable_large_span;
 	kstat_named_t spl_bucket_tunable_small_span;
@@ -627,11 +631,13 @@ static spl_stats_t spl_stats = {
 
 	{"spl_vba_memory_appeared", KSTAT_DATA_UINT64},
 	{"spl_vba_parent_memory_appeared", KSTAT_DATA_UINT64},
-	{"spl_vba_reset_loop", KSTAT_DATA_UINT64},
-	{"spl_vba_iter_exit", KSTAT_DATA_UINT64},
-	{"spl_vba_timeout_busy", KSTAT_DATA_UINT64},
+	{"spl_vba_parent_memory_blocked", KSTAT_DATA_UINT64},
+	{"spl_vba_cv_timeout", KSTAT_DATA_UINT64},
+	{"spl_vba_loop_timeout", KSTAT_DATA_UINT64},
+	{"spl_vba_cv_timeout_blocked", KSTAT_DATA_UINT64},
+	{"spl_vba_loop_timeout_blocked", KSTAT_DATA_UINT64},
 	{"spl_vba_sleep", KSTAT_DATA_UINT64},
-	{"spl_vba_no_waiters", KSTAT_DATA_UINT64},
+	{"spl_vba_loop_entries", KSTAT_DATA_UINT64},
 
 	{"spl_tunable_large_span", KSTAT_DATA_UINT64},
 	{"spl_tunable_small_span", KSTAT_DATA_UINT64},
@@ -4729,11 +4735,13 @@ spl_kstat_update(kstat_t *ksp, int rw)
 
 		ks->spl_vba_memory_appeared.value.ui64 = spl_vba_memory_appeared;
 		ks->spl_vba_parent_memory_appeared.value.ui64 = spl_vba_parent_memory_appeared;
-		ks->spl_vba_reset_loop.value.ui64 = spl_vba_reset_loop;
-		ks->spl_vba_iter_exit.value.ui64 = spl_vba_iter_exit;
-		ks->spl_vba_timeout_busy.value.ui64 = spl_vba_timeout_busy;
+		ks->spl_vba_parent_memory_blocked.value.ui64 = spl_vba_parent_memory_blocked;
+		ks->spl_vba_cv_timeout.value.ui64 = spl_vba_cv_timeout;
+		ks->spl_vba_loop_timeout.value.ui64 = spl_vba_loop_timeout;
+		ks->spl_vba_cv_timeout_blocked.value.ui64 = spl_vba_cv_timeout_blocked;
+		ks->spl_vba_loop_timeout_blocked.value.ui64 = spl_vba_loop_timeout_blocked;
 		ks->spl_vba_sleep.value.ui64 = spl_vba_sleep;
-		ks->spl_vba_no_waiters.value.ui64 = spl_vba_no_waiters;
+		ks->spl_vba_loop_entries.value.ui64 = spl_vba_loop_entries;
 
 		ks->spl_bucket_tunable_large_span.value.ui64 = spl_bucket_tunable_large_span;
 		ks->spl_bucket_tunable_small_span.value.ui64 = spl_bucket_tunable_small_span;

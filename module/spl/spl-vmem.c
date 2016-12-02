@@ -416,11 +416,13 @@ uint64_t spl_xat_no_waiters = 0;
 
 uint64_t spl_vba_memory_appeared = 0;
 uint64_t spl_vba_parent_memory_appeared = 0;
-uint64_t spl_vba_reset_loop = 0;
-uint64_t spl_vba_iter_exit = 0;
-uint64_t spl_vba_timeout_busy = 0;
+uint64_t spl_vba_parent_memory_blocked = 0;
+uint64_t spl_vba_cv_timeout = 0;
+uint64_t spl_vba_loop_timeout = 0;
+uint64_t spl_vba_cv_timeout_blocked = 0;
+uint64_t spl_vba_loop_timeout_blocked = 0;
 uint64_t spl_vba_sleep = 0;
-uint64_t spl_vba_no_waiters = 0;
+uint64_t spl_vba_loop_entries = 0;
 
 // bucket minimum span size tunables
 uint64_t spl_bucket_tunable_large_span = 0;
@@ -2506,6 +2508,26 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	vmem_bucket_wake_all_waiters();
 }
 
+// return 0 if the bit was unset before the atomic OR.
+static inline bool
+vba_atomic_lock_bucket(volatile _Atomic uint16_t *bbap, uint16_t bucket_bit)
+{
+
+	// We use a test-and-set of the appropriate bit
+	// in buckets_busy_allocating; if it was not set,
+	// then break out of the loop.
+	//
+	// This compiles into an orl, cmpxchgw instruction pair.
+	// the return from __c11_atomic_fetch_or() is the
+	// previous value of buckets_busy_allocating.
+
+	uint16_t prev = __c11_atomic_fetch_or(bbap, bucket_bit, __ATOMIC_SEQ_CST);
+	if (prev & bucket_bit)
+		return (false); // we did not acquire the bit lock here
+	else
+		return (true); // we turned the bit from 0 to 1
+}
+
 static void *
 vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 {
@@ -2535,15 +2557,27 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	// successively hitting a low-memory condition, or alternatively
 	// each successfully importing memory from xnu when they can share
 	// a single import.
+	//
+	// We also want to take advantage of any memory that becomes available
+	// in bucket_heap.
+	//
+	// If there is more than one thread in this function (~ few percent)
+	// then the subsequent threads are put into the loop below.   They
+	// can escape the loop if they are [1]non-waiting allocations, or
+	// [2]when there is uncontended free memory in the calling bucket,
+	// [3]if they become the only waiting thread, or
+	// [4]if the cv_timedwait_hires returns -1 (which represents EWOULDBLOCK
+	// from msleep() which gets it from _sleep()'s THREAD_TIMED_OUT)
+	// allocating in the bucket, or if this thread has (highly improbably!) spent
+	// a quarter of a second in the loop.
 
-	waiters++;
+	if (waiters++ > 1) {
+		atomic_inc_64(&spl_vba_loop_entries);
+	}
 
-	if (waiters == 1)
-		atomic_inc_64(&spl_vba_no_waiters);
-
-	for (int iter = 0; waiters > 1; iter++) {
+	for (uint64_t loop_timeout = zfs_lbolt() + (hz/4), timedout = 0; waiters > 1; ) {
+		// non-waiting allocations should proceeed to vmem_alloc() immediately
 		if (vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT)) {
-			// we should not wait, try to vmem_alloc(bvmp, size, vmflags).
 			break;
 		}
 		if (vmem_canalloc_atomic(bvmp, size)) {
@@ -2557,16 +2591,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			// However, we should protect against a burst of
 			// callers hitting the same bvmp before the allocation
 			// results are reflected in vmem_canalloc_atomic(bvmp, ...)
-			//
-			// We use a test-and-set of the appropriate bit
-			// in buckets_busy_allocating; if it was not set,
-			// then break out of the loop.
-			//
-			// This compiles into an orl, cmpxchgw instruction pair.
-			// the return from __c11_atomic_fetch_or() is the
-			// previous value of buckets_busy_allocating.
-			if (0 == (__c11_atomic_fetch_or(&buckets_busy_allocating,
-				    bucket_bit, __ATOMIC_SEQ_CST) & bucket_bit)) {
+			if (vba_atomic_lock_bucket(&buckets_busy_allocating, bucket_bit)) {
 				atomic_inc_64(&spl_vba_parent_memory_appeared);
 				break;
 				// The vmem_alloc() should return extremely quickly from
@@ -2576,26 +2601,23 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				// bucket_## arena; there might still be free memory there after
 				// its allocation is completed, and there might be excess in the
 				// bucket_heap arena, so stick around in this loop.
-				atomic_inc_64(&spl_vba_reset_loop);
-				iter = 0;
+				atomic_inc_64(&spl_vba_parent_memory_blocked);
 			}
 		}
-		if (iter >= 100 &&
-		    (0 == (__c11_atomic_fetch_or(&buckets_busy_allocating,
-			    bucket_bit, __ATOMIC_SEQ_CST) & bucket_bit))) {
-			// Escape after at least 100 iterations, iff the bucket
-			// is not already processing a vmem_alloc() driven by the canalloc
-			// test being true.
-			// The vmem_alloc() below is very likely to trigger an
-			// allocation request to xnu for this bucket, so the
-			// bit may be set for up to milliseconds.  Keeping
-			// allocations to the same bucket in this loop reduces
-			// trips through the "vk_excess" and and "vk_wait" paths,
-			// and might avoid a trip through vmem_alloc(bvmp, ...) altogether.
-			atomic_inc_64(&spl_vba_iter_exit);
-			break;
-		} else if (iter >= 100) {
-			atomic_inc_64(&spl_vba_timeout_busy);
+		if (timedout > 0) {
+			if (vba_atomic_lock_bucket(&buckets_busy_allocating, bucket_bit)) {
+				if (timedout & 1)
+					atomic_inc_64(&spl_vba_cv_timeout);
+				if (timedout & 2 || zfs_lbolt() >= loop_timeout)
+					atomic_inc_64(&spl_vba_loop_timeout);
+				break;
+			} else {
+				if (timedout & 1)
+					atomic_inc_64(&spl_vba_cv_timeout_blocked);
+				if (timedout & 2)
+					atomic_inc_64(&spl_vba_loop_timeout_blocked);
+				continue;
+			}
 		}
 		// The bucket is already allocating, or the bucket needs
 		// more memory to satisfy vmem_allocat(bvmp, size, VM_NOSLEEP), or
@@ -2605,13 +2627,13 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		// (vmp is the bucket_heap AKA spl_heap_arena)
 		mutex_enter(&calling_arena->vm_lock);
 		spl_vba_sleep++;
-		clock_t wait_time = USEC2NSEC(500*(waiters+1));
+		clock_t wait_time = MSEC2NSEC(30);
 		if ((vmflags & VM_PUSHPAGE) == 0) {
 			wait_time *= 2; // lower-priority allocs to back of queue
 		}
-		(void) cv_timedwait_hires(&calling_arena->vm_cv, &calling_arena->vm_lock,
+		int ret = cv_timedwait_hires(&calling_arena->vm_cv, &calling_arena->vm_lock,
 		    wait_time, 0, 0);
-		// We almostg certainly have exited because of a signal/broadcast,
+		// We almost certainly have exited because of a signal/broadcast,
 		// but maybe just timed out.  Either way, recheck memory.
 		if (vmem_canalloc(calling_arena, size)) {
 			// Another thread may has caused memory to become
@@ -2626,8 +2648,13 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			waiters--;
 			mutex_exit(&calling_arena->vm_lock);
 			return(NULL);
-		} else {
-			mutex_exit(&calling_arena->vm_lock);
+		}
+		mutex_exit(&calling_arena->vm_lock);
+		if (ret == -1) {
+			timedout |= 1;
+		} else if (timedout == 0) {
+			if (zfs_lbolt() >= loop_timeout)
+				timedout |= 2;
 		}
 	}
 
