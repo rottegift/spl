@@ -2203,9 +2203,6 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size
 	}
 
 	const uint64_t one_second = hz;
-	const uint64_t ten_second = one_second * 10ULL;
-	const uint64_t pushpage_after = ten_second;
-	const uint64_t non_pushpage_after = 3ULL * ten_second;
 
 	// wait at least one second from previous force
 	// unless we haven't allocated over the recent_threshold yet
@@ -2252,28 +2249,16 @@ xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size
 		}
 	}
 
-	// if now is after the appropriate threshold below, allocate
-
-	if ((vmflags & VM_PUSHPAGE) &&
-	    (now_ticks > last_success_ticks + pushpage_after ||
-		recently_allocated < recent_threshold)) {
+	if (recently_allocated < recent_threshold) {
 		last_forced_ticks = now_ticks;
 		recently_allocated += size;
-		void *push_m = spl_vmem_malloc_unconditionally(size);
+		void *um = spl_vmem_malloc_unconditionally(size);
 		alloc_bytes_in_flight -= size;
 		atomic_inc_64(&spl_xat_forced);
-		return (push_m);
-	} else if (now_ticks > last_success_ticks + non_pushpage_after ||
-	    recently_allocated < recent_threshold) {
-		last_forced_ticks = now_ticks;
-		recently_allocated += size;
-		void *norm_m = spl_vmem_malloc_unconditionally(size);
-		alloc_bytes_in_flight -= size;
-		atomic_inc_64(&spl_xat_forced);
-		return (norm_m);
+		return (um);
 	}
 
-	// now is not after the threshold, bail
+	// we have allocated too much recently, bail out
 	alloc_bytes_in_flight -= size;
 	return (NULL);
 }
@@ -2427,8 +2412,8 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 				cv_broadcast(&bvmp->vm_cv);
 			} else {
 				const int64_t pressure =
-				    size * (1LL + bvmp->vm_kstat.vk_threads_waiting.value.ui64);
-				spl_free_set_pressure(pressure);
+				    size * (2LL + bvmp->vm_kstat.vk_threads_waiting.value.ui64);
+				spl_free_set_emergency_pressure(pressure);
 			}
 			// open turnstile after having bailed, rather than before
 			waiters--;
