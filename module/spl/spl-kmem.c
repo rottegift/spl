@@ -4092,14 +4092,27 @@ spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t check_inte
 
 	int64_t snapshot_pressure = 0;
 
+	if (new_p <= 0)
+		return (0);
+
 	spl_free_fast_pressure = fast;
-	if (new_p > spl_free_manual_pressure || new_p <= 0)
+
+	if (spl_free_manual_pressure >= 0)
+		spl_free_manual_pressure += new_p;
+	else
 		spl_free_manual_pressure = new_p;
+
 	// wait for another thread to reset pressure
 	const uint64_t start = zfs_lbolt();
 	const uint64_t end_by = start + (hz*60);
+	const uint64_t double_at = start + (hz/2);
+	const uint64_t double_again_at = start + hz;
+	bool doubled = false, doubled_again = false;
 	uint64_t now;
 	for  (; spl_free_manual_pressure != 0; ) {
+		// has another thread set spl_free_manual_pressure?
+		if (spl_free_manual_pressure < new_p)
+			spl_free_manual_pressure = new_p;
 		snapshot_pressure = spl_free_manual_pressure;
 		mutex_enter(&spl_free_thread_lock);
 		cv_timedwait_hires(&spl_free_thread_cv,
@@ -4109,6 +4122,12 @@ spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t check_inte
 		if (now > end_by) {
 			printf("%s: ERROR: timed out after one minute!\n", __func__);
 			break;
+		} else if (now > double_again_at && !doubled_again) {
+			doubled_again = true;
+			new_p *= 2;
+		} else if (now > double_at) {
+			doubled = true;
+			new_p *= 2;
 		}
 	}
 	return (snapshot_pressure);
