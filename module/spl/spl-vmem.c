@@ -2536,6 +2536,23 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 
 	static volatile _Atomic uint32_t waiters = 0;
 
+	// First, if we are VM_SLEEP, check for memory, try some pressure,
+	// and if that doesn't work, force entry into the loop below.
+
+	bool loop_once = false;
+
+	if ((vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT)) == 0 &&
+	    ! vmem_canalloc_atomic(bvmp, size)) {
+		if (spl_vmem_xnu_useful_bytes_free() < (MAX(size,16ULL*1024ULL*1024ULL))) {
+			spl_free_set_emergency_pressure(size);
+			kpreempt(KPREEMPT_SYNC);
+			if (! vmem_canalloc_atomic(bvmp, size) &&
+			    (spl_vmem_xnu_useful_bytes_free() < (MAX(size,16ULL*1024ULL*1024ULL)))) {
+				loop_once = true;
+			}
+		}
+	}
+
 	// spin-sleep: if we would need to go to the xnu allocator.
 	//
 	// We want to avoid a burst of allocs from bucket_heap's children
@@ -2556,11 +2573,13 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	// allocating in the bucket, or if this thread has (highly improbably!) spent
 	// a quarter of a second in the loop.
 
-	if (waiters++ > 1) {
+	if (waiters++ > 1 || loop_once) {
 		atomic_inc_64(&spl_vba_loop_entries);
 	}
 
-	for (uint64_t loop_timeout = zfs_lbolt() + (hz/4), timedout = 0; waiters > 1; ) {
+	for (uint64_t loop_timeout = zfs_lbolt() + (hz/4), timedout = 0;
+	     waiters > 1 || loop_once; ) {
+		loop_once = false;
 		// non-waiting allocations should proceeed to vmem_alloc() immediately
 		if (vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT)) {
 			break;
@@ -2597,10 +2616,14 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 					atomic_inc_64(&spl_vba_loop_timeout);
 				break;
 			} else {
-				if (timedout & 1)
+				if (timedout & 1) {
 					atomic_inc_64(&spl_vba_cv_timeout_blocked);
-				if (timedout & 2)
+				}
+				if (timedout & 2) {
 					atomic_inc_64(&spl_vba_loop_timeout_blocked);
+				} else if (zfs_lbolt() > loop_timeout) {
+					timedout |= 2;
+				}
 			}
 		}
 		// The bucket is already allocating, or the bucket needs
@@ -2637,8 +2660,11 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		if (ret == -1) {
 			timedout |= 1;
 		} else if (timedout == 0) {
-			if (zfs_lbolt() >= loop_timeout)
+			if (zfs_lbolt() >= loop_timeout) {
 				timedout |= 2;
+				extern uint64_t real_total_memory;
+				spl_free_set_emergency_pressure(real_total_memory / 64LL);
+			}
 		}
 	}
 
