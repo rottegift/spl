@@ -409,7 +409,6 @@ uint64_t spl_xat_bailed = 0;
 uint64_t spl_xat_lastalloc = 0;
 uint64_t spl_xat_lastfree = 0;
 uint64_t spl_xat_forced = 0;
-uint64_t spl_xat_memory_appeared = 0;
 uint64_t spl_xat_sleep = 0;
 uint64_t spl_xat_late_deny = 0;
 uint64_t spl_xat_no_waiters = 0;
@@ -2261,20 +2260,8 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 		spl_xat_sleep++;
 		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
 		    wait_time, 0, 0);
-		// still under mutex
 		now = zfs_lbolt();
-		if (vmem_canalloc(bvmp, size)) {
-			atomic_inc_64(&spl_xat_memory_appeared);
-			// Memory has appeared thanks to another thread.
-			// Wake up anything waiting on the arena cv in vmem_xalloc().
-			waiters--;
-			// Once we return, vmem_xalloc() will immediately
-			// enter the mutex, and will quickly "goto do_alloc;".
-			mutex_exit(&bvmp->vm_lock);
-			return(NULL);
-		} else {
-			mutex_exit(&bvmp->vm_lock);
-		}
+		mutex_exit(&bvmp->vm_lock);
 		// We may be here because of a broadcast to &vmp->vm_cv,
 		// causing xnu to schedule all the sleepers in priority-weighted FIFO
 		// order.  Because of the mutex_exit(), the sections below here may
@@ -2337,8 +2324,8 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 			// open turnstile after having bailed, rather than before
 			waiters--;
 			return (b);
-		} else if (iter == 20 || ((iter % 8) == 0 && iter > 20)) {
-			spl_free_set_emergency_pressure(size * (iter / 8));
+		} else if (iter == 16 || ((iter % 8) == 0 && iter > 16)) {
+			spl_free_set_emergency_pressure(MAX(size,16LL*1024LL*1024LL));
 			atomic_inc_64(&spl_xat_pressured);
 		}
 	}

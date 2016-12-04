@@ -514,7 +514,6 @@ extern uint64_t spl_xat_bailed;
 extern uint64_t spl_xat_lastalloc;
 extern uint64_t spl_xat_lastfree;
 extern uint64_t spl_xat_forced;
-extern uint64_t spl_xat_memory_appeared;
 extern uint64_t spl_xat_sleep;
 extern uint64_t spl_xat_late_deny;
 extern uint64_t spl_xat_no_waiters;
@@ -570,7 +569,6 @@ typedef struct spl_stats {
 	kstat_named_t spl_xat_lastalloc;
 	kstat_named_t spl_xat_lastfree;
 	kstat_named_t spl_xat_forced;
-	kstat_named_t spl_xat_memory_appeared;
 	kstat_named_t spl_xat_sleep;
 	kstat_named_t spl_xat_late_deny;
 	kstat_named_t spl_xat_no_waiters;
@@ -624,7 +622,6 @@ static spl_stats_t spl_stats = {
 	{"spl_xat_lastalloc", KSTAT_DATA_UINT64},
 	{"spl_xat_lastfree", KSTAT_DATA_UINT64},
 	{"spl_xat_forced", KSTAT_DATA_UINT64},
-	{"spl_xat_memory_appeared", KSTAT_DATA_UINT64},
 	{"spl_xat_sleep", KSTAT_DATA_UINT64},
 	{"spl_xat_late_deny", KSTAT_DATA_UINT64},
 	{"spl_xat_no_waiters", KSTAT_DATA_UINT64},
@@ -4747,7 +4744,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_xat_lastalloc.value.ui64 = spl_xat_lastalloc;
 		ks->spl_xat_lastfree.value.ui64 = spl_xat_lastfree;
 		ks->spl_xat_forced.value.ui64 = spl_xat_forced;
-		ks->spl_xat_memory_appeared.value.ui64 = spl_xat_memory_appeared;
 		ks->spl_xat_sleep.value.ui64 = spl_xat_sleep;
 		ks->spl_xat_late_deny.value.ui64 = spl_xat_late_deny;
 		ks->spl_xat_no_waiters.value.ui64 = spl_xat_no_waiters;
