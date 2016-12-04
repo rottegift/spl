@@ -2106,161 +2106,78 @@ vmem_bucket_wake_all_waiters(void)
 }
 
 /*
- * return NULL in the typical case, but force an allocation if we have been
- * stuck waiting for an allocation for a long time
+ * xnu_alloc_throttled_bail() : spin looking for memory
+ *
  */
+
 static inline void *
-xnu_allocate_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, int vmflags)
+xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, int vmflags)
 {
 
-	// caller will be a bucket arena looking for memory
-	// vmp will be spl_default_arena_parent, which is just a placeholder.
+	// spin looking for memory
 
-	// we can allocate up to this much in a short time period
-	const int32_t recent_threshold = 16ULL*1024ULL*1024ULL;
+	const uint64_t bigtarget = MAX(size,16ULL*1024ULL*1024ULL);
 
-	// count of bytes allocated in the last second
-	static volatile _Atomic int32_t recently_allocated = 0;
+	static volatile _Atomic bool alloc_lock = false;
 
-	static volatile _Atomic uint64_t last_forced_ticks = 0;
+	static volatile _Atomic uint64_t force_time = 0;
 
-	// (Concurrent) allocations that are in xnu_alloc_throttled_bail().
-	static volatile _Atomic int32_t alloc_bytes_in_flight = 0;
+	uint64_t timeout_ticks = 10 * hz;
+	if (vmflags & VM_PUSHPAGE)
+		timeout_ticks = 1 * hz;
 
-	alloc_bytes_in_flight += size;
+	uint64_t timeout_time = now_ticks + timeout_ticks;
 
-	// if we have a long queue on this arena's cv_wait in vmem_xalloc()
-	// then we run the risk of stalling the whole I/O subsystem.  Force
-	// a single allocation here if so, then bounce the others back.
-
-	const int64_t unstall_threshold = 8;
-
-	if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
-		spl_free_set_emergency_pressure((int64_t)size * unstall_threshold);
-		static volatile _Atomic uint32_t unstall_waiters = 0;
-		static volatile _Atomic bool another_processing = false;
-		unstall_waiters++;
-		// note that the unstall waiters can be from different arenas
-		for (int iter = 0; unstall_waiters > 1; iter++) {
-			// wait on the arena cv
-			mutex_enter(&calling_vmp->vm_lock);
-			(void) cv_timedwait_hires(&calling_vmp->vm_cv, &calling_vmp->vm_lock,
-			    USEC2NSEC(500UL * MAX(unstall_waiters,1UL)), 0, 0);
-			// we are likely to have been awakened by a cv_broadcast
-			if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 < unstall_threshold)
-				break;
-			if (iter >= 10 && another_processing == false) {
-				another_processing = true;
-				break;
+	for (uint32_t suspends = 0, blocked_suspends = 0, try_no_pressure = 0; ; ) {
+		if (force_time + timeout_ticks > timeout_time) {
+			// another thread has forced an allocation
+			// by timing out.  push our deadline into the future.
+			timeout_time = force_time + timeout_ticks;
+		}
+		if (alloc_lock) {
+			blocked_suspends++;
+			kpreempt(KPREEMPT_SYNC);
+		} else	if (spl_vmem_xnu_useful_bytes_free() >= bigtarget) {
+			alloc_lock = true;
+			try_no_pressure++;
+			void *m = spl_vmem_malloc_if_no_pressure(size);
+			if (m != NULL) {
+				uint64_t ticks = zfs_lbolt() - now_ticks;
+				printf("SPL: %s returning %llu bytes after "
+				    "%llu ticks (hz=%u, seconds = %llu), "
+				    "%u suspends, %u blocked, %u tries\n",
+				    __func__, (uint64_t)size,
+				    ticks, hz, ticks/hz, suspends,
+				    blocked_suspends, try_no_pressure);
+				alloc_lock = false;
+				return(m);
+			} else {
+				alloc_lock = false;
+				spl_free_set_emergency_pressure(bigtarget);
+				suspends++;
+				kpreempt(KPREEMPT_SYNC);
 			}
-			mutex_exit(&calling_vmp->vm_lock);
-			spl_free_set_emergency_pressure((int64_t)size);
-		}
-		// still have the mutex
-		if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 >= unstall_threshold) {
-			// we're the only waiter
-			void *force_m = spl_vmem_malloc_unconditionally(size);
+		} else if (zfs_lbolt() > timeout_time) {
+			alloc_lock = true;
+			void *mp = spl_vmem_malloc_unconditionally(size);
+			uint64_t now = zfs_lbolt();
+			uint64_t ticks = now - now_ticks;
+			force_time = now;
+			printf("SPL: %s TIMEOUT %llu bytes after "
+			    "%llu ticks (hz=%u, seconds=%llu), "
+			    "%u suspends, %u blocked, %u tries\n",
+			    __func__, (uint64_t)size,
+			    ticks, hz, ticks/hz, suspends,
+			    blocked_suspends, try_no_pressure);
+			alloc_lock = false;
 			atomic_inc_64(&spl_xat_forced);
-			last_forced_ticks = now_ticks;
-			recently_allocated += size;
-			unstall_waiters--;
-			another_processing = false;
-			mutex_exit(&calling_vmp->vm_lock);
-			alloc_bytes_in_flight -= size;
-			return (force_m);
+			return(mp);
 		} else {
-			// we exited the for loop and the cv_wait queue is now
-			// relatively short, so bounce back to vmem_xalloc(), but
-			// wake up a single other waiter, which might be in the for
-			// loop above, or might be in the xalloc cv_wait().
-			// the last one out of the for loop for this arena will
-			// almost certainly wake up a waiter in xalloc, so the queue
-			// will continue to try to be drained.
-			unstall_waiters--;
-			another_processing = false;
-			cv_signal(&calling_vmp->vm_cv);
-			mutex_exit(&calling_vmp->vm_lock);
-			if (recently_allocated >= recent_threshold) {
-				alloc_bytes_in_flight -= size;
-				return (NULL);
-			} else
-				now_ticks = zfs_lbolt();
+			spl_free_set_emergency_pressure(bigtarget);
+			suspends++;
+			kpreempt(KPREEMPT_SYNC);
 		}
 	}
-
-	// if this arena has  a queue at the cv_wait in vmem_xalloc() that
-	// is this long, a forced allocation will be efficient.
-	const uint64_t max_arena_waiters = 4;
-
-	// if (concurrently) we are dealing more than the threshold of bytes,
-	// deny this thread entry unless we have a long queue at the arena cv_wait
-
-	if (alloc_bytes_in_flight > recent_threshold) {
-		if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
-			alloc_bytes_in_flight -= size;
-                        return (NULL);
-		}
-	}
-
-	const uint64_t one_second = hz;
-
-	// wait at least one second from previous force
-	// unless we haven't allocated over the recent_threshold yet
-
-	if (now_ticks < last_forced_ticks + one_second) {
-		if (recently_allocated >= recent_threshold) {
-			alloc_bytes_in_flight -= size;
-			return (NULL);
-		} else {
-			// it has been a second, clear out recently_allocated
-			recently_allocated = 0;
-		}
-	}
-
-	const uint64_t last_success_seconds = spl_xat_lastalloc;
-	const uint64_t last_success_ticks = last_success_seconds * 60ULL;
-
-	// if XAT has done any successful allocation in the past
-	// second, don't allocate now unless we have a long queue
-	// at the arena's cv_wait, because it's likely that XAT will
-	// shortly be able to do another allocation that will
-	// satisfy this one.
-
-	if (now_ticks < last_success_ticks + one_second) {
-		if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
-			alloc_bytes_in_flight -= size;
-			return (NULL);
-		}
-	}
-
-	const uint64_t lastfree_seconds = spl_xat_lastfree;
-	const uint64_t lastfree_ticks = lastfree_seconds * 60ULL;
-
-	// if we have freed in the past second, then bail out
-	// unless there is already a big queue at the cv_wait.
-	// recent freeing implies memory thrashing, which we
-	// do not want to exacerbate, or newly available memory,
-	// which XAT can allocate non-forcibly soon enough.
-
-	if (now_ticks < lastfree_ticks + one_second) {
-		if (calling_vmp->vm_kstat.vk_threads_waiting.value.ui64 < max_arena_waiters) {
-			alloc_bytes_in_flight -= size;
-			return (NULL);
-		}
-	}
-
-	if (recently_allocated < recent_threshold) {
-		last_forced_ticks = now_ticks;
-		recently_allocated += size;
-		void *um = spl_vmem_malloc_unconditionally(size);
-		alloc_bytes_in_flight -= size;
-		atomic_inc_64(&spl_xat_forced);
-		return (um);
-	}
-
-	// we have allocated too much recently, bail out
-	alloc_bytes_in_flight -= size;
-	return (NULL);
 }
 
 static void *
@@ -2303,7 +2220,7 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	}
 
 	if (vmflag & VM_NOSLEEP) {
-		spl_free_set_emergency_pressure(2LL * (int64_t)size);
+		spl_free_set_emergency_pressure(MAX(2LL * (int64_t)size,16LL*1024LL*1024LL));
 		kpreempt(KPREEMPT_SYNC); /* cheating a bit, but not really waiting */
 		void *p = spl_vmem_malloc_if_no_pressure(size);
 		if (p != NULL) {
@@ -2404,7 +2321,9 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 			// of the for loop, including going to zero.
 			//
 			atomic_inc_64(&spl_xat_bailed);
-			void *b = xnu_allocate_throttled_bail(now, bvmp, size, vmflag);
+			atomic_inc_64(&bvmp->vm_kstat.vk_threads_waiting.value.ui64);
+			void *b = xnu_alloc_throttled_bail(now, bvmp, size, vmflag);
+			atomic_dec_64(&bvmp->vm_kstat.vk_threads_waiting.value.ui64);
 			if (b != NULL) {
 				atomic_swap_64(&spl_xat_lastalloc, now / hz);
 				// wake up waiters on the arena lock,
@@ -2606,6 +2525,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				// its allocation is completed, and there might be excess in the
 				// bucket_heap arena, so stick around in this loop.
 				atomic_inc_64(&spl_vba_parent_memory_blocked);
+				cv_broadcast(&bvmp->vm_cv);
 			}
 		}
 		if (timedout > 0) {
@@ -2624,6 +2544,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				} else if (zfs_lbolt() > loop_timeout) {
 					timedout |= 2;
 				}
+				cv_broadcast(&bvmp->vm_cv);
 			}
 		}
 		// The bucket is already allocating, or the bucket needs
@@ -2659,11 +2580,13 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		mutex_exit(&calling_arena->vm_lock);
 		if (ret == -1) {
 			timedout |= 1;
+			cv_broadcast(&bvmp->vm_cv);
 		} else if (timedout == 0) {
 			if (zfs_lbolt() >= loop_timeout) {
 				timedout |= 2;
 				extern uint64_t real_total_memory;
 				spl_free_set_emergency_pressure(real_total_memory / 64LL);
+				cv_broadcast(&bvmp->vm_cv);
 			}
 		}
 	}
