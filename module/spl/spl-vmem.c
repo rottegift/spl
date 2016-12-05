@@ -413,7 +413,6 @@ uint64_t spl_xat_sleep = 0;
 uint64_t spl_xat_late_deny = 0;
 uint64_t spl_xat_no_waiters = 0;
 
-uint64_t spl_vba_memory_appeared = 0;
 uint64_t spl_vba_parent_memory_appeared = 0;
 uint64_t spl_vba_parent_memory_blocked = 0;
 uint64_t spl_vba_cv_timeout = 0;
@@ -426,6 +425,10 @@ uint64_t spl_vba_loop_entries = 0;
 // bucket minimum span size tunables
 uint64_t spl_bucket_tunable_large_span = 0;
 uint64_t spl_bucket_tunable_small_span = 0;
+
+// for XAT & XATB visibility into VBA queue
+static _Atomic uint32_t spl_vba_threads[VMEM_BUCKETS] = { 0 };
+static uint32_t vmem_bucket_id_to_bucket_number[NUMBER_OF_ARENAS_IN_VMEM_INIT] = { 0 };
 
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
@@ -2121,9 +2124,9 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 
 	static volatile _Atomic uint64_t force_time = 0;
 
-	uint64_t timeout_ticks = 10 * hz;
+	uint64_t timeout_ticks = hz;
 	if (vmflags & VM_PUSHPAGE)
-		timeout_ticks = 1 * hz;
+		timeout_ticks = hz / 2;
 
 	uint64_t timeout_time = now_ticks + timeout_ticks;
 
@@ -2189,6 +2192,7 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	vmem_t *bvmp = vmem_bucket_arena_by_size(size);
 
 	uint64_t now = zfs_lbolt();
+	const uint64_t entry_now = now;
 
 	void *m = spl_vmem_malloc_if_no_pressure(size);
 
@@ -2247,6 +2251,8 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	 *
 	 */
 
+	const uint32_t bucket_number = vmem_bucket_id_to_bucket_number[bvmp->vm_id];
+
 	static volatile _Atomic uint32_t waiters = 0;
 
 	waiters++;
@@ -2254,7 +2260,7 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	if (waiters == 1)
 		atomic_inc_64(&spl_xat_no_waiters);
 
-	for (int iter = 0; ; iter++) {
+	for (; ;) {
 		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
 		mutex_enter(&bvmp->vm_lock);
 		spl_xat_sleep++;
@@ -2288,43 +2294,22 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 				continue;
 			}
 		}
-		if ((iter >= 20 &&
-			iter >= 20 * (int)waiters &&
-			iter >= 40 * (int)bvmp->vm_kstat.vk_threads_waiting.value.ui64 &&
-			iter >= 30 * (int)spl_vmem_threads_waiting) ||
-		    bvmp->vm_kstat.vk_threads_waiting.value.ui64 >= 8) {
-			// if there is a large cv_wait() queue already, or
-			// after ~ 10 milliseconds (if no other waiters),
-			// bail out and let vmem_xalloc() deal with it,
-			// most likely by putting this thread into its cv_wait().
-			//
-			// We are VM_SLEEP here, so if there are many waiters,
-			// it is OK to loop them a bit longer in hopes
-			// that another thread frees to vmp or another thread
-			// successfully imports memory into vmp.
-			//
-			// Any or all of waiters the arena and global _threads_waiting
-			// may have changed during the cv_timedwait_hires at the top
-			// of the for loop, including going to zero.
-			//
+		if (now > entry_now + hz / 4 || spl_vba_threads[bucket_number] > 1) {
+			// If there are other threads waiting for us in vba()
+			// then when we satisfy this allocation, we satisfy more than one
+			// thread, so invoke XATB().
+			// Otherwise, if we have had no luck for 250 ms, then
+			// switch to XATB() which is much more aggressive.
 			atomic_inc_64(&spl_xat_bailed);
-			atomic_inc_64(&bvmp->vm_kstat.vk_threads_waiting.value.ui64);
 			void *b = xnu_alloc_throttled_bail(now, bvmp, size, vmflag);
-			atomic_dec_64(&bvmp->vm_kstat.vk_threads_waiting.value.ui64);
-			if (b != NULL) {
-				atomic_swap_64(&spl_xat_lastalloc, now / hz);
-				// wake up waiters on the arena lock,
-				// since they now have memory they can use.
-				cv_broadcast(&bvmp->vm_cv);
-			} else {
-				const int64_t pressure =
-				    size * (2LL + bvmp->vm_kstat.vk_threads_waiting.value.ui64);
-				spl_free_set_emergency_pressure(pressure);
-			}
+			atomic_swap_64(&spl_xat_lastalloc, now / hz);
+			// wake up waiters on the arena lock,
+			// since they now have memory they can use.
+			cv_broadcast(&bvmp->vm_cv);
 			// open turnstile after having bailed, rather than before
 			waiters--;
 			return (b);
-		} else if (iter == 16 || ((iter % 8) == 0 && iter > 16)) {
+	        } else if (now - entry_now > 0 && ((now - entry_now) % (hz/10))) {
 			spl_free_set_emergency_pressure(MAX(size,16LL*1024LL*1024LL));
 			atomic_inc_64(&spl_xat_pressured);
 		}
@@ -2438,7 +2423,10 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	// vmem_alloc(bucket, ...) below.
 
 	static volatile _Atomic uint16_t buckets_busy_allocating = 0;
-	const uint16_t bucket_bit = (uint16_t)1 << vmem_bucket_number(size);
+	const uint16_t bucket_number = vmem_bucket_number(size);
+	const uint16_t bucket_bit = (uint16_t)1 << bucket_number;
+
+	spl_vba_threads[bucket_number]++;
 
 	static volatile _Atomic uint32_t waiters = 0;
 
@@ -2550,20 +2538,6 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		    wait_time, 0, 0);
 		// We almost certainly have exited because of a signal/broadcast,
 		// but maybe just timed out.  Either way, recheck memory.
-		if (vmem_canalloc(calling_arena, size)) {
-			// Another thread may has caused memory to become
-			// available in our own arena; when we have returned to
-			// vmem_xalloc(), it will almost certainly do a "goto do_alloc;",
-			// and at worst we end up in the arena cv_wait()
-			// with kstat.vmem.vmem.bucket_heap.wait incremented.
-			// However, we don't want to wake up other sleepers
-			// on vmp->vm_cv, as we don't know at this point whether
-			// they would make any useful progress.
-			spl_vba_memory_appeared++; // under mutex and before lock decw, so normal inc.
-			waiters--;
-			mutex_exit(&calling_arena->vm_lock);
-			return(NULL);
-		}
 		mutex_exit(&calling_arena->vm_lock);
 		if (ret == -1) {
 			timedout |= 1;
@@ -2667,6 +2641,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	}
 
 	waiters--;
+	spl_vba_threads[bucket_number]--;
 	return (m);
 }
 
@@ -2965,10 +2940,12 @@ vmem_init(const char *heap_name,
 		}
 		printf("SPL: %s setting bucket %d (%d) to size %llu\n",
 		    __func__, i, (int)(1 << i), (uint64_t)minimum_allocsize);
-		vmem_bucket_arena[i - VMEM_BUCKET_LOWBIT] =
-		    vmem_create(buf, NULL, 0, heap_quantum,
-			xnu_alloc_throttled, xnu_free_throttled, spl_default_arena_parent,
-			minimum_allocsize, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
+		const int bucket_number = i - VMEM_BUCKET_LOWBIT;
+		vmem_t *b = vmem_create(buf, NULL, 0, heap_quantum,
+		    xnu_alloc_throttled, xnu_free_throttled, spl_default_arena_parent,
+		    minimum_allocsize, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
+		vmem_bucket_arena[bucket_number] = b;
+		vmem_bucket_id_to_bucket_number[b->vm_id] = bucket_number;
 	}
 
 	// spl_heap_arena, the bucket heap, is the primary interface to the vmem system

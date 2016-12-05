@@ -518,7 +518,6 @@ extern uint64_t spl_xat_sleep;
 extern uint64_t spl_xat_late_deny;
 extern uint64_t spl_xat_no_waiters;
 
-extern uint64_t spl_vba_memory_appeared;
 extern uint64_t spl_vba_parent_memory_appeared;
 extern uint64_t spl_vba_parent_memory_blocked;
 extern uint64_t spl_vba_cv_timeout;
@@ -573,7 +572,6 @@ typedef struct spl_stats {
 	kstat_named_t spl_xat_late_deny;
 	kstat_named_t spl_xat_no_waiters;
 
-	kstat_named_t spl_vba_memory_appeared;
 	kstat_named_t spl_vba_parent_memory_appeared;
 	kstat_named_t spl_vba_parent_memory_blocked;
 	kstat_named_t spl_vba_cv_timeout;
@@ -626,7 +624,6 @@ static spl_stats_t spl_stats = {
 	{"spl_xat_late_deny", KSTAT_DATA_UINT64},
 	{"spl_xat_no_waiters", KSTAT_DATA_UINT64},
 
-	{"spl_vba_memory_appeared", KSTAT_DATA_UINT64},
 	{"spl_vba_parent_memory_appeared", KSTAT_DATA_UINT64},
 	{"spl_vba_parent_memory_blocked", KSTAT_DATA_UINT64},
 	{"spl_vba_cv_timeout", KSTAT_DATA_UINT64},
@@ -4748,7 +4745,6 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_xat_late_deny.value.ui64 = spl_xat_late_deny;
 		ks->spl_xat_no_waiters.value.ui64 = spl_xat_no_waiters;
 
-		ks->spl_vba_memory_appeared.value.ui64 = spl_vba_memory_appeared;
 		ks->spl_vba_parent_memory_appeared.value.ui64 = spl_vba_parent_memory_appeared;
 		ks->spl_vba_parent_memory_blocked.value.ui64 = spl_vba_parent_memory_blocked;
 		ks->spl_vba_cv_timeout.value.ui64 = spl_vba_cv_timeout;
