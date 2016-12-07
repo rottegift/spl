@@ -406,6 +406,7 @@ uint64_t spl_xat_late_success = 0;
 uint64_t spl_xat_late_success_nosleep = 0;
 uint64_t spl_xat_pressured = 0;
 uint64_t spl_xat_bailed = 0;
+uint64_t spl_xat_bailed_contended = 0;
 uint64_t spl_xat_lastalloc = 0;
 uint64_t spl_xat_lastfree = 0;
 uint64_t spl_xat_forced = 0;
@@ -2300,6 +2301,8 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 			// thread, so invoke XATB().
 			// Otherwise, if we have had no luck for 250 ms, then
 			// switch to XATB() which is much more aggressive.
+			if (spl_vba_threads[bucket_number] > 1)
+				atomic_inc_64(&spl_xat_bailed_contended);
 			atomic_inc_64(&spl_xat_bailed);
 			void *b = xnu_alloc_throttled_bail(now, bvmp, size, vmflag);
 			atomic_swap_64(&spl_xat_lastalloc, now / hz);
@@ -2460,11 +2463,10 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	// If there is more than one thread in this function (~ few percent)
 	// then the subsequent threads are put into the loop below.   They
 	// can escape the loop if they are [1]non-waiting allocations, or
-	// [2]when there is uncontended free memory in the calling bucket,
-	// [3]if they become the only waiting thread, or
-	// [4]if the cv_timedwait_hires returns -1 (which represents EWOULDBLOCK
+	// [2]if they become the only waiting thread, or
+	// [3]if the cv_timedwait_hires returns -1 (which represents EWOULDBLOCK
 	// from msleep() which gets it from _sleep()'s THREAD_TIMED_OUT)
-	// allocating in the bucket, or if this thread has (highly improbably!) spent
+	// allocating in the bucket, or [4]if this thread has (rare condition) spent
 	// a quarter of a second in the loop.
 
 	if (waiters++ > 1 || loop_once) {
@@ -2519,6 +2521,8 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				} else if (zfs_lbolt() > loop_timeout) {
 					timedout |= 2;
 				}
+				// flush the current thread in xat() out of
+				// xat()'s for() loop and into xat_bail()
 				cv_broadcast(&bvmp->vm_cv);
 			}
 		}
@@ -2547,6 +2551,8 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				timedout |= 2;
 				extern uint64_t real_total_memory;
 				spl_free_set_emergency_pressure(real_total_memory / 64LL);
+				// flush the current thread in xat() out of
+				// xat()'s for() loop and into xat_bail()
 				cv_broadcast(&bvmp->vm_cv);
 			}
 		}
