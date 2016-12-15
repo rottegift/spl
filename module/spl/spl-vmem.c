@@ -2258,7 +2258,7 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 
 	waiters++;
 
-	if (waiters == 1)
+	if (waiters == 1UL)
 		atomic_inc_64(&spl_xat_no_waiters);
 
 	for (; ;) {
@@ -2295,13 +2295,13 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 				continue;
 			}
 		}
-		if (now > entry_now + hz / 4 || spl_vba_threads[bucket_number] > 1) {
+		if (now > entry_now + hz / 4 || spl_vba_threads[bucket_number] > 1UL) {
 			// If there are other threads waiting for us in vba()
 			// then when we satisfy this allocation, we satisfy more than one
 			// thread, so invoke XATB().
 			// Otherwise, if we have had no luck for 250 ms, then
 			// switch to XATB() which is much more aggressive.
-			if (spl_vba_threads[bucket_number] > 1)
+			if (spl_vba_threads[bucket_number] > 1UL)
 				atomic_inc_64(&spl_xat_bailed_contended);
 			atomic_inc_64(&spl_xat_bailed);
 			void *b = xnu_alloc_throttled_bail(now, bvmp, size, vmflag);
@@ -2350,7 +2350,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	static volatile _Atomic bool is_freeing = false;
 
 	a_waiters++; // generates "lock incl ..."
-	for (uint32_t iter = 0; a_waiters > 1; iter++) {
+	for (uint32_t iter = 0; a_waiters > 1UL; iter++) {
 		// If are growing old in this loop, then see if
 		// anyone else is still in osif_free.  If not, we can exit.
 		if (iter > a_waiters && is_freeing == false) {
@@ -2474,7 +2474,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	}
 
 	for (uint64_t loop_timeout = zfs_lbolt() + (hz/4), timedout = 0;
-	     waiters > 1 || loop_once; ) {
+	     waiters > 1UL || loop_once; ) {
 		loop_once = false;
 		// non-waiting allocations should proceeed to vmem_alloc() immediately
 		if (vmflags & (VM_NOSLEEP | VM_PANIC | VM_ABORT)) {
