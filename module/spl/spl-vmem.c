@@ -435,6 +435,8 @@ extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
 extern uint64_t total_memory;
 
+extern void IOSleep(unsigned milliseconds);
+
 /*
  * Get a vmem_seg_t from the global segfree list.
  */
@@ -2125,9 +2127,9 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 
 	static volatile _Atomic uint64_t force_time = 0;
 
-	uint64_t timeout_ticks = hz;
+	uint64_t timeout_ticks = hz / 2;
 	if (vmflags & VM_PUSHPAGE)
-		timeout_ticks = hz / 2;
+		timeout_ticks = hz / 4;
 
 	uint64_t timeout_time = now_ticks + timeout_ticks;
 
@@ -2158,7 +2160,7 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 				alloc_lock = false;
 				spl_free_set_emergency_pressure(bigtarget);
 				suspends++;
-				kpreempt(KPREEMPT_SYNC);
+				IOSleep(1);
 			}
 		} else if (zfs_lbolt() > timeout_time) {
 			alloc_lock = true;
@@ -2178,7 +2180,7 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 		} else {
 			spl_free_set_emergency_pressure(bigtarget);
 			suspends++;
-			kpreempt(KPREEMPT_SYNC);
+			IOSleep(1);
 		}
 	}
 }
@@ -2442,7 +2444,7 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	    ! vmem_canalloc_atomic(bvmp, size)) {
 		if (spl_vmem_xnu_useful_bytes_free() < (MAX(size,16ULL*1024ULL*1024ULL))) {
 			spl_free_set_emergency_pressure(size);
-			kpreempt(KPREEMPT_SYNC);
+			IOSleep(1);
 			if (! vmem_canalloc_atomic(bvmp, size) &&
 			    (spl_vmem_xnu_useful_bytes_free() < (MAX(size,16ULL*1024ULL*1024ULL)))) {
 				loop_once = true;
@@ -2537,6 +2539,9 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		clock_t wait_time = MSEC2NSEC(30);
 		if ((vmflags & VM_PUSHPAGE) == 0) {
 			wait_time *= 2; // lower-priority allocs to back of queue
+		}
+		if (timedout > 0) {
+			wait_time = MSEC2NSEC(1);
 		}
 		int ret = cv_timedwait_hires(&calling_arena->vm_cv, &calling_arena->vm_lock,
 		    wait_time, 0, 0);
