@@ -2141,7 +2141,7 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 		}
 		if (alloc_lock) {
 			blocked_suspends++;
-			kpreempt(KPREEMPT_SYNC);
+			IOSleep(1);
 		} else	if (spl_vmem_xnu_useful_bytes_free() >= bigtarget) {
 			alloc_lock = true;
 			try_no_pressure++;
