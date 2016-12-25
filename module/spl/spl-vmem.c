@@ -2263,10 +2263,16 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	if (waiters == 1UL)
 		atomic_inc_64(&spl_xat_no_waiters);
 
+	boolean_t local_xat_pressured = false;
+
 	for (; ;) {
 		clock_t wait_time = USEC2NSEC(500UL * MAX(waiters,1UL));
 		mutex_enter(&bvmp->vm_lock);
 		spl_xat_sleep++;
+		if (local_xat_pressured) {
+			spl_xat_pressured++;
+			local_xat_pressured = false;
+		}
 		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
 		    wait_time, 0, 0);
 		now = zfs_lbolt();
@@ -2316,7 +2322,7 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 			return (b);
 	        } else if (now - entry_now > 0 && ((now - entry_now) % (hz/10))) {
 			spl_free_set_emergency_pressure(MAX(size,16LL*1024LL*1024LL));
-			atomic_inc_64(&spl_xat_pressured);
+			local_xat_pressured = true;
 		}
 	}
 }
