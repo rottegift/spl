@@ -2475,6 +2475,10 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		atomic_inc_64(&spl_vba_loop_entries);
 	}
 
+	// local counters, to be added atomically to global kstat variables
+	uint64_t local_memory_blocked = 0, local_cv_timeout = 0, local_loop_timeout = 0;
+	uint64_t local_sleep = 0;
+
 	for (uint64_t loop_timeout = zfs_lbolt() + (hz/4), timedout = 0;
 	     waiters > 1UL || loop_once; ) {
 		loop_once = false;
@@ -2503,23 +2507,23 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				// bucket_## arena; there might still be free memory there after
 				// its allocation is completed, and there might be excess in the
 				// bucket_heap arena, so stick around in this loop.
-				atomic_inc_64(&spl_vba_parent_memory_blocked);
+				local_memory_blocked++;
 				cv_broadcast(&bvmp->vm_cv);
 			}
 		}
 		if (timedout > 0) {
 			if (vba_atomic_lock_bucket(&buckets_busy_allocating, bucket_bit)) {
 				if (timedout & 1)
-					atomic_inc_64(&spl_vba_cv_timeout);
+					local_cv_timeout++;
 				if (timedout & 2 || zfs_lbolt() >= loop_timeout)
-					atomic_inc_64(&spl_vba_loop_timeout);
+					local_loop_timeout++;
 				break;
 			} else {
 				if (timedout & 1) {
-					atomic_inc_64(&spl_vba_cv_timeout_blocked);
+					local_cv_timeout++;
 				}
 				if (timedout & 2) {
-					atomic_inc_64(&spl_vba_loop_timeout_blocked);
+					local_loop_timeout++;
 				} else if (zfs_lbolt() > loop_timeout) {
 					timedout |= 2;
 				}
@@ -2535,12 +2539,12 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		// substitute for the vmp arena's cv_wait in vmem_xalloc()
 		// (vmp is the bucket_heap AKA spl_heap_arena)
 		mutex_enter(&calling_arena->vm_lock);
-		spl_vba_sleep++;
+		local_sleep++;
 		clock_t wait_time = MSEC2NSEC(30);
 		if ((vmflags & VM_PUSHPAGE) == 0) {
 			wait_time *= 2; // lower-priority allocs to back of queue
 		}
-		if (timedout > 0) {
+		if (timedout > 0 || local_memory_blocked > 0) {
 			wait_time = MSEC2NSEC(1);
 		}
 		int ret = cv_timedwait_hires(&calling_arena->vm_cv, &calling_arena->vm_lock,
@@ -2549,9 +2553,12 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		// but maybe just timed out.  Either way, recheck memory.
 		mutex_exit(&calling_arena->vm_lock);
 		if (ret == -1) {
+			// cv_timedwait_hires timer expired
 			timedout |= 1;
 			cv_broadcast(&bvmp->vm_cv);
 		} else if (timedout == 0) {
+			// we were awakened; check to see if we have been
+			// in the for loop for a long time
 			if (zfs_lbolt() >= loop_timeout) {
 				timedout |= 2;
 				extern uint64_t real_total_memory;
@@ -2612,6 +2619,16 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	// vmem_canalloc(bvmp, that_thread's_size) is true.
 
 	buckets_busy_allocating |= bucket_bit;
+
+	// update counters
+	if (local_sleep > 0)
+		atomic_add_64(&spl_vba_sleep, local_sleep);
+	if (local_memory_blocked > 0)
+		atomic_add_64(&spl_vba_parent_memory_blocked, local_memory_blocked);
+	if (local_cv_timeout > 0)
+		atomic_add_64(&spl_vba_cv_timeout, local_cv_timeout);
+	if (local_loop_timeout > 0)
+		atomic_add_64(&spl_vba_loop_timeout, local_loop_timeout);
 
 	// There is memory in this bucket, or there are no other waiters,
 	// or we aren't a VM_SLEEP allocation,  or we iterated out of the for loop.
