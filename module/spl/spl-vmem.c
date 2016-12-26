@@ -416,6 +416,7 @@ uint64_t spl_xat_no_waiters = 0;
 
 uint64_t spl_vba_parent_memory_appeared = 0;
 uint64_t spl_vba_parent_memory_blocked = 0;
+uint64_t spl_vba_hiprio_blocked = 0;
 uint64_t spl_vba_cv_timeout = 0;
 uint64_t spl_vba_loop_timeout = 0;
 uint64_t spl_vba_cv_timeout_blocked = 0;
@@ -2424,6 +2425,14 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 
 	vmem_t *calling_arena = spl_heap_arena;
 
+	static volatile _Atomic uint32_t hipriority_allocators = 0;
+	boolean_t local_hipriority_allocator = false;
+
+	if (0 != (vmflags & (VM_PUSHPAGE | VM_NOSLEEP | VM_PANIC | VM_ABORT))) {
+		local_hipriority_allocator = true;
+		hipriority_allocators++;
+	}
+
 	if (!ISP2(size))
 		atomic_inc_64(&spl_bucket_non_pow2_allocs);
 
@@ -2483,7 +2492,8 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 
 	// local counters, to be added atomically to global kstat variables
 	uint64_t local_memory_blocked = 0, local_cv_timeout = 0, local_loop_timeout = 0;
-	uint64_t local_sleep = 0;
+	uint64_t local_cv_timeout_blocked = 0, local_loop_timeout_blocked = 0;
+	uint64_t local_sleep = 0, local_hipriority_blocked = 0;
 
 	for (uint64_t loop_timeout = zfs_lbolt() + (hz/4), timedout = 0;
 	     waiters > 1UL || loop_once; ) {
@@ -2503,7 +2513,14 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			// However, we should protect against a burst of
 			// callers hitting the same bvmp before the allocation
 			// results are reflected in vmem_canalloc_atomic(bvmp, ...)
-			if (vba_atomic_lock_bucket(&buckets_busy_allocating, bucket_bit)) {
+			if (local_hipriority_allocator == false &&
+			    hipriority_allocators > 0) {
+				// more high priority allocations are wanted,
+				// so this thread stays here
+				local_hipriority_blocked++;
+			} else if (vba_atomic_lock_bucket(&buckets_busy_allocating, bucket_bit)) {
+				// we are not being blocked by another allocator
+				// to the same bucket, or any higher priority allocator
 				atomic_inc_64(&spl_vba_parent_memory_appeared);
 				break;
 				// The vmem_alloc() should return extremely quickly from
@@ -2518,7 +2535,10 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			}
 		}
 		if (timedout > 0) {
-			if (vba_atomic_lock_bucket(&buckets_busy_allocating, bucket_bit)) {
+			if (local_hipriority_allocator == false &&
+			    hipriority_allocators > 0) {
+				local_hipriority_blocked++;
+			} else  if (vba_atomic_lock_bucket(&buckets_busy_allocating, bucket_bit)) {
 				if (timedout & 1)
 					local_cv_timeout++;
 				if (timedout & 2 || zfs_lbolt() >= loop_timeout)
@@ -2526,10 +2546,10 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 				break;
 			} else {
 				if (timedout & 1) {
-					local_cv_timeout++;
+					local_cv_timeout_blocked++;
 				}
 				if (timedout & 2) {
-					local_loop_timeout++;
+					local_loop_timeout_blocked++;
 				} else if (zfs_lbolt() > loop_timeout) {
 					timedout |= 2;
 				}
@@ -2633,8 +2653,14 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		atomic_add_64(&spl_vba_parent_memory_blocked, local_memory_blocked);
 	if (local_cv_timeout > 0)
 		atomic_add_64(&spl_vba_cv_timeout, local_cv_timeout);
+	if (local_cv_timeout_blocked > 0)
+		atomic_add_64(&spl_vba_cv_timeout_blocked, local_cv_timeout_blocked);
 	if (local_loop_timeout > 0)
 		atomic_add_64(&spl_vba_loop_timeout, local_loop_timeout);
+	if (local_loop_timeout_blocked > 0)
+		atomic_add_64(&spl_vba_loop_timeout_blocked, local_loop_timeout_blocked);
+	if (local_hipriority_blocked > 0)
+		atomic_add_64(&spl_vba_hiprio_blocked, local_hipriority_blocked);
 
 	// There is memory in this bucket, or there are no other waiters,
 	// or we aren't a VM_SLEEP allocation,  or we iterated out of the for loop.
@@ -2665,6 +2691,9 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	 */
 
 	buckets_busy_allocating &= ~bucket_bit;
+
+	if (local_hipriority_allocator)
+		hipriority_allocators--;
 
 	// if we got an allocation, wake up the arena cv waiters
 	// to let them try to exit the for(;;) loop above and
