@@ -2536,14 +2536,14 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			} else  if (vba_atomic_lock_bucket(&buckets_busy_allocating, bucket_bit)) {
 				if (timedout & 1)
 					local_cv_timeout++;
-				if (timedout & 2 || zfs_lbolt() >= loop_timeout)
+				if (timedout & 6 || zfs_lbolt() >= loop_timeout)
 					local_loop_timeout++;
 				break;
 			} else {
 				if (timedout & 1) {
 					local_cv_timeout_blocked++;
 				}
-				if (timedout & 2) {
+				if (timedout & 6) {
 					local_loop_timeout_blocked++;
 				} else if (zfs_lbolt() > loop_timeout) {
 					timedout |= 2;
@@ -2588,18 +2588,19 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 			// cv_timedwait_hires timer expired
 			timedout |= 1;
 			cv_broadcast(&bvmp->vm_cv);
-		} else if (timedout == 0) {
+		} else if ((timedout & 2) == 0) {
 			// we were awakened; check to see if we have been
 			// in the for loop for a long time
 			uint64_t n = zfs_lbolt();
-			if ((local_hipriority_allocator && n > hiprio_timeout && waiters > 1UL) ||
-			    n > loop_timeout) {
+			if (n > loop_timeout) {
 				timedout |= 2;
 				extern uint64_t real_total_memory;
 				spl_free_set_emergency_pressure(real_total_memory / 64LL);
 				// flush the current thread in xat() out of
 				// xat()'s for() loop and into xat_bail()
 				cv_broadcast(&bvmp->vm_cv);
+			} else if (local_hipriority_allocator && n > hiprio_timeout && waiters > 1UL) {
+				timedout |= 4;
 			}
 		}
 	}
