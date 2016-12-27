@@ -2362,9 +2362,15 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	for (uint32_t iter = 0; a_waiters > 1UL; iter++) {
 		// If are growing old in this loop, then see if
 		// anyone else is still in osif_free.  If not, we can exit.
-		if (iter > a_waiters && is_freeing == false) {
-			is_freeing = true;
-			break;
+		if (iter > a_waiters) {
+			// if is_freeing == f, then set is_freeing to true with
+			// release semantics (i.e. "push" it to other cores) then break;
+			// otherwise, set f to true relaxedly (i.e., optimize it out)
+			bool f = false;
+			if (__c11_atomic_compare_exchange_weak(&is_freeing, &f, true,
+				__ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+				break;
+			}
 		}
 		// There is a queue waiting for the mutex, sleep.
 		mutex_enter(&vmem_xnu_alloc_free_lock);
