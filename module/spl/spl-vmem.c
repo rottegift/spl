@@ -323,8 +323,7 @@ static kmutex_t vmem_sleep_lock;
 static kmutex_t vmem_nosleep_lock;
 static kmutex_t vmem_pushpage_lock;
 static kmutex_t vmem_panic_lock;
-static kmutex_t vmem_xnu_alloc_free_lock;
-static kcondvar_t vmem_xnu_alloc_free_cv;
+static kmutex_t vmem_xnu_alloc_lock;
 static vmem_t *vmem_list;
 static vmem_t *vmem_metadata_arena;
 static vmem_t *vmem_seg_arena;
@@ -1079,10 +1078,9 @@ spl_vmem_malloc_unconditionally_unlocked(size_t size)
 static void *
 spl_vmem_malloc_unconditionally(size_t size)
 {
-	mutex_enter(&vmem_xnu_alloc_free_lock);
+	mutex_enter(&vmem_xnu_alloc_lock);
 	void *m = spl_vmem_malloc_unconditionally_unlocked(size);
-	cv_broadcast(&vmem_xnu_alloc_free_cv);
-	mutex_exit(&vmem_xnu_alloc_free_lock);
+	mutex_exit(&vmem_xnu_alloc_lock);
 	return (m);
 }
 
@@ -1091,21 +1089,20 @@ spl_vmem_malloc_if_no_pressure(size_t size)
 {
 	// The mutex serializes concurrent callers, providing time for
 	// the variables in spl_vmem_xnu_useful_bytes_free() to be updated.
-	mutex_enter(&vmem_xnu_alloc_free_lock);
+	mutex_enter(&vmem_xnu_alloc_lock);
 	if (spl_vmem_xnu_useful_bytes_free() > (MAX(size,16ULL*1024ULL*1024ULL))) {
 		extern void *osif_malloc(uint64_t);
 		void *p = osif_malloc(size);
 		if (p != NULL) {
-			atomic_inc_64(&spl_vmem_conditional_allocs);
-			atomic_add_64(&spl_vmem_conditional_alloc_bytes, size);
-			cv_broadcast(&vmem_xnu_alloc_free_cv);
+			spl_vmem_conditional_allocs++;
+			spl_vmem_conditional_alloc_bytes += size;
 		}
-		mutex_exit(&vmem_xnu_alloc_free_lock);
+		mutex_exit(&vmem_xnu_alloc_lock);
 		return (p);
 	} else {
-		mutex_exit(&vmem_xnu_alloc_free_lock);
-		atomic_inc_64(&spl_vmem_conditional_alloc_deny);
-		atomic_add_64(&spl_vmem_conditional_alloc_deny_bytes, size);
+		spl_vmem_conditional_alloc_deny++;
+		spl_vmem_conditional_alloc_deny_bytes += size;
+		mutex_exit(&vmem_xnu_alloc_lock);
 		return (NULL);
 	}
 }
@@ -2343,7 +2340,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	// When there are multiple threads here, we delay the 2nd and later.
 
 	// Explict race:
-	// The osif_free() is not protected by the vmem_xnu_alloc_free_lock
+	// The osif_free() is not protected by the vmem_xnu_alloc_lock
 	// mutex; that is just used for implementing the delay.   Consequently,
 	// the waiters on the same lock in spl_vmem_malloc_if_no_pressure may
 	// falsely see too small a value for vm_page_free_count.   We don't
@@ -2360,9 +2357,11 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 
 	a_waiters++; // generates "lock incl ..."
 	for (uint32_t iter = 0; a_waiters > 1UL; iter++) {
+		// there is more than one thread here, so suspend and sleep for 1 ms
+		IOSleep(1);
 		// If are growing old in this loop, then see if
 		// anyone else is still in osif_free.  If not, we can exit.
-		if (iter > a_waiters) {
+		if (iter >= a_waiters) {
 			// if is_freeing == f, then set is_freeing to true with
 			// release semantics (i.e. "push" it to other cores) then break;
 			// otherwise, set f to true relaxedly (i.e., optimize it out)
@@ -2372,19 +2371,6 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 				break;
 			}
 		}
-		// There is a queue waiting for the mutex, sleep.
-		mutex_enter(&vmem_xnu_alloc_free_lock);
-		clock_t wait_time = USEC2NSEC(90UL + (10UL * MAX(a_waiters,1UL)));
-		(void) cv_timedwait_hires(&vmem_xnu_alloc_free_cv,
-		    &vmem_xnu_alloc_free_lock,
-		    wait_time, 0, 0);
-		// We may have been awakened by a cv_broadcast or by
-		// a timeout.   If we are now the only waiter, we will
-		// simply exit the loop after the mutex drop.
-		// However, if we are in a gang of awakened waiters,
-		// then only one may exit, and this is decided by xnu's
-		// wake-and-get-mutex order, which is hignly fair.
-		mutex_exit(&vmem_xnu_alloc_free_lock);
 	}
 	// If there is more than one thread in this function, osif_free() is
 	// protected by is_freeing.   Release it after the osif_free()
@@ -2394,8 +2380,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	atomic_swap_64(&spl_xat_lastfree,  now / hz);
 	is_freeing = false;
 	a_waiters--;
-	// Schedule all other threads in this function.
-	cv_broadcast(&vmem_xnu_alloc_free_cv);
+	kpreempt(KPREEMPT_SYNC);
 	// since we just gave back xnu enough to satisfy an allocation
 	// in at least the smaller buckets, let's wake up anyone in
 	// the cv_wait() in vmem_xalloc([bucket_#], ...)
@@ -2840,10 +2825,10 @@ spl_set_bucket_tunable_large_span(uint64_t size)
 {
 	uint64_t s = 0;
 
-	mutex_enter(&vmem_xnu_alloc_free_lock);
+	mutex_enter(&vmem_xnu_alloc_lock);
 	atomic_swap_64(&s, spl_bucket_tunable_small_span);
 	spl_set_bucket_spans(size, s);
-	mutex_exit(&vmem_xnu_alloc_free_lock);
+	mutex_exit(&vmem_xnu_alloc_lock);
 
 	spl_printf_bucket_span_sizes();
 }
@@ -2853,10 +2838,10 @@ spl_set_bucket_tunable_small_span(uint64_t size)
 {
 	uint64_t l = 0;
 
-	mutex_enter(&vmem_xnu_alloc_free_lock);
+	mutex_enter(&vmem_xnu_alloc_lock);
 	atomic_swap_64(&l, spl_bucket_tunable_large_span);
 	spl_set_bucket_spans(l, size);
-	mutex_exit(&vmem_xnu_alloc_free_lock);
+	mutex_exit(&vmem_xnu_alloc_lock);
 
 	spl_printf_bucket_span_sizes();
 }
@@ -2893,8 +2878,7 @@ vmem_init(const char *heap_name,
 	mutex_init(&vmem_pushpage_lock, "vmem_pushpage_lock", MUTEX_DEFAULT, NULL);
 	mutex_init(&vmem_panic_lock, "vmem_panic_lock", MUTEX_DEFAULT, NULL);
 
-	mutex_init(&vmem_xnu_alloc_free_lock, "vmem_xnu_alloc_free_lock", MUTEX_DEFAULT, NULL);
-	cv_init(&vmem_xnu_alloc_free_cv, "vmem_xnu_alloc_free_cv", CV_DEFAULT, NULL);
+	mutex_init(&vmem_xnu_alloc_lock, "vmem_xnu_alloc_lock", MUTEX_DEFAULT, NULL);
 
 	while (--nseg >= 0)
 		vmem_putseg_global(&vmem_seg0[nseg]);
@@ -3260,8 +3244,8 @@ vmem_fini(vmem_t *heap)
 
 	printf("SPL: arenas removed, now try destroying mutexes... ");
 
-	printf("vmem_xnu_alloc_free_lock ");
-	mutex_destroy(&vmem_xnu_alloc_free_lock);
+	printf("vmem_xnu_alloc_lock ");
+	mutex_destroy(&vmem_xnu_alloc_lock);
 	printf("vmem_panic_lock ");
 	mutex_destroy(&vmem_panic_lock);
 	printf("vmem_pushpage_lock ");
