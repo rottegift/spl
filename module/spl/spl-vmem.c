@@ -2486,7 +2486,11 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 	uint64_t local_cv_timeout_blocked = 0, local_loop_timeout_blocked = 0;
 	uint64_t local_sleep = 0, local_hipriority_blocked = 0;
 
-	for (uint64_t loop_timeout = zfs_lbolt() + (hz/4), timedout = 0;
+	const uint64_t loop_ticks = 25; // a tick is 10 msec, so 250 msec
+	const uint64_t hiprio_loop_ticks = 4; // 40 msec
+
+	for (uint64_t entry_time = zfs_lbolt(), loop_timeout = entry_time + loop_ticks,
+		 hiprio_timeout = entry_time + hiprio_loop_ticks, timedout = 0;
 	     waiters > 1UL || loop_once; ) {
 		loop_once = false;
 		// non-waiting allocations should proceeed to vmem_alloc() immediately
@@ -2587,7 +2591,9 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		} else if (timedout == 0) {
 			// we were awakened; check to see if we have been
 			// in the for loop for a long time
-			if (zfs_lbolt() >= loop_timeout) {
+			uint64_t n = zfs_lbolt();
+			if ((local_hipriority_allocator && n > hiprio_timeout && waiters > 1UL) ||
+			    n > loop_timeout) {
 				timedout |= 2;
 				extern uint64_t real_total_memory;
 				spl_free_set_emergency_pressure(real_total_memory / 64LL);
