@@ -2557,10 +2557,21 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 		// (vmp is the bucket_heap AKA spl_heap_arena)
 		mutex_enter(&calling_arena->vm_lock);
 		local_sleep++;
-		clock_t wait_time = MSEC2NSEC(30);
-		if ((vmflags & VM_PUSHPAGE) == 0) {
-			wait_time *= 2; // lower-priority allocs to back of queue
+		if (local_sleep >= 1000ULL) {
+			atomic_add_64(&spl_vba_sleep, local_sleep - 1ULL);
+			local_sleep = 1ULL;
+			atomic_add_64(&spl_vba_cv_timeout_blocked, local_cv_timeout_blocked);
+			local_cv_timeout_blocked = 0;
+			atomic_add_64(&spl_vba_loop_timeout_blocked, local_loop_timeout_blocked);
+			local_loop_timeout_blocked = 0;
+			atomic_add_64(&spl_vba_hiprio_blocked, local_hipriority_blocked);
+			local_hipriority_blocked = 0;
+			if (local_memory_blocked > 1ULL) {
+				atomic_add_64(&spl_vba_parent_memory_blocked, local_memory_blocked - 1ULL);
+				local_memory_blocked = 1ULL;
+			}
 		}
+		clock_t wait_time = MSEC2NSEC(30);
 		if (timedout > 0 || local_memory_blocked > 0) {
 			wait_time = MSEC2NSEC(1);
 		}
