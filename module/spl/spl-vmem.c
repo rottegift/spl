@@ -412,6 +412,7 @@ uint64_t spl_xat_forced = 0;
 uint64_t spl_xat_sleep = 0;
 uint64_t spl_xat_late_deny = 0;
 uint64_t spl_xat_no_waiters = 0;
+uint64_t spl_xft_wait = 0;
 
 uint64_t spl_vba_parent_memory_appeared = 0;
 uint64_t spl_vba_parent_memory_blocked = 0;
@@ -2141,7 +2142,17 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 			blocked_suspends++;
 			IOSleep(1);
 		} else	if (spl_vmem_xnu_useful_bytes_free() >= bigtarget) {
-			alloc_lock = true;
+			bool f = false;
+			if ( ! __c11_atomic_compare_exchange_strong(&alloc_lock, &f, true,
+				__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+				// avoid (highly unlikely) data race on alloc_lock.
+				// if alloc_lock has become true while we were in the
+				// else if expression then we effectively optimize away
+				// the (relaxed) load of alloc_lock (== true) into f and
+				// continue.
+				continue;
+			}
+			// alloc_lock is now visible as true to all threads
 			try_no_pressure++;
 			void *m = spl_vmem_malloc_if_no_pressure(size);
 			if (m != NULL) {
@@ -2152,7 +2163,7 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 				    __func__, (uint64_t)size,
 				    ticks, hz, ticks/hz, suspends,
 				    blocked_suspends, try_no_pressure);
-				alloc_lock = false;
+				alloc_lock = false; // atomic seq cst, so is published to all threads
 				return(m);
 			} else {
 				alloc_lock = false;
@@ -2161,7 +2172,12 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 				IOSleep(1);
 			}
 		} else if (zfs_lbolt() > timeout_time) {
-			alloc_lock = true;
+			bool f = false;
+			if ( ! __c11_atomic_compare_exchange_strong(&alloc_lock, &f, true,
+				__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+				// avoid (highly unlikely) data race on alloc_lock as above
+				continue;
+			}
 			void *mp = spl_vmem_malloc_unconditionally(size);
 			uint64_t now = zfs_lbolt();
 			uint64_t ticks = now - now_ticks;
@@ -2273,8 +2289,8 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 		}
 		(void) cv_timedwait_hires(&bvmp->vm_cv, &bvmp->vm_lock,
 		    wait_time, 0, 0);
-		now = zfs_lbolt();
 		mutex_exit(&bvmp->vm_lock);
+		now = zfs_lbolt();
 		// We may be here because of a broadcast to &vmp->vm_cv,
 		// causing xnu to schedule all the sleepers in priority-weighted FIFO
 		// order.  Because of the mutex_exit(), the sections below here may
@@ -2358,6 +2374,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	a_waiters++; // generates "lock incl ..."
 	for (uint32_t iter = 0; a_waiters > 1UL; iter++) {
 		// there is more than one thread here, so suspend and sleep for 1 ms
+		atomic_inc_64(&spl_xft_wait);
 		IOSleep(1);
 		// If are growing old in this loop, then see if
 		// anyone else is still in osif_free.  If not, we can exit.
