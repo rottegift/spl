@@ -80,6 +80,7 @@ int64_t spl_free_delta_ema;
 
 static volatile _Atomic int64_t spl_free_manual_pressure = 0;
 static volatile _Atomic boolean_t spl_free_fast_pressure = FALSE;
+static _Atomic bool spl_free_maybe_reap_flag = false;
 
 // Start and end address of kernel memory
 extern vm_offset_t virtual_space_start;
@@ -4158,12 +4159,15 @@ spl_free_set_pressure_both(int64_t new_p, boolean_t fast)
 		spl_free_manual_pressure = new_p;
 }
 
+void spl_free_maybe_reap(void);
+
 void
 spl_free_set_emergency_pressure(int64_t new_p)
 {
 	spl_free_fast_pressure = TRUE;
 	if (new_p > spl_free_manual_pressure || new_p <= 0)
 		spl_free_manual_pressure = new_p;
+	spl_free_maybe_reap();
 }
 
 void
@@ -4189,6 +4193,29 @@ void
 spl_free_set_fast_pressure(boolean_t state)
 {
 	spl_free_fast_pressure = state;
+}
+
+void
+spl_free_reap_caches(void)
+{
+	// note: this may take some time
+	vmem_qcache_reap(zio_arena);
+	vmem_qcache_reap(zio_metadata_arena);
+	kmem_reap();
+	vmem_qcache_reap(kmem_va_arena);
+}
+
+void
+spl_free_maybe_reap(void)
+{
+	static _Atomic uint64_t last_reap = 0;
+	const  uint64_t lockout_time = 60 * hz;
+
+	uint64_t now = zfs_lbolt();
+	if (now > last_reap + lockout_time) {
+		last_reap = now;
+		spl_free_maybe_reap_flag = true;
+	}
 }
 
 boolean_t
@@ -4250,6 +4277,11 @@ spl_free_thread()
 
 		spl_stats.spl_free_wake_count.value.ui64++;
 
+		if (spl_free_maybe_reap_flag == true) {
+			spl_free_maybe_reap_flag = false;
+			spl_free_reap_caches();
+		}
+
 		uint64_t time_now = zfs_lbolt();
 		uint64_t time_now_seconds = 0;
 		if (time_now > hz)
@@ -4280,8 +4312,8 @@ spl_free_thread()
 		const uint64_t sixtyfour = 64ULL*1024ULL*1024ULL;
 		const uint64_t rvallones = (sixtyfour << 1ULL) - 1ULL;
 		const uint64_t rvmask = ~rvallones;
-		uint64_t rvfreebits = 0;
-		atomic_swap_64(&rvfreebits, spl_heap_arena->vm_freemap);
+		uint64_t rvfreebits = spl_heap_arena->vm_freemap;
+
 		if ((rvfreebits & rvmask) == 0) {
 			reserve_low = true;
 		} else {
@@ -4323,10 +4355,9 @@ spl_free_thread()
 		boolean_t memory_equilibrium = false;
 		const uint64_t five_minutes = 300ULL;
 		const uint64_t one_minute = 60ULL;
-		uint64_t last_xat_alloc_seconds = 0;
-		uint64_t last_xat_free_seconds = 0;
-		atomic_swap_64(&last_xat_alloc_seconds, spl_xat_lastalloc);
-		atomic_swap_64(&last_xat_free_seconds, spl_xat_lastfree);
+		uint64_t last_xat_alloc_seconds = spl_xat_lastalloc;
+		uint64_t last_xat_free_seconds = spl_xat_lastfree;
+
 		if (last_xat_alloc_seconds + five_minutes > time_now_seconds &&
 		    last_xat_free_seconds + five_minutes > time_now_seconds) {
 			if (last_disequilibrium + one_minute > time_now_seconds) {
@@ -4444,17 +4475,16 @@ spl_free_thread()
 				elapsed = 15*hz; // minimum frequency from kmem_reap_interval
 			if (now - last_reap > elapsed) {
 				last_reap = now;
-				// these acquire locks and can take a while
+				// spl_free_reap_caches() calls functions that will
+				// acquire locks and can take a while
 				// so set spl_free to a small positive value
 				// to stop arc shrinking too much during this period
-				// when we expect to be freeing up arc-usable memory.
+				// when we expect to be freeing up arc-usable memory,
+				// but low enough that arc_no_grow likely will be set.
 				const int64_t two_spamax = 32LL * 1024LL * 1024LL;
 				if (spl_free < two_spamax)
 					spl_free = two_spamax; // atomic!
-				vmem_qcache_reap(zio_arena);
-				vmem_qcache_reap(zio_metadata_arena);
-				vmem_qcache_reap(kmem_va_arena);
-				kmem_reap();
+				spl_free_reap_caches();
 				// we do not have any lock now, so we can jump
 				// to just before the thread-suspending code
 				goto justwait;
@@ -4700,8 +4730,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		if (ks->spl_spl_free_manual_pressure.value.i64 != spl_free_manual_pressure) {
 			spl_free_set_pressure(ks->spl_spl_free_manual_pressure.value.i64 * 1024 *1024);
 			if (ks->spl_spl_free_manual_pressure.value.i64 > 0) {
-				kmem_reap();
-				vmem_qcache_reap(kmem_va_arena);
+				spl_free_reap_caches();
 			}
 		}
 
