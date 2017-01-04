@@ -433,9 +433,10 @@ static _Atomic uint32_t spl_vba_threads[VMEM_BUCKETS] = { 0 };
 static uint32_t vmem_bucket_id_to_bucket_number[NUMBER_OF_ARENAS_IN_VMEM_INIT] = { 0 };
 // for XATB -> spl_arc_no_grow(size) signalling
 static void spl_set_arc_no_grow(size_t);
-bool spl_arc_no_grow(size_t);
+boolean_t spl_arc_no_grow(size_t);
 static _Atomic uint64_t spl_arc_no_grow_time[VMEM_BUCKETS] = { 0 };
 _Atomic uint64_t spl_arc_no_grow_bits = 0;
+uint64_t spl_arc_no_grow_count = 0;
 
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
@@ -3357,32 +3358,83 @@ vmem_fini(vmem_t *heap)
 	printf("SPL: %s: done!\n", __func__);
 }
 
-static void
-spl_set_arc_no_grow(size_t size)
+/*
+ * return true if inuse is much smaller than imported
+ */
+static inline bool
+bucket_fragmented(const uint16_t bn, const uint64_t now)
 {
-	uint16_t b = vmem_bucket_number(size);
+	if (now < 300 * hz)
+		return(false);
 
-	spl_arc_no_grow_time[b] = zfs_lbolt();
+	const vmem_t *vmp = vmem_bucket_arena[bn];
+
+	const uint64_t imported = vmp->vm_kstat.vk_mem_import.value.ui64;
+	const uint64_t inuse = vmp->vm_kstat.vk_mem_inuse.value.ui64;
+	const uint64_t sf = 64ULL*1024ULL*1024ULL;
+
+	// imported is > 3/4 unused
+	if (imported <= sf || inuse * 4LL >= imported) {
+		return (false);
+	} else {
+		return (true);
+	}
 }
 
-bool
-spl_arc_no_grow(size_t size)
+
+/*
+ * return true if the bucket for size is fragmented or if
+ * xatb has called spl_set_arc_no_grow in the past minute
+ */
+static inline bool
+spl_arc_no_grow_impl(const uint16_t b)
 {
-	const uint16_t b = vmem_bucket_number(size);
-	const uint16_t b_bit = (uint16_t)1 << b;
+	const uint64_t now = zfs_lbolt();
+
+	const bool fragmented = bucket_fragmented(b, now);
+
+	if (fragmented)
+		return(true);
 
 	const uint64_t one_minute = hz * 60;
 	const uint64_t suppress_time = one_minute;
-	const uint64_t now = zfs_lbolt();
 
-	const bool rv = spl_arc_no_grow_time[b] + suppress_time > now;
+	const bool still_suppressed = spl_arc_no_grow_time[b] + suppress_time > now;
+
+	return(still_suppressed);
+}
+
+static inline uint16_t
+vmem_bucket_number_arc_no_grow(const size_t size)
+{
+	// qcaching on arc
+	if (size < 128*1024)
+		return(vmem_bucket_number(262144));
+	else
+		return(vmem_bucket_number(size));
+}
+
+boolean_t
+spl_arc_no_grow(size_t size)
+{
+	const uint16_t b = vmem_bucket_number_arc_no_grow(size);
+	const uint16_t b_bit = (uint16_t)1 << b;
+	const bool rv = spl_arc_no_grow_impl(b);
 
 	if (rv) {
 		spl_arc_no_grow_bits |= b_bit;
+		atomic_inc_64(&spl_arc_no_grow_count);
 	} else {
 		spl_arc_no_grow_bits &= ~b_bit;
 	}
 
-	return(rv);
+	return((boolean_t)rv);
+}
 
+static void
+spl_set_arc_no_grow(size_t size)
+{
+	const uint16_t b = vmem_bucket_number_arc_no_grow(size);
+
+	spl_arc_no_grow_time[b] = zfs_lbolt();
 }
