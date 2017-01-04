@@ -2277,6 +2277,13 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 	if (waiters == 1UL)
 		atomic_inc_64(&spl_xat_no_waiters);
 
+	static _Atomic uint32_t max_waiters_seen = 0;
+
+	if (waiters > max_waiters_seen) {
+		max_waiters_seen = waiters;
+		printf("SPL: %s: max_waiters_seen increased to %u\n", __func__, max_waiters_seen);
+	}
+
 	boolean_t local_xat_pressured = false;
 
 	for (; ;) {
@@ -2326,7 +2333,15 @@ xnu_alloc_throttled(vmem_t *null_vmp, size_t size, int vmflag)
 			if (spl_vba_threads[bucket_number] > 1UL)
 				atomic_inc_64(&spl_xat_bailed_contended);
 			atomic_inc_64(&spl_xat_bailed);
+			static _Atomic uint32_t bailing_threads = 0,  max_bailers_seen = 0;
+			bailing_threads++;
+			if (bailing_threads > max_bailers_seen) {
+				max_bailers_seen = bailing_threads;
+				printf("SPL: %s: max_bailers_seen increased to %u\n",
+				    __func__, max_bailers_seen);
+			}
 			void *b = xnu_alloc_throttled_bail(now, bvmp, size, vmflag);
+			bailing_threads--;
 			atomic_swap_64(&spl_xat_lastalloc, now / hz);
 			// wake up waiters on the arena lock,
 			// since they now have memory they can use.
@@ -2372,6 +2387,14 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	static volatile _Atomic bool is_freeing = false;
 
 	a_waiters++; // generates "lock incl ..."
+
+	static _Atomic uint32_t max_waiters_seen = 0;
+
+	if (a_waiters > max_waiters_seen) {
+		max_waiters_seen = a_waiters;
+		printf("SPL: %s: max_waiters_seen increased to %u\n", __func__, max_waiters_seen);
+	}
+
 	for (uint32_t iter = 0; a_waiters > 1UL; iter++) {
 		// there is more than one thread here, so suspend and sleep for 1 ms
 		atomic_inc_64(&spl_xft_wait);
@@ -2496,6 +2519,13 @@ vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 
 	if (waiters++ > 1 || loop_once) {
 		atomic_inc_64(&spl_vba_loop_entries);
+	}
+
+	static _Atomic uint32_t max_waiters_seen = 0;
+
+	if (waiters > max_waiters_seen) {
+		max_waiters_seen = waiters;
+		printf("SPL: %s: max_waiters_seen increased to %u\n", __func__, max_waiters_seen);
 	}
 
 	// local counters, to be added atomically to global kstat variables
