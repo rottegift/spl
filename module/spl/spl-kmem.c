@@ -536,6 +536,8 @@ extern uint64_t spl_bucket_tunable_small_span;
 extern void spl_set_bucket_tunable_large_span(uint64_t);
 extern void spl_set_bucket_tunable_small_span(uint64_t);
 
+extern _Atomic uint64_t spl_arc_no_grow_bits;
+
 uint64_t spl_buckets_mem_free = 0;
 
 
@@ -592,6 +594,7 @@ typedef struct spl_stats {
 	kstat_named_t spl_bucket_tunable_small_span;
 
 	kstat_named_t spl_buckets_mem_free;
+	kstat_named_t spl_arc_no_grow_bits;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -647,6 +650,7 @@ static spl_stats_t spl_stats = {
 	{"spl_tunable_small_span", KSTAT_DATA_UINT64},
 
 	{"spl_buckets_mem_free", KSTAT_DATA_UINT64},
+	{"spl_arc_no_grow_bits", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -4799,6 +4803,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_bucket_tunable_small_span.value.ui64 = spl_bucket_tunable_small_span;
 
 		ks->spl_buckets_mem_free.value.ui64 = spl_buckets_mem_free;
+		ks->spl_arc_no_grow_bits.value.ui64 = spl_arc_no_grow_bits;
 	}
 
 	return (0);

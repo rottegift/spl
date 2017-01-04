@@ -431,6 +431,11 @@ uint64_t spl_bucket_tunable_small_span = 0;
 // for XAT & XATB visibility into VBA queue
 static _Atomic uint32_t spl_vba_threads[VMEM_BUCKETS] = { 0 };
 static uint32_t vmem_bucket_id_to_bucket_number[NUMBER_OF_ARENAS_IN_VMEM_INIT] = { 0 };
+// for XATB -> spl_arc_no_grow(size) signalling
+static void spl_set_arc_no_grow(size_t);
+bool spl_arc_no_grow(size_t);
+static _Atomic uint64_t spl_arc_no_grow_time[VMEM_BUCKETS] = { 0 };
+_Atomic uint64_t spl_arc_no_grow_bits = 0;
 
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
@@ -2120,6 +2125,8 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 
 	// spin looking for memory
 
+	spl_set_arc_no_grow(size);
+
 	const uint64_t bigtarget = MAX(size,16ULL*1024ULL*1024ULL);
 
 	static volatile _Atomic bool alloc_lock = false;
@@ -3348,4 +3355,34 @@ vmem_fini(vmem_t *heap)
 	printf("SPL: %s: Brief delay for readability...\n", __func__);
 	delay(hz);
 	printf("SPL: %s: done!\n", __func__);
+}
+
+static void
+spl_set_arc_no_grow(size_t size)
+{
+	uint16_t b = vmem_bucket_number(size);
+
+	spl_arc_no_grow_time[b] = zfs_lbolt();
+}
+
+bool
+spl_arc_no_grow(size_t size)
+{
+	const uint16_t b = vmem_bucket_number(size);
+	const uint16_t b_bit = (uint16_t)1 << b;
+
+	const uint64_t one_minute = hz * 60;
+	const uint64_t suppress_time = one_minute;
+	const uint64_t now = zfs_lbolt();
+
+	const bool rv = spl_arc_no_grow_time[b] + suppress_time > now;
+
+	if (rv) {
+		spl_arc_no_grow_bits |= b_bit;
+	} else {
+		spl_arc_no_grow_bits &= ~b_bit;
+	}
+
+	return(rv);
+
 }
