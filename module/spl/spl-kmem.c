@@ -179,6 +179,10 @@ struct kmem_cache_kstat {
 	kstat_named_t	kmc_move_hunt_found; /* ... but found in mag layer */
 	kstat_named_t	kmc_move_slabs_freed; /* slabs freed by consolidator */
 	kstat_named_t	kmc_move_reclaimable; /* buffers, if consolidator ran */
+	kstat_named_t   kmc_no_vba_success;
+	kstat_named_t   kmc_no_vba_fail;
+	kstat_named_t   kmc_arc_no_grow_set;
+	kstat_named_t   kmc_arc_no_grow;
 } kmem_cache_kstat = {
 	{ "buf_size",		KSTAT_DATA_UINT64 },
 	{ "align",		KSTAT_DATA_UINT64 },
@@ -218,6 +222,10 @@ struct kmem_cache_kstat {
 	{ "move_hunt_found",	KSTAT_DATA_UINT64 },
 	{ "move_slabs_freed",	KSTAT_DATA_UINT64 },
 	{ "move_reclaimable",	KSTAT_DATA_UINT64 },
+	{ "no_vba_success",	KSTAT_DATA_UINT64 },
+	{ "no_vba_fail",	KSTAT_DATA_UINT64 },
+	{ "arc_no_grow_set",	KSTAT_DATA_UINT64 },
+	{ "arc_no_grow",	KSTAT_DATA_UINT64 },
 };
 
 static kmutex_t kmem_cache_kstat_lock;
@@ -1223,8 +1231,10 @@ slab_alloc_failure:
 
 vmem_alloc_failure:
 
-	kmem_log_event(kmem_failure_log, cp, NULL, NULL);
-	atomic_inc_64(&cp->cache_alloc_fail);
+	if (0 == (kmflag & KM_NO_VBA)) {
+		kmem_log_event(kmem_failure_log, cp, NULL, NULL);
+		atomic_inc_64(&cp->cache_alloc_fail);
+	}
 
 	return (NULL);
 }
@@ -3074,6 +3084,10 @@ kmem_cache_kstat_update(kstat_t *ksp, int rw)
 	kmcp->kmc_free.value.ui64		= cp->cache_slab_free;
 	kmcp->kmc_slab_alloc.value.ui64		= cp->cache_slab_alloc;
 	kmcp->kmc_slab_free.value.ui64		= cp->cache_slab_free;
+	kmcp->kmc_no_vba_success.value.ui64     = cp->no_vba_success;
+	kmcp->kmc_no_vba_fail.value.ui64        = cp->no_vba_fail;
+	kmcp->kmc_arc_no_grow_set.value.ui64    = cp->arc_no_grow_set;
+	kmcp->kmc_arc_no_grow.value.ui64        = cp->arc_no_grow;
 
 	for (cpu_seqid = 0; cpu_seqid < max_ncpus; cpu_seqid++) {
 		kmem_cpu_cache_t *ccp = &cp->cache_cpu[cpu_seqid];
@@ -6271,4 +6285,281 @@ kmem_strstr(const char *in, const char *str)
 	} while (strncmp(in, str, len) != 0);
 
 	return ((char *) (in - 1));
+}
+
+
+// suppress timer and related logic for this kmem cache can live here
+// three new per-kmem-cache stats: counters: non-vba-success non-vba-fail; flag: arc_no_grow
+
+// from zfs/include/sys/spa.h
+
+#define SPA_MINBLOCKSHIFT 9
+#define SPA_MAXBLOCKSHIFT 24
+#define SPA_MINBLOCKSIZE (1ULL << SPA_MINBLOCKSHIFT)
+#define SPA_MAXBLOCKSIZE (1ULL << SPA_MAXBLOCKSHIFT)
+
+typedef struct {
+	_Atomic(kmem_cache_t *)cp_a;
+	_Atomic(kmem_cache_t *)cp_b;
+        uint16_t pointed_to;
+	_Atomic int64_t suppress_count;
+	_Atomic uint64_t last_bumped;
+} ksupp_t;
+
+typedef struct {
+	ksupp_t *ks_entry;
+} iksupp_t;
+
+ksupp_t ksvec[SPA_MAXBLOCKSIZE >> SPA_MINBLOCKSHIFT] = { { NULL, NULL, false, 0, 0 } };
+iksupp_t iksvec[SPA_MAXBLOCKSIZE >> SPA_MINBLOCKSHIFT] = { { NULL } };
+
+static bool spl_zio_no_grow_inited = false;
+
+/*
+ * Test that cp is in ks->cp_a or ks->cp_b; if so just return
+ * otherwise, choose the first (and possibly second)  NULL
+ * and try to set it to cp.
+ * If successful, return. otherwise, sanity check that
+ * nobody has set ks->cp_a or ks->cp_b to cp already, and
+ * that ks->cp_a != ks->cp_b.
+ */
+
+static void
+ks_set_cp(ksupp_t *ks, kmem_cache_t *cp, const size_t cachenum)
+{
+
+	ASSERT(cp != NULL);
+	ASSERT(ks != NULL);
+
+	if (ks->cp_a == cp || ks->cp_b == cp)
+		return;
+
+	const uint64_t b = cachenum;
+
+	for ( ; ; ) {
+		if (ks->cp_b != cp && ks->cp_a == NULL) {
+			kmem_cache_t *expected = NULL;
+			// if ks->cp_a == expected (NULL) then atomically set
+			// ks->cp_a = cp and the result is true; otherwise
+			// the result is false, ks->cp_a was not NULL, and
+			// expected = cp.  we can safely deref expected, but
+			// not ks->cp_b, since another thread may win the race
+			// and set ks->cp_b to NULL.
+			if (__c11_atomic_compare_exchange_strong(&ks->cp_a, &expected, cp,
+				__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+				printf("SPL: %s: set iskvec[%llu].ks->cp_a (%s) OK\n",
+				    __func__, b, cp->cache_name);
+				return;
+			} else {
+				printf("SPL: %s: someone beat me to iskvec[%llu].ks->cp_a"
+				    " them == %s, me == %s\n",
+				    __func__, b, expected->cache_name, cp->cache_name);
+				if (ks->cp_a == cp || ks->cp_b == cp)
+					return;
+			}
+		} else if (ks->cp_a != cp && ks->cp_b == NULL) {
+			kmem_cache_t *expected = NULL;
+			if (__c11_atomic_compare_exchange_strong(&ks->cp_b, &expected, cp,
+				__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+				printf("SPL: %s: set iskvec[%llu].ks->cp_b == %s OK\n",
+				    __func__, b, cp->cache_name);
+				return;
+			} else {
+				printf("SPL: %s: someone beat me to iskvec[%llu].ks->cp_b "
+				    " them == %s, me == %s\n",
+				    __func__, b, expected->cache_name, cp->cache_name);
+				if (ks->cp_b == cp || ks->cp_b == cp)
+					return;
+			}
+		} else if (ks->cp_a == cp || ks->cp_b == cp) {
+			printf("SPL: %s someone beat me to both iskvec[%llu].ks->cp_[ab] (returning OK)",
+			    __func__, b);
+			return;
+		} else if (ks->cp_a == ks->cp_b) {
+			printf("SPL: %s WARNING: both iskvec[%llu].ks->cp_{a,b} set to same value!\n",
+			    __func__, b);
+			// atomically set ks->cp_b to NULL and go through the loop again
+			ks->cp_b = NULL;
+		} else if (ks->cp_a != NULL && ks->cp_b != NULL) {
+			printf("SPL: %s ERROR: both iskvec[%llu].ks->cp_{a,b} set to not me! "
+			    "cp_a == %s, cp_b == %s, me == %s\n",
+			    __func__, b, ks->cp_a->cache_name, ks->cp_b->cache_name, cp->cache_name);
+			// sleep a millisecond for the printf == 1000 microseconds
+			extern void IODelay(unsigned microseconds);
+			IODelay(1000);
+			if (ks->cp_a == cp || ks->cp_b == cp || (ks->cp_a == ks->cp_b) ||
+			    ks->cp_a == NULL || ks->cp_b == NULL) {
+				printf("SPL: %s PANIC AVOIDED for %llu, %s", __func__, b, cp->cache_name);
+				continue;
+			}
+			panic("iskvec[%llu] : cannot set for %s", b, cp->cache_name);
+		} else {
+			printf("SPL: %s: WTF how did I get here? (%s)\n", __func__, cp->cache_name);
+		}
+	}
+}
+
+
+void
+spl_zio_no_grow_init(void)
+{
+	// this is the logic from zio.c:zio_init()
+
+	ASSERT(spl_zio_no_grow_inited == false);
+
+	size_t c = 0;
+
+	for (c = 0; c < SPA_MAXBLOCKSIZE >> SPA_MINBLOCKSHIFT; c++) {
+		size_t size = (c+1) << SPA_MINBLOCKSHIFT;
+		size_t p2 = size;
+		size_t align = 0;
+
+		while (!ISP2(p2))
+			p2 &= p2 - 1;
+
+                if (size <= 4 * SPA_MINBLOCKSIZE) {
+                        align = SPA_MINBLOCKSIZE;
+                } else if (size <= 128 * 1024 && IS_P2ALIGNED(size, p2 >> 4)) {
+                        align = MIN(p2 >> 4, PAGESIZE);
+                } else if (IS_P2ALIGNED(size, p2 >> 3)) {
+                        align = MIN(p2 >> 3, PAGESIZE);
+                }
+
+		if (align != 0) {
+			iksvec[c].ks_entry = &ksvec[c];
+			iksvec[c].ks_entry->pointed_to++;
+		}
+	}
+
+	while (--c != 0) {
+		ASSERT(iksvec[c].ks_entry != NULL);
+		ASSERT(iksvec[c].ks_entry->pointed_to > 0);
+		if (iksvec[c - 1].ks_entry == NULL) {
+			iksvec[c - 1].ks_entry = iksvec[c].ks_entry;
+			iksvec[c - 1].ks_entry->pointed_to++;
+		}
+	}
+
+	spl_zio_no_grow_inited = true;
+
+	printf("SPL: %s done.\n", __func__);
+}
+
+
+static void
+spl_zio_set_no_grow(const size_t size, kmem_cache_t *cp, const size_t cachenum)
+{
+	ASSERT(spl_zio_no_grow_inited == true);
+	ASSERT(iksvec[cachenum].ks_entry != NULL);
+
+	ksupp_t *ks = iksvec[cachenum].ks_entry;
+
+	// maybe update size->cp mapping vector
+
+	ks_set_cp(ks, cp, cachenum);
+
+	if (ks->cp_a != cp && ks->cp_b != cp) {
+		panic("ks_cp_set bad for %s", cp->cache_name);
+	}
+
+	// suppress the bucket for two allocations (is _Atomic)
+	ks->suppress_count += 2;
+	ks->last_bumped = zfs_lbolt();
+}
+
+bool
+spl_zio_is_suppressed(const size_t size, const uint64_t now)
+{
+
+	ASSERT(spl_zio_no_grow_inited == true);
+
+	const size_t cachenum = (size - 1) >> SPA_MINBLOCKSHIFT;
+
+	VERIFY3U(cachenum, <, SPA_MAXBLOCKSIZE >> SPA_MINBLOCKSHIFT);
+
+	ksupp_t *ks = iksvec[cachenum].ks_entry;
+
+	if (ks == NULL) {
+		return (false);
+	} else if (ks->pointed_to < 1) {
+		ASSERT(ks->pointed_to > 0); // throw an assertion
+		printf("SPL: %s: ERROR: iksvec[%llu].ks_entry->pointed_to == %u for size %llu\n",
+		    __func__, (uint64_t)cachenum, ks->pointed_to, (uint64_t)size);
+		return (false);
+	} else if (ks->suppress_count == 0) {
+		return (false);
+	} else {
+		const uint64_t two_minutes = 120 * hz;
+		if (ks->last_bumped + two_minutes >= now) {
+			ks->suppress_count = 0;
+			ks->last_bumped = now;
+			return (false);
+		} else {
+			ks->suppress_count--;
+		}
+		// the bump of the kmem_cache arc_no_grow kstat may happen
+		// to the partnered kmem_cache (i.e., zio_buf incremented
+		// instead of zio_data_buf, or vice-versa).  we have no exact
+		// way of knowing which of the two was selected.
+		kmem_cache_t *kscpa = ks->cp_a;
+		ASSERT(kscpa != NULL); // unlikely, but protect against early deref race.
+		if (kscpa != NULL) {
+			atomic_inc_64(&kscpa->arc_no_grow);
+		} else {
+			kmem_cache_t *kscpb = ks->cp_b;
+			if (kscpb != NULL) {
+				atomic_inc_64(&kscpb->arc_no_grow);
+			}
+		}
+		return (true);
+	}
+}
+
+
+/*
+ * spl_zio_kmem_cache_alloc(): try to get an allocation without descending to the bucket layer,
+ * and if that fails, set a flag for spl_arc_no_grow() then perform the allocation normally.
+ */
+
+void *
+spl_zio_kmem_cache_alloc(kmem_cache_t *cp, int kmflag, size_t size, size_t cachenum)
+{
+	// called by:
+	// spl_zio_kmem_cache_alloc(zio_buf_cache[size], kmflag, size, cachenum) or
+	// spl_zio_kmem_cache_alloc(zio_data_buf_cache[size], kmflag, size, cachenum)
+	// those are e.g.
+	// kmem_cache_t *zio_buf_cache[SPA_MAXBLOCKSIZE >> SPAMINBLOCKSHIFT]
+	// and are indexed as size_t cachenum = (size - 1) >> SPA_MIN~BLOCKSHIFT
+	// VERIFY3U(cachenum, <, SPA_MAXBLOCKSIZE >> SPA_MINBLOCKSHIFT);
+
+	// try to get memory from no lower than the bucket_heap
+	void *m = kmem_cache_alloc(cp, kmflag | KM_NO_VBA | KM_NOSLEEP);
+
+	if (m != NULL) {
+		atomic_inc_64(&cp->no_vba_success);
+		return (m);
+	}
+
+	atomic_inc_64(&cp->no_vba_fail);
+
+	// we will have to go below the bucket_heap to a bucket arena.
+	// if the bucket arena cannot obviously satisfy the allocation,
+	// and xnu is tight for memory, then we turn on the no_grow suppression
+
+	extern vmem_t *spl_vmem_bucket_arena_by_size(size_t);
+	extern uint64_t vmem_xnu_useful_bytes_free(void);
+	extern int vmem_canalloc_atomic(vmem_t *, size_t);
+
+	vmem_t *bvmp = spl_vmem_bucket_arena_by_size(size);
+
+	if (! vmem_canalloc_atomic(bvmp, size) &&
+	    vmem_xnu_useful_bytes_free() < 16ULL*1024ULL*1024ULL) {
+		spl_zio_set_no_grow(size, cp, cachenum);
+		atomic_inc_64(&cp->arc_no_grow_set);
+	}
+
+	// perform the allocation as requested
+	void *n = kmem_cache_alloc(cp, kmflag);
+
+	return(n);
 }

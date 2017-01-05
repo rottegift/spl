@@ -259,6 +259,9 @@ segkmem_zio_init()
 
 	ASSERT(zio_arena != NULL);
 	ASSERT(zio_metadata_arena != NULL);
+
+	extern void spl_zio_no_grow_init(void);
+	spl_zio_no_grow_init();
 }
 
 void

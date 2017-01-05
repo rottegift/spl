@@ -50,6 +50,7 @@ extern uint64_t physmem;
 #define	KM_PUSHPAGE	0x0004	/* can block for memory; may use reserve */
 #define	KM_NORMALPRI 0x0008  /* with KM_NOSLEEP, lower priority allocation */
 #define KM_NODEBUG  0x0010  /* NOT IMPLEMENTED ON OSX */
+#define KM_NO_VBA   0x0020  /* OSX: don't descend to the bucket layer */
 #define	KM_VMFLAGS	0x00ff	/* flags that must match VM_* flags */
 
 #define	KM_FLAGS	0xffff	/* all settable kmem flags */

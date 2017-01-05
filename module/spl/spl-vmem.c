@@ -1073,6 +1073,13 @@ spl_vmem_xnu_useful_bytes_free(void)
 	return (useful_free);
 }
 
+uint64_t
+vmem_xnu_useful_bytes_free(void)
+{
+	return(spl_vmem_xnu_useful_bytes_free());
+}
+
+
 static void *
 spl_vmem_malloc_unconditionally_unlocked(size_t size)
 {
@@ -1405,7 +1412,9 @@ vmem_xalloc(vmem_t *vmp, size_t size, size_t align_arg, size_t phase,
 		ASSERT(addr + size - 1 <= (uintptr_t)maxaddr - 1);
 		return ((void *)addr);
 	}
-	vmp->vm_kstat.vk_fail.value.ui64++;
+	if (0 == (vmflag & VM_NO_VBA)) {
+		vmp->vm_kstat.vk_fail.value.ui64++;
+	}
 	mutex_exit(&vmp->vm_lock);
 	if (vmflag & VM_PANIC)
 		panic("vmem_xalloc(%p, %lu, %lu, %lu, %lu, %p, %p, %x): "
@@ -2104,6 +2113,12 @@ vmem_bucket_arena_by_size(size_t size)
         return(vmem_bucket_arena[bucket]);
 }
 
+vmem_t *
+spl_vmem_bucket_arena_by_size(size_t size)
+{
+	return(vmem_bucket_arena_by_size(size));
+}
+
 static inline void
 vmem_bucket_wake_all_waiters(void)
 {
@@ -2151,6 +2166,8 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 			IOSleep(1);
 		} else	if (spl_vmem_xnu_useful_bytes_free() >= bigtarget) {
 			bool f = false;
+			// if alloc_lock == f then alloc_lock = true and result is true
+			// otherwise result is false and f = true
 			if ( ! __c11_atomic_compare_exchange_strong(&alloc_lock, &f, true,
 				__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
 				// avoid (highly unlikely) data race on alloc_lock.
@@ -2458,6 +2475,9 @@ vba_atomic_lock_bucket(volatile _Atomic uint16_t *bbap, uint16_t bucket_bit)
 static void *
 vmem_bucket_alloc(vmem_t *null_vmp, size_t size, const int vmflags)
 {
+
+	if (vmflags & VM_NO_VBA)
+		return (NULL);
 
 	// caller is spl_heap_arena looking for memory.
 	// null_vmp will be spl_default_arena_parent, and so is just a placeholder.
@@ -3387,21 +3407,34 @@ bucket_fragmented(const uint16_t bn, const uint64_t now)
  * xatb has called spl_set_arc_no_grow in the past minute
  */
 static inline bool
-spl_arc_no_grow_impl(const uint16_t b)
+spl_arc_no_grow_impl(const uint16_t b, const size_t size)
 {
+
+	static _Atomic uint8_t frag_suppressions[VMEM_BUCKETS] = { 0 };
+
 	const uint64_t now = zfs_lbolt();
-
-	const bool fragmented = bucket_fragmented(b, now);
-
-	if (fragmented)
-		return(true);
-
 	const uint64_t one_minute = hz * 60;
 	const uint64_t suppress_time = one_minute;
 
+	const bool fragmented = bucket_fragmented(b, now);
+
+	if (fragmented) {
+		if (frag_suppressions[b] > 100) {
+			frag_suppressions[b] = 0;
+		} else {
+			frag_suppressions[b]++;
+			return (true);
+		}
+	}
+
 	const bool still_suppressed = spl_arc_no_grow_time[b] + suppress_time > now;
 
-	return(still_suppressed);
+	if (still_suppressed == true)
+		return (true);
+
+	extern bool spl_zio_is_suppressed(const size_t, const uint64_t);
+
+	return (spl_zio_is_suppressed(size, now));
 }
 
 static inline uint16_t
@@ -3419,7 +3452,7 @@ spl_arc_no_grow(size_t size)
 {
 	const uint16_t b = vmem_bucket_number_arc_no_grow(size);
 	const uint16_t b_bit = (uint16_t)1 << b;
-	const bool rv = spl_arc_no_grow_impl(b);
+	const bool rv = spl_arc_no_grow_impl(b, size);
 
 	if (rv) {
 		spl_arc_no_grow_bits |= b_bit;

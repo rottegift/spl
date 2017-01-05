@@ -48,6 +48,8 @@ extern "C" {
 #define	VM_PANIC		0x00000002	/* same as KM_PANIC */
 #define	VM_PUSHPAGE		0x00000004	/* same as KM_PUSHPAGE */
 #define	VM_NORMALPRI	0x00000008	/* same as KM_NORMALPRI */
+#define VM_NODEBUG      0x00000010      /* matches KM_NODE~BUG, not implemented on OSX */
+#define VM_NO_VBA               0x00000020      /* OSX: do not descend to the bucket layer */
 #define	VM_KMFLAGS		0x000000ff	/* flags that must match KM_* flags */
 
 #define	VM_BESTFIT		0x00000100
