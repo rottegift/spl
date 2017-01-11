@@ -3389,15 +3389,25 @@ bucket_fragmented(const uint16_t bn, const uint64_t now)
 
 	const vmem_t *vmp = vmem_bucket_arena[bn];
 
-	const uint64_t imported = vmp->vm_kstat.vk_mem_import.value.ui64;
-	const uint64_t inuse = vmp->vm_kstat.vk_mem_inuse.value.ui64;
-	const uint64_t sf = 64ULL*1024ULL*1024ULL;
+	const int64_t imported = (int64_t)vmp->vm_kstat.vk_mem_import.value.ui64;
+	const int64_t inuse = (int64_t)vmp->vm_kstat.vk_mem_inuse.value.ui64;
+	const int64_t tiny = 64LL*1024LL*1024LL;
+	const int64_t small = tiny * 2LL;
+	const int64_t medium = small * 2LL;
+	const int64_t large = medium * 2LL;
 
-	// imported is > 3/4 unused
-	if (imported <= sf || inuse * 4LL >= imported) {
+	if (imported <= tiny) {
 		return (false);
-	} else {
+	} else if (imported <= small && inuse * 16LL < imported) {
+		return (false);
+	} else if (imported <= medium && inuse * 8LL < imported) {
+		return (false);
+	} else if (imported <= large && inuse * 4LL < imported) {
+		return (false);
+	} else if (imported > large && (imported - inuse) > (imported+2LL)/2LL) {
 		return (true);
+	} else {
+		return (false);
 	}
 }
 
