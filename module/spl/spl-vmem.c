@@ -3392,25 +3392,33 @@ bucket_fragmented(const uint16_t bn, const uint64_t now)
 	const int64_t imported = (int64_t)vmp->vm_kstat.vk_mem_import.value.ui64;
 	const int64_t inuse = (int64_t)vmp->vm_kstat.vk_mem_inuse.value.ui64;
 	const int64_t tiny = 64LL*1024LL*1024LL;
-	const int64_t small = tiny * 2LL;
-	const int64_t medium = small * 2LL;
-	const int64_t large = medium * 2LL;
+	const int64_t small = tiny * 2LL;          // 128 M
+	const int64_t medium = small * 2LL;        // 256
+	const int64_t large = medium * 2LL;        // 512
+	const int64_t huge = large * 2LL;          // 1 G
+	const int64_t super_huge = huge * 2LL;     // 2
 
-	if (imported <= tiny) {
+	const int64_t amount_free = imported - inuse;
+
+	if (amount_free <= tiny || imported <= small)
 		return (false);
-	} else if (imported <= small && inuse * 16LL < imported) {
-		return (false);
-	} else if (imported <= medium && inuse * 8LL < imported) {
-		return (false);
-	} else if (imported <= large && inuse * 4LL < imported) {
-		return (false);
-	} else if (imported > large && (imported - inuse) > (imported+2LL)/2LL) {
+
+	const int64_t percent_free = (amount_free * 100LL) / imported;
+
+	if (percent_free > 75LL) {
 		return (true);
+	} else if (imported <= medium) {
+		return (percent_free >= 50);
+	} else if (imported <= large) {
+		return (percent_free >= 33);
+	} else if (imported <= huge) {
+		return (percent_free >= 25);
+	} else if (imported <= super_huge) {
+		return (percent_free >= 15);
 	} else {
-		return (false);
+		return (percent_free >= 10);
 	}
 }
-
 
 /*
  * return true if the bucket for size is fragmented or if
