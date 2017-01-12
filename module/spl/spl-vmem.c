@@ -2184,10 +2184,10 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 				uint64_t ticks = zfs_lbolt() - now_ticks;
 				printf("SPL: %s returning %llu bytes after "
 				    "%llu ticks (hz=%u, seconds = %llu), "
-				    "%u suspends, %u blocked, %u tries\n",
+				    "%u suspends, %u blocked, %u tries (%s)\n",
 				    __func__, (uint64_t)size,
 				    ticks, hz, ticks/hz, suspends,
-				    blocked_suspends, try_no_pressure);
+				    blocked_suspends, try_no_pressure, calling_vmp->vm_name);
 				alloc_lock = false; // atomic seq cst, so is published to all threads
 				return(m);
 			} else {
@@ -2209,10 +2209,10 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 			force_time = now;
 			printf("SPL: %s TIMEOUT %llu bytes after "
 			    "%llu ticks (hz=%u, seconds=%llu), "
-			    "%u suspends, %u blocked, %u tries\n",
+			    "%u suspends, %u blocked, %u tries (%s)\n",
 			    __func__, (uint64_t)size,
 			    ticks, hz, ticks/hz, suspends,
-			    blocked_suspends, try_no_pressure);
+			    blocked_suspends, try_no_pressure, calling_vmp->vm_name);
 			alloc_lock = false;
 			atomic_inc_64(&spl_xat_forced);
 			return(mp);
