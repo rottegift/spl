@@ -24,7 +24,7 @@
  * Copyright (C) 2008 MacZFS
  * Copyright (C) 2013 Jorgen Lundman <lundman@lundman.net>
  * Copyright (C) 2014 Brendon Humphrey <brendon.humphrey@mac.com>
- * Copyright (C) 2016 Sean Doran <smd@use.net>
+ * Copyright (C) 2017 Sean Doran <smd@use.net>
  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
  *
  */
@@ -81,6 +81,7 @@ int64_t spl_free_delta_ema;
 static volatile _Atomic int64_t spl_free_manual_pressure = 0;
 static volatile _Atomic boolean_t spl_free_fast_pressure = FALSE;
 static _Atomic bool spl_free_maybe_reap_flag = false;
+static _Atomic uint64_t spl_free_last_pressure = 0;
 
 // Start and end address of kernel memory
 extern vm_offset_t virtual_space_start;
@@ -4111,6 +4112,12 @@ spl_free_manual_pressure_wrapper(void)
 	return (spl_free_manual_pressure);
 }
 
+uint64_t
+spl_free_last_pressure_wrapper(void)
+{
+	return (spl_free_last_pressure);
+}
+
 int64_t
 spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t check_interval)
 {
@@ -4134,6 +4141,9 @@ spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast, clock_t check_inte
 	const uint64_t double_again_at = start + hz;
 	bool doubled = false, doubled_again = false;
 	uint64_t now;
+
+	spl_free_last_pressure = start;
+
 	for  (; spl_free_manual_pressure != 0; ) {
 		// has another thread set spl_free_manual_pressure?
 		if (spl_free_manual_pressure < new_p)
@@ -4170,6 +4180,7 @@ spl_free_set_pressure(int64_t new_p)
 		// and any spl_free_set_and_wait_pressure() threads
 		cv_broadcast(&spl_free_thread_cv);
 	}
+	spl_free_last_pressure = zfs_lbolt();
 }
 
 void
@@ -4178,6 +4189,7 @@ spl_free_set_pressure_both(int64_t new_p, boolean_t fast)
 	spl_free_fast_pressure = fast;
 	if (new_p > spl_free_manual_pressure || new_p <= 0)
 		spl_free_manual_pressure = new_p;
+	spl_free_last_pressure = zfs_lbolt();
 }
 
 void spl_free_maybe_reap(void);
@@ -4189,6 +4201,7 @@ spl_free_set_emergency_pressure(int64_t new_p)
 	if (new_p > spl_free_manual_pressure || new_p <= 0)
 		spl_free_manual_pressure = new_p;
 	spl_free_maybe_reap();
+	spl_free_last_pressure = zfs_lbolt();
 }
 
 void
@@ -4196,12 +4209,14 @@ spl_free_set_emergency_pressure_additive(int64_t new_p)
 {
 	spl_free_fast_pressure = TRUE;
 	spl_free_manual_pressure += new_p;
+	spl_free_last_pressure = zfs_lbolt();
 }
 
 void
 spl_free_set_pressure_additive(int64_t new_p)
 {
 	spl_free_manual_pressure += new_p;
+	spl_free_last_pressure = zfs_lbolt();
 }
 
 boolean_t
@@ -4214,6 +4229,7 @@ void
 spl_free_set_fast_pressure(boolean_t state)
 {
 	spl_free_fast_pressure = state;
+	spl_free_last_pressure = zfs_lbolt();
 }
 
 void

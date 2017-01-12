@@ -26,6 +26,7 @@
 /*
  * Copyright (c) 2012 by Delphix. All rights reserved.
  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+ * Copyright (c) 2017 Sean Doran <smd@use.net>
  */
 
 /*
@@ -431,8 +432,6 @@ uint64_t spl_bucket_tunable_small_span = 0;
 // for XAT & XATB visibility into VBA queue
 static _Atomic uint32_t spl_vba_threads[VMEM_BUCKETS] = { 0 };
 static uint32_t vmem_bucket_id_to_bucket_number[NUMBER_OF_ARENAS_IN_VMEM_INIT] = { 0 };
-// for XATB -> spl_arc_no_grow(size) signalling
-static void spl_set_arc_no_grow(size_t);
 boolean_t spl_arc_no_grow(size_t);
 static _Atomic uint64_t spl_arc_no_grow_time[VMEM_BUCKETS] = { 0 };
 _Atomic uint64_t spl_arc_no_grow_bits = 0;
@@ -2141,8 +2140,6 @@ xnu_alloc_throttled_bail(uint64_t now_ticks, vmem_t *calling_vmp, size_t size, i
 
 	// spin looking for memory
 
-	spl_set_arc_no_grow(size);
-
 	const uint64_t bigtarget = MAX(size,16ULL*1024ULL*1024ULL);
 
 	static volatile _Atomic bool alloc_lock = false;
@@ -3384,8 +3381,19 @@ vmem_fini(vmem_t *heap)
 static inline bool
 bucket_fragmented(const uint16_t bn, const uint64_t now)
 {
-	if (now < 300 * hz)
-		return(false);
+
+	// early during uptime, just let buckets grow.
+
+	if (now < 600 * hz)
+		return (false);
+
+	// if there has been no pressure in the past five minutes,
+	// then we will just let the bucket grow.
+
+	const uint64_t timeout = 5ULL * 60ULL * hz;
+
+	if (spl_free_last_pressure_wrapper() + timeout >= now)
+		return (false);
 
 	const vmem_t *vmp = vmem_bucket_arena[bn];
 
@@ -3421,9 +3429,8 @@ bucket_fragmented(const uint16_t bn, const uint64_t now)
 }
 
 /*
- * return true if the bucket for size is fragmented or if
- * xatb has called spl_set_arc_no_grow in the past minute
- */
+ * return true if the bucket for size is fragmented
+ * */
 static inline bool
 spl_arc_no_grow_impl(const uint16_t b, const size_t size)
 {
@@ -3480,12 +3487,4 @@ spl_arc_no_grow(size_t size)
 	}
 
 	return((boolean_t)rv);
-}
-
-static void
-spl_set_arc_no_grow(size_t size)
-{
-	const uint16_t b = vmem_bucket_number_arc_no_grow(size);
-
-	spl_arc_no_grow_time[b] = zfs_lbolt();
 }
