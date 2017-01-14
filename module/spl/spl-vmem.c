@@ -456,7 +456,9 @@ vmem_getseg_global(void)
 		vmem_segfree = vsp->vs_knext;
 	mutex_exit(&vmem_segfree_lock);
 
-	vsp->vs_span_createtime = 0;
+	if (vsp != NULL)
+		vsp->vs_span_createtime = 0;
+
 	return (vsp);
 }
 
@@ -532,7 +534,7 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	// and calls vmem_seg_create() which sends any leftovers from vsp to vmem_freelist_insert
 
 	// vmem_freelist_insert would take the seg (as above, 8k-512 size), vprev points to the
-	// 16k list, and VMEM_INSET(vprev, vsp, k) inserts the segment immediately after
+	// 16k list, and VMEM_INSERT(vprev, vsp, k) inserts the segment immediately after
 
 	// so vmem_seg_create(...8k-512...) pushes to the head of the 8k list,
 	// and vmem_alloc(...8-512k...) will pull from the head of the 8k list
@@ -573,7 +575,19 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	     step++) {
 		ASSERT(n != NULL);
 		if (n == nextlist) {
+			printf("SPL: %s: at marker (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
+			    __func__, vmp->vm_name, step,
+			    (uintptr_t)p->vs_start, (uintptr_t)p->vs_end);
+			IOSleep(1);
 			// the next entry is the next marker (e.g. 16k marker)
+			break;
+		}
+		if (n->vs_start == 0) {
+			// from vmem_freelist_delete, this is a head
+			printf("SPL: %s: n->vs_start == 0 (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
+			    __func__, vmp->vm_name, step,
+			    (uintptr_t)p->vs_start, (uintptr_t)p->vs_end);
+			IOSleep(1);
 			break;
 		}
 		if (step >= max_walk_steps) {
@@ -584,11 +598,14 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 				n = nextlist;
 				p = nextlist->vs_kprev;
 			}
+			printf("SPL: %s: walked out (%s)\n", __func__, vmp->vm_name);
+			IOSleep(1);
 			break;
 		}
 		if (n->vs_knext == NULL) {
 			printf("SPL: %s: n->vs_knext == NULL (my_listnum == %d)\n",
 			    __func__, my_listnum);
+			IOSleep(1);
 			break;
 		}
 		p = n;
@@ -3143,6 +3160,8 @@ vmem_init(const char *heap_name,
 	    heap_quantum, spl_vmem_default_alloc, spl_vmem_default_free,
 	    spl_default_arena_parent, 16ULL*1024ULL*1024ULL, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
 
+	VERIFY(spl_default_arena != NULL);
+
 	// The bucket arenas satisfy allocations & frees from the bucket heap
 	// that are dispatched to the bucket whose power-of-two label is the
 	// smallest allocation that vmem_bucket_allocate will ask for.
@@ -3227,6 +3246,7 @@ vmem_init(const char *heap_name,
 		vmem_t *b = vmem_create(buf, NULL, 0, heap_quantum,
 		    xnu_alloc_throttled, xnu_free_throttled, spl_default_arena_parent,
 		    minimum_allocsize, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE | VMC_TIMEFREE);
+		VERIFY(b != NULL);
 		vmem_bucket_arena[bucket_number] = b;
 		vmem_bucket_id_to_bucket_number[b->vm_id] = bucket_number;
 	}
@@ -3239,6 +3259,8 @@ vmem_init(const char *heap_name,
 	    NULL, 0, heap_quantum,
 	    vmem_bucket_alloc, vmem_bucket_free, spl_default_arena_parent, 0,
 	    VM_SLEEP);
+
+	VERIFY(spl_heap_arena != NULL);
 
 	// add a fixed-sized allocation to spl_heap_arena; this reduces the
 	// need to talk to the bucket arenas by a substantial margin
@@ -3261,9 +3283,11 @@ vmem_init(const char *heap_name,
 	printf("SPL: %s adding fixed allocation of %llu to the bucket_heap\n",
 	    __func__, (uint64_t)resv_size);
 
-	spl_heap_arena_initial_alloc =  vmem_add(spl_heap_arena,
+	spl_heap_arena_initial_alloc = vmem_add(spl_heap_arena,
 	    vmem_alloc(spl_default_arena, resv_size, VM_SLEEP),
 	    resv_size, VM_SLEEP);
+
+	VERIFY(spl_heap_arena_initial_alloc != NULL);
 
 	spl_heap_arena_initial_alloc_size = resv_size;
 
@@ -3275,6 +3299,8 @@ vmem_init(const char *heap_name,
 	    vmem_alloc, vmem_free, spl_heap_arena, 0,
 	    VM_SLEEP);
 
+	VERIFY(heap != NULL);
+
 	// Root all the low bandwidth metadata arenas to the default arena.
 	// The vmem_metadata allocations will all be 32 kiB or larger,
 	// and the total allocation will generally cap off around 24 MiB.
@@ -3283,20 +3309,28 @@ vmem_init(const char *heap_name,
 	    NULL, 0, heap_quantum, vmem_alloc, vmem_free, spl_default_arena,
 	    8 * PAGESIZE, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
 
+	VERIFY(vmem_metadata_arena != NULL);
+
 	vmem_seg_arena = vmem_create("vmem_seg", // id 18
 								 NULL, 0, heap_quantum,
 								 vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								 VM_SLEEP | VMC_POPULATOR);
+
+	VERIFY(vmem_seg_arena != NULL);
 
 	vmem_hash_arena = vmem_create("vmem_hash", // id 19
 								  NULL, 0, 8,
 								  vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								  VM_SLEEP);
 
+	VERIFY(vmem_hash_arena != NULL);
+
 	vmem_vmem_arena = vmem_create("vmem_vmem", // id 20
 								  vmem0, sizeof (vmem0), 1,
 								  vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								  VM_SLEEP);
+
+	VERIFY(vmem_vmem_arena != NULL);
 
 	// 21 (0-based) vmem_create before this line. - macroized NUMBER_OF_ARENAS_IN_VMEM_INIT
 	for (id = 0; id < vmem_id; id++) {
