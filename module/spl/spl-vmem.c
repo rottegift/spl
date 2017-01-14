@@ -671,8 +671,8 @@ vmem_hash_delete(vmem_t *vmp, uintptr_t addr, size_t size)
 		panic("vmem_hash_delete(%p, %lx, %lu): bad free (name: %s, addr, size)",
 		    (void *)vmp, addr, size, vmp->vm_name);
 	if (VS_SIZE(vsp) != size)
-		panic("vmem_hash_delete(%p, %lx, %lu): wrong size (expect %lu)",
-			  (void *)vmp, addr, size, VS_SIZE(vsp));
+		panic("vmem_hash_delete(%p, %lx, %lu): (%s) wrong size (expect %lu)",
+		    (void *)vmp, addr, size, vmp->vm_name, VS_SIZE(vsp));
 
 	vmp->vm_kstat.vk_free.value.ui64++;
 	vmp->vm_kstat.vk_mem_inuse.value.ui64 -= size;
