@@ -840,7 +840,7 @@ vmem_seg_alloc(vmem_t *vmp, vmem_seg_t *vsp, uintptr_t addr, size_t size)
 	ASSERT(addr >= vs_start && addr_end - 1 <= vs_end - 1);
 	ASSERT(addr - 1 <= addr_end - 1);
 
-	const hrtime_t parent_seg_span_createtime = vsp->vs_span_createtime;
+	hrtime_t parent_seg_span_createtime = vsp->vs_span_createtime;
 
 	/*
 	 * If we're allocating from the start of the segment, and the
@@ -873,7 +873,7 @@ vmem_seg_alloc(vmem_t *vmp, vmem_seg_t *vsp, uintptr_t addr, size_t size)
 	vsp->vs_start = addr;
 	vsp->vs_end = addr + size;
 
-	// not needed here? vsp->vs_span_createtime = parent_seg_span_createtime;
+	vsp->vs_span_createtime = parent_seg_span_createtime;
 
 	vmem_hash_insert(vmp, vsp);
 	return (vsp);
