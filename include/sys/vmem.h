@@ -85,7 +85,12 @@ extern "C" {
 #define	VMC_POPULATOR	0x00010000
 #define	VMC_NO_QCACHE	0x00020000	/* cannot use quantum caches */
 #define	VMC_IDENTIFIER	0x00040000	/* not backed by memory */
+	// VMC_XALLOC   0x00080000 below
+	// VMC_XALIGN   0x00100000 below
 #define	VMC_DUMPSAFE	0x00200000	/* can use alternate dump memory */
+	// KMC_IDENTIFIER == 0x00400000
+	// KMC_PREFILL ==    0x00800000
+#define VMC_TIMEFREE    0x01000000      /* keep span creation time, old spans freelist heads */
 	/*
 	 * internal use only;	the import function uses the vmem_ximport_t interface
 	 *			and may increase the request size if it so desires.

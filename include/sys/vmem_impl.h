@@ -57,6 +57,11 @@ extern "C" {
 		uint8_t		vs_import;	/* non-zero if segment was imported */
 		uint8_t		vs_depth;	/* stack depth if KMF_AUDIT active */
 		/*
+		 * if VM_FREESORT is set on the arena, then
+		 * this field is set at span creation time.
+		 */
+		hrtime_t        vs_span_createtime;
+		/*
 		 * The following fields are present only when KMF_AUDIT is set.
 		 */
 		kthread_t	*vs_thread;
@@ -116,6 +121,7 @@ MAX(1 << highbit(3 * (max)), 64)
 		kcondvar_t		vm_cv;				/* cv for blocking allocations */
 		kmutex_t		vm_lock;			/* arena lock */
 		uint32_t		vm_id;				/* vmem id */
+		hrtime_t                vm_createtime;
 		uint32_t		vm_mtbf;			/* induced alloc failure rate */
 		int				vm_cflags;			/* arena creation flags */
 		int				vm_qshift;			/* log2(vm_quantum) */

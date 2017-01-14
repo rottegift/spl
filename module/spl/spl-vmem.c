@@ -456,6 +456,9 @@ vmem_getseg_global(void)
 		vmem_segfree = vsp->vs_knext;
 	mutex_exit(&vmem_segfree_lock);
 
+	if (vsp != NULL)
+		vsp->vs_span_createtime = 0;
+
 	return (vsp);
 }
 
@@ -499,12 +502,141 @@ vmem_putseg(vmem_t *vmp, vmem_seg_t *vsp)
 	vmp->vm_nsegfree++;
 }
 
+
+/*
+ * Add vsp to the appropriate freelist, at the appropriate location,
+ * keeping the freelist sorted by age.
+ */
+
+#define dprintf(...)
+
+static void
+vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
+{
+	ASSERT(vmp->vm_cflags & VMC_TIMEFREE);
+	ASSERT(vsp->vs_span_createtime > 0);
+
+	const uint32_t max_walk_steps = 100;
+
+	vmem_seg_t *vprev;
+
+	ASSERT(*VMEM_HASH(vmp, vsp->vs_start) != vsp);
+
+	// in vmem_create_common() the freelists are arranged:
+	// freelist[0].vs_kprev = NULL, freelist[VMEM_FREELISTS].vs_knext = NULL
+	// freelist[1].vs_kprev = freelist[0], freelist[1].vs_knext = freelist[2] ...
+
+	// from vmem_freelist_insert():
+	// VS_SIZE is the segment size (->vs_end - ->vs_start), so say 8k-512
+	// highbit is the higest bit set PLUS 1, so in this case would be the 16k list.
+	// so below, vprev is therefore pointing to the 8k list
+
+	// in vmem_alloc, the unconstrained allocation takes, for a 8k-512 block:
+	// vsp = flist[8k].vs_knext
+	// and calls vmem_seg_create() which sends any leftovers from vsp to vmem_freelist_insert
+
+	// vmem_freelist_insert would take the seg (as above, 8k-512 size), vprev points to the
+	// 16k list, and VMEM_INSERT(vprev, vsp, k) inserts the segment immediately after
+
+	// so vmem_seg_create(...8k-512...) pushes to the head of the 8k list,
+	// and vmem_alloc(...8-512k...) will pull from the head of the 8k list
+
+	// below we may want to push to the TAIL of the 8k list, which is
+	// just before flist[16k].
+
+	vprev = (vmem_seg_t *)&vmp->vm_freelist[highbit(VS_SIZE(vsp)) - 1];
+
+	int my_listnum = highbit(VS_SIZE(vsp)) - 1;
+
+	ASSERT(my_listnum >= 1);
+	ASSERT(my_listnum < VMEM_FREELISTS);
+
+	int next_listnum = my_listnum + 1;
+
+	vmem_seg_t *nextlist = (vmem_seg_t *)&vmp->vm_freelist[next_listnum];
+
+	ASSERT(vsp->vs_span_createtime != 0);
+	if (vsp->vs_span_createtime == 0) {
+		printf("SPL: %s: WARNING: vsp->vs_span_createtime == 0 (%s)!\n",
+		    __func__, vmp->vm_name);
+	}
+
+	// continuing our example, starts with p at flist[8k]
+	// and n at the following freelist entry
+
+	vmem_seg_t *p = vprev;
+	vmem_seg_t *n = p->vs_knext;
+
+	// walk from the freelist head looking for
+	// a segment whose creation time is later than
+	// the segment to be inserted's creation time,
+	// then insert before that segment.
+
+	for (uint32_t step = 0;
+	     p->vs_span_createtime <= vsp->vs_span_createtime;
+	     step++) {
+		ASSERT(n != NULL);
+		if (n == nextlist) {
+			dprintf("SPL: %s: at marker (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
+			    __func__, vmp->vm_name, step,
+			    (uintptr_t)p->vs_start, (uintptr_t)p->vs_end);
+			// IOSleep(1);
+			// the next entry is the next marker (e.g. 16k marker)
+			break;
+		}
+		if (n->vs_start == 0) {
+			// from vmem_freelist_delete, this is a head
+			dprintf("SPL: %s: n->vs_start == 0 (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
+			    __func__, vmp->vm_name, step,
+			    (uintptr_t)p->vs_start, (uintptr_t)p->vs_end);
+			// IOSleep(1);
+			break;
+		}
+		if (step >= max_walk_steps) {
+			ASSERT(nextlist->vs_kprev != NULL);
+			// we have walked far enough.
+			// put this segment at the tail of the freelist.
+			if (nextlist->vs_kprev != NULL) {
+				n = nextlist;
+				p = nextlist->vs_kprev;
+			}
+			dprintf("SPL: %s: walked out (%s)\n", __func__, vmp->vm_name);
+			// IOSleep(1);
+			break;
+		}
+		if (n->vs_knext == NULL) {
+			dprintf("SPL: %s: n->vs_knext == NULL (my_listnum == %d)\n",
+			    __func__, my_listnum);
+			// IOSleep(1);
+			break;
+		}
+		p = n;
+		n = n->vs_knext;
+	}
+
+	ASSERT(p != NULL);
+
+	// insert segment between p and n
+
+	vsp->vs_type = VMEM_FREE;
+	vmp->vm_freemap |= VS_SIZE(vprev);
+	VMEM_INSERT(p, vsp, k);
+
+	cv_broadcast(&vmp->vm_cv);
+}
+
 /*
  * Add vsp to the appropriate freelist.
  */
 static void
 vmem_freelist_insert(vmem_t *vmp, vmem_seg_t *vsp)
 {
+
+	if (vmp->vm_cflags & VMC_TIMEFREE) {
+		vmem_freelist_insert_sort_by_time(vmp, vsp);
+		return;
+	}
+
 	vmem_seg_t *vprev;
 
 	ASSERT(*VMEM_HASH(vmp, vsp->vs_start) != vsp);
@@ -588,8 +720,8 @@ vmem_hash_delete(vmem_t *vmp, uintptr_t addr, size_t size)
 		panic("vmem_hash_delete(%p, %lx, %lu): bad free (name: %s, addr, size)",
 		    (void *)vmp, addr, size, vmp->vm_name);
 	if (VS_SIZE(vsp) != size)
-		panic("vmem_hash_delete(%p, %lx, %lu): wrong size (expect %lu)",
-			  (void *)vmp, addr, size, VS_SIZE(vsp));
+		panic("vmem_hash_delete(%p, %lx, %lu): (%s) wrong size (expect %lu)",
+		    (void *)vmp, addr, size, vmp->vm_name, VS_SIZE(vsp));
 
 	vmp->vm_kstat.vk_free.value.ui64++;
 	vmp->vm_kstat.vk_mem_inuse.value.ui64 -= size;
@@ -609,6 +741,7 @@ vmem_seg_create(vmem_t *vmp, vmem_seg_t *vprev, uintptr_t start, uintptr_t end)
 	newseg->vs_end = end;
 	newseg->vs_type = 0;
 	newseg->vs_import = 0;
+	newseg->vs_span_createtime = 0;
 
 	VMEM_INSERT(vprev, newseg, a);
 
@@ -646,9 +779,18 @@ vmem_span_create(vmem_t *vmp, void *vaddr, size_t size, uint8_t import)
 	span = vmem_seg_create(vmp, vmp->vm_seg0.vs_aprev, start, end);
 	span->vs_type = VMEM_SPAN;
 	span->vs_import = import;
+
+	hrtime_t t = 0;
+	if (vmp->vm_cflags & VMC_TIMEFREE) {
+		t = gethrtime();
+	}
+	span->vs_span_createtime = t;
+
 	VMEM_INSERT(vmp->vm_seg0.vs_kprev, span, k);
 
 	newseg = vmem_seg_create(vmp, span, start, end);
+	newseg->vs_span_createtime = t;
+
 	vmem_freelist_insert(vmp, newseg);
 
 	if (import)
@@ -700,6 +842,8 @@ vmem_seg_alloc(vmem_t *vmp, vmem_seg_t *vsp, uintptr_t addr, size_t size)
 	ASSERT(addr >= vs_start && addr_end - 1 <= vs_end - 1);
 	ASSERT(addr - 1 <= addr_end - 1);
 
+	hrtime_t parent_seg_span_createtime = vsp->vs_span_createtime;
+
 	/*
 	 * If we're allocating from the start of the segment, and the
 	 * remainder will be on the same freelist, we can save quite
@@ -709,22 +853,29 @@ vmem_seg_alloc(vmem_t *vmp, vmem_seg_t *vsp, uintptr_t addr, size_t size)
 		ASSERT(highbit(vs_size) == highbit(vs_size - realsize));
 		vsp->vs_start = addr_end;
 		vsp = vmem_seg_create(vmp, vsp->vs_aprev, addr, addr + size);
+		vsp->vs_span_createtime = parent_seg_span_createtime;
 		vmem_hash_insert(vmp, vsp);
 		return (vsp);
 	}
 
 	vmem_freelist_delete(vmp, vsp);
 
-	if (vs_end != addr_end)
-		vmem_freelist_insert(vmp,
-							 vmem_seg_create(vmp, vsp, addr_end, vs_end));
+	if (vs_end != addr_end) {
+		vmem_seg_t *v = vmem_seg_create(vmp, vsp, addr_end, vs_end);
+		v->vs_span_createtime = parent_seg_span_createtime;
+		vmem_freelist_insert(vmp, v);
+	}
 
-	if (vs_start != addr)
-		vmem_freelist_insert(vmp,
-							 vmem_seg_create(vmp, vsp->vs_aprev, vs_start, addr));
+	if (vs_start != addr) {
+		vmem_seg_t *v = vmem_seg_create(vmp, vsp->vs_aprev, vs_start, addr);
+		v->vs_span_createtime = parent_seg_span_createtime;
+		vmem_freelist_insert(vmp, v);
+	}
 
 	vsp->vs_start = addr;
 	vsp->vs_end = addr + size;
+
+	vsp->vs_span_createtime = parent_seg_span_createtime;
 
 	vmem_hash_insert(vmp, vsp);
 	return (vsp);
@@ -857,6 +1008,7 @@ vmem_advance(vmem_t *vmp, vmem_seg_t *walker, vmem_seg_t *afterme)
 	if (vprev->vs_type == VMEM_FREE) {
 		if (vnext->vs_type == VMEM_FREE) {
 			ASSERT(vprev->vs_end == vnext->vs_start);
+			ASSERT(vprev->vs_span_createtime == vnext->vs_span_createtime);
 			vmem_freelist_delete(vmp, vnext);
 			vmem_freelist_delete(vmp, vprev);
 			vprev->vs_end = vnext->vs_end;
@@ -895,7 +1047,6 @@ vmem_advance(vmem_t *vmp, vmem_seg_t *walker, vmem_seg_t *afterme)
  * for allocating things like process IDs, where we want to cycle through
  * all values in order.
  */
-#define dprintf if (0) printf
 static void *
 vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 {
@@ -928,8 +1079,10 @@ vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 		ASSERT(highbit(vs_size) == highbit(vs_size - realsize));
 		addr = vsp->vs_start;
 		vsp->vs_start = addr + realsize;
+		hrtime_t t = vsp->vs_span_createtime;
 		vmem_hash_insert(vmp,
 						 vmem_seg_create(vmp, rotor->vs_aprev, addr, addr + size));
+		vsp->vs_span_createtime = t;
 		mutex_exit(&vmp->vm_lock);
 		return ((void *)addr);
 	}
@@ -1753,6 +1906,10 @@ vmem_create_common(const char *name, void *base, size_t size, size_t quantum,
 	vmp->vm_cflags = vmflag;
 	vmflag &= VM_KMFLAGS;
 
+	hrtime_t hrnow = gethrtime();
+
+	vmp->vm_createtime = hrnow;
+
 	vmp->vm_quantum = quantum;
 	vmp->vm_qshift = highbit(quantum) - 1;
 	nqcache = MIN(qcache_max >> vmp->vm_qshift, VMEM_NQCACHE_MAX);
@@ -1777,6 +1934,7 @@ vmem_create_common(const char *name, void *base, size_t size, size_t quantum,
 	vsp->vs_knext = vsp;
 	vsp->vs_kprev = vsp;
 	vsp->vs_type = VMEM_SPAN;
+	vsp->vs_span_createtime = hrnow;
 
 	vsp = &vmp->vm_rotor;
 	vsp->vs_type = VMEM_ROTOR;
@@ -3003,6 +3161,8 @@ vmem_init(const char *heap_name,
 	    heap_quantum, spl_vmem_default_alloc, spl_vmem_default_free,
 	    spl_default_arena_parent, 16ULL*1024ULL*1024ULL, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
 
+	VERIFY(spl_default_arena != NULL);
+
 	// The bucket arenas satisfy allocations & frees from the bucket heap
 	// that are dispatched to the bucket whose power-of-two label is the
 	// smallest allocation that vmem_bucket_allocate will ask for.
@@ -3086,7 +3246,8 @@ vmem_init(const char *heap_name,
 		const int bucket_number = i - VMEM_BUCKET_LOWBIT;
 		vmem_t *b = vmem_create(buf, NULL, 0, heap_quantum,
 		    xnu_alloc_throttled, xnu_free_throttled, spl_default_arena_parent,
-		    minimum_allocsize, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
+		    minimum_allocsize, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE | VMC_TIMEFREE);
+		VERIFY(b != NULL);
 		vmem_bucket_arena[bucket_number] = b;
 		vmem_bucket_id_to_bucket_number[b->vm_id] = bucket_number;
 	}
@@ -3099,6 +3260,8 @@ vmem_init(const char *heap_name,
 	    NULL, 0, heap_quantum,
 	    vmem_bucket_alloc, vmem_bucket_free, spl_default_arena_parent, 0,
 	    VM_SLEEP);
+
+	VERIFY(spl_heap_arena != NULL);
 
 	// add a fixed-sized allocation to spl_heap_arena; this reduces the
 	// need to talk to the bucket arenas by a substantial margin
@@ -3121,9 +3284,11 @@ vmem_init(const char *heap_name,
 	printf("SPL: %s adding fixed allocation of %llu to the bucket_heap\n",
 	    __func__, (uint64_t)resv_size);
 
-	spl_heap_arena_initial_alloc =  vmem_add(spl_heap_arena,
+	spl_heap_arena_initial_alloc = vmem_add(spl_heap_arena,
 	    vmem_alloc(spl_default_arena, resv_size, VM_SLEEP),
 	    resv_size, VM_SLEEP);
+
+	VERIFY(spl_heap_arena_initial_alloc != NULL);
 
 	spl_heap_arena_initial_alloc_size = resv_size;
 
@@ -3135,6 +3300,8 @@ vmem_init(const char *heap_name,
 	    vmem_alloc, vmem_free, spl_heap_arena, 0,
 	    VM_SLEEP);
 
+	VERIFY(heap != NULL);
+
 	// Root all the low bandwidth metadata arenas to the default arena.
 	// The vmem_metadata allocations will all be 32 kiB or larger,
 	// and the total allocation will generally cap off around 24 MiB.
@@ -3143,20 +3310,28 @@ vmem_init(const char *heap_name,
 	    NULL, 0, heap_quantum, vmem_alloc, vmem_free, spl_default_arena,
 	    8 * PAGESIZE, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
 
+	VERIFY(vmem_metadata_arena != NULL);
+
 	vmem_seg_arena = vmem_create("vmem_seg", // id 18
 								 NULL, 0, heap_quantum,
 								 vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								 VM_SLEEP | VMC_POPULATOR);
+
+	VERIFY(vmem_seg_arena != NULL);
 
 	vmem_hash_arena = vmem_create("vmem_hash", // id 19
 								  NULL, 0, 8,
 								  vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								  VM_SLEEP);
 
+	VERIFY(vmem_hash_arena != NULL);
+
 	vmem_vmem_arena = vmem_create("vmem_vmem", // id 20
 								  vmem0, sizeof (vmem0), 1,
 								  vmem_alloc, vmem_free, vmem_metadata_arena, 0,
 								  VM_SLEEP);
+
+	VERIFY(vmem_vmem_arena != NULL);
 
 	// 21 (0-based) vmem_create before this line. - macroized NUMBER_OF_ARENAS_IN_VMEM_INIT
 	for (id = 0; id < vmem_id; id++) {
