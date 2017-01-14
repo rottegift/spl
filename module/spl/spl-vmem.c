@@ -456,6 +456,7 @@ vmem_getseg_global(void)
 		vmem_segfree = vsp->vs_knext;
 	mutex_exit(&vmem_segfree_lock);
 
+	vsp->vs_span_createtime = 0;
 	return (vsp);
 }
 
@@ -517,21 +518,47 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 
 	ASSERT(*VMEM_HASH(vmp, vsp->vs_start) != vsp);
 
+	// in vmem_create_common() the freelists are arranged:
+	// freelist[0].vs_kprev = NULL, freelist[VMEM_FREELISTS].vs_knext = NULL
+	// freelist[1].vs_kprev = freelist[0], freelist[1].vs_knext = freelist[2] ...
+
+	// from vmem_freelist_insert():
+	// VS_SIZE is the segment size (->vs_end - ->vs_start), so say 8k-512
+	// highbit is the higest bit set PLUS 1, so in this case would be the 16k list.
+	// so below, vprev is therefore pointing to the 8k list
+
+	// in vmem_alloc, the unconstrained allocation takes, for a 8k-512 block:
+	// vsp = flist[8k].vs_knext
+	// and calls vmem_seg_create() which sends any leftovers from vsp to vmem_freelist_insert
+
+	// vmem_freelist_insert would take the seg (as above, 8k-512 size), vprev points to the
+	// 16k list, and VMEM_INSET(vprev, vsp, k) inserts the segment immediately after
+
+	// so vmem_seg_create(...8k-512...) pushes to the head of the 8k list,
+	// and vmem_alloc(...8-512k...) will pull from the head of the 8k list
+
+	// below we may want to push to the TAIL of the 8k list, which is
+	// just before flist[16k].
+
 	vprev = (vmem_seg_t *)&vmp->vm_freelist[highbit(VS_SIZE(vsp)) - 1];
 
-	int listnum = highbit(VS_SIZE(vsp)) - 1;
+	int my_listnum = highbit(VS_SIZE(vsp)) - 1;
 
-	ASSERT(listnum >= 1);
-	ASSERT(listnum < VMEM_FREELISTS);
+	ASSERT(my_listnum >= 1);
+	ASSERT(my_listnum < VMEM_FREELISTS);
 
-	int nextlistnum = listnum + 1;
+	int next_listnum = my_listnum + 1;
 
-	vmem_seg_t *nextlist = (vmem_seg_t *)&vmp->vm_freelist[nextlistnum];
+	vmem_seg_t *nextlist = (vmem_seg_t *)&vmp->vm_freelist[next_listnum];
 
 	ASSERT(vsp->vs_span_createtime != 0);
-	if (vsp->vs_span_createtime == 0)
+	if (vsp->vs_span_createtime == 0) {
 		printf("SPL: %s: WARNING: vsp->vs_span_createtime == 0 (%s)!\n",
 		    __func__, vmp->vm_name);
+	}
+
+	// continuing our example, starts with p at flist[8k]
+	// and n at the following freelist entry
 
 	vmem_seg_t *p = vprev;
 	vmem_seg_t *n = p->vs_knext;
@@ -546,6 +573,7 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	     step++) {
 		ASSERT(n != NULL);
 		if (n == nextlist) {
+			// the next entry is the next marker (e.g. 16k marker)
 			break;
 		}
 		if (step >= max_walk_steps) {
@@ -559,6 +587,8 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 			break;
 		}
 		if (n->vs_knext == NULL) {
+			printf("SPL: %s: n->vs_knext == NULL (my_listnum == %d)\n",
+			    __func__, my_listnum);
 			break;
 		}
 		p = n;
@@ -1858,6 +1888,10 @@ vmem_create_common(const char *name, void *base, size_t size, size_t quantum,
 	vmp->vm_cflags = vmflag;
 	vmflag &= VM_KMFLAGS;
 
+	hrtime_t hrnow = gethrtime();
+
+	vmp->vm_createtime = hrnow;
+
 	vmp->vm_quantum = quantum;
 	vmp->vm_qshift = highbit(quantum) - 1;
 	nqcache = MIN(qcache_max >> vmp->vm_qshift, VMEM_NQCACHE_MAX);
@@ -1882,6 +1916,7 @@ vmem_create_common(const char *name, void *base, size_t size, size_t quantum,
 	vsp->vs_knext = vsp;
 	vsp->vs_kprev = vsp;
 	vsp->vs_type = VMEM_SPAN;
+	vsp->vs_span_createtime = hrnow;
 
 	vsp = &vmp->vm_rotor;
 	vsp->vs_type = VMEM_ROTOR;

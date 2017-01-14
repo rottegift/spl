@@ -144,6 +144,7 @@ MAX(1 << highbit(3 * (max)), 64)
 		void			*vm_qcache[VMEM_NQCACHE_MAX];	/* quantum caches */
 		vmem_freelist_t	vm_freelist[VMEM_FREELISTS + 1]; /* power-of-2 flists */
 		vmem_kstat_t	vm_kstat;		/* kstat data */
+		hrtime_t        vm_createtime;
 	};
 
 #ifdef	__cplusplus
