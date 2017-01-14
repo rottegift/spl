@@ -1006,7 +1006,7 @@ vmem_advance(vmem_t *vmp, vmem_seg_t *walker, vmem_seg_t *afterme)
 	if (vprev->vs_type == VMEM_FREE) {
 		if (vnext->vs_type == VMEM_FREE) {
 			ASSERT(vprev->vs_end == vnext->vs_start);
-			ASSERT(vprev->vs_span_createtime = vnext->vs_span_createtime);
+			ASSERT(vprev->vs_span_createtime == vnext->vs_span_createtime);
 			vmem_freelist_delete(vmp, vnext);
 			vmem_freelist_delete(vmp, vprev);
 			vprev->vs_end = vnext->vs_end;
