@@ -499,12 +499,95 @@ vmem_putseg(vmem_t *vmp, vmem_seg_t *vsp)
 	vmp->vm_nsegfree++;
 }
 
+
+/*
+ * Add vsp to the appropriate freelist, at the appropriate location,
+ * keeping the freelist sorted by age.
+ */
+
+static void
+vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
+{
+	ASSERT(vmp->vm_cflags & VMC_TIMEFREE);
+	ASSERT(vsp->vs_span_createtime > 0);
+
+	const uint32_t max_walk_steps = 100;
+
+	vmem_seg_t *vprev;
+
+	ASSERT(*VMEM_HASH(vmp, vsp->vs_start) != vsp);
+
+	vprev = (vmem_seg_t *)&vmp->vm_freelist[highbit(VS_SIZE(vsp)) - 1];
+
+	int listnum = highbit(VS_SIZE(vsp)) - 1;
+
+	ASSERT(listnum >= 1);
+	ASSERT(listnum < VMEM_FREELISTS);
+
+	int nextlistnum = listnum + 1;
+
+	vmem_seg_t *nextlist = (vmem_seg_t *)&vmp->vm_freelist[nextlistnum];
+
+	ASSERT(vsp->vs_span_createtime != 0);
+	if (vsp->vs_span_createtime == 0)
+		printf("SPL: %s: WARNING: vsp->vs_span_createtime == 0 (%s)!\n",
+		    __func__, vmp->vm_name);
+
+	vmem_seg_t *p = vprev;
+	vmem_seg_t *n = p->vs_knext;
+
+	// walk from the freelist head looking for
+	// a segment whose creation time is later than
+	// the segment to be inserted's creation time,
+	// then insert before that segment.
+
+	for (uint32_t step = 0;
+	     p->vs_span_createtime <= vsp->vs_span_createtime;
+	     step++) {
+		ASSERT(n != NULL);
+		if (n == nextlist) {
+			break;
+		}
+		if (step >= max_walk_steps) {
+			ASSERT(nextlist->vs_kprev != NULL);
+			// we have walked far enough.
+			// put this segment at the tail of the freelist.
+			if (nextlist->vs_kprev != NULL) {
+				n = nextlist;
+				p = nextlist->vs_kprev;
+			}
+			break;
+		}
+		if (n->vs_knext == NULL) {
+			break;
+		}
+		p = n;
+		n = n->vs_knext;
+	}
+
+	ASSERT(p != NULL);
+
+	// insert segment between p and n
+
+	vsp->vs_type = VMEM_FREE;
+	vmp->vm_freemap |= VS_SIZE(vprev);
+	VMEM_INSERT(p, vsp, k);
+
+	cv_broadcast(&vmp->vm_cv);
+}
+
 /*
  * Add vsp to the appropriate freelist.
  */
 static void
 vmem_freelist_insert(vmem_t *vmp, vmem_seg_t *vsp)
 {
+
+	if (vmp->vm_cflags & VMC_TIMEFREE) {
+		vmem_freelist_insert_sort_by_time(vmp, vsp);
+		return;
+	}
+
 	vmem_seg_t *vprev;
 
 	ASSERT(*VMEM_HASH(vmp, vsp->vs_start) != vsp);
@@ -609,6 +692,7 @@ vmem_seg_create(vmem_t *vmp, vmem_seg_t *vprev, uintptr_t start, uintptr_t end)
 	newseg->vs_end = end;
 	newseg->vs_type = 0;
 	newseg->vs_import = 0;
+	newseg->vs_span_createtime = 0;
 
 	VMEM_INSERT(vprev, newseg, a);
 
@@ -646,9 +730,18 @@ vmem_span_create(vmem_t *vmp, void *vaddr, size_t size, uint8_t import)
 	span = vmem_seg_create(vmp, vmp->vm_seg0.vs_aprev, start, end);
 	span->vs_type = VMEM_SPAN;
 	span->vs_import = import;
+
+	hrtime_t t = 0;
+	if (vmp->vm_cflags & VMC_TIMEFREE) {
+		t = gethrtime();
+	}
+	span->vs_span_createtime = t;
+
 	VMEM_INSERT(vmp->vm_seg0.vs_kprev, span, k);
 
 	newseg = vmem_seg_create(vmp, span, start, end);
+	newseg->vs_span_createtime = t;
+
 	vmem_freelist_insert(vmp, newseg);
 
 	if (import)
@@ -700,6 +793,8 @@ vmem_seg_alloc(vmem_t *vmp, vmem_seg_t *vsp, uintptr_t addr, size_t size)
 	ASSERT(addr >= vs_start && addr_end - 1 <= vs_end - 1);
 	ASSERT(addr - 1 <= addr_end - 1);
 
+	const hrtime_t parent_seg_span_createtime = vsp->vs_span_createtime;
+
 	/*
 	 * If we're allocating from the start of the segment, and the
 	 * remainder will be on the same freelist, we can save quite
@@ -709,22 +804,29 @@ vmem_seg_alloc(vmem_t *vmp, vmem_seg_t *vsp, uintptr_t addr, size_t size)
 		ASSERT(highbit(vs_size) == highbit(vs_size - realsize));
 		vsp->vs_start = addr_end;
 		vsp = vmem_seg_create(vmp, vsp->vs_aprev, addr, addr + size);
+		vsp->vs_span_createtime = parent_seg_span_createtime;
 		vmem_hash_insert(vmp, vsp);
 		return (vsp);
 	}
 
 	vmem_freelist_delete(vmp, vsp);
 
-	if (vs_end != addr_end)
-		vmem_freelist_insert(vmp,
-							 vmem_seg_create(vmp, vsp, addr_end, vs_end));
+	if (vs_end != addr_end) {
+		vmem_seg_t *v = vmem_seg_create(vmp, vsp, addr_end, vs_end);
+		v->vs_span_createtime = parent_seg_span_createtime;
+		vmem_freelist_insert(vmp, v);
+	}
 
-	if (vs_start != addr)
-		vmem_freelist_insert(vmp,
-							 vmem_seg_create(vmp, vsp->vs_aprev, vs_start, addr));
+	if (vs_start != addr) {
+		vmem_seg_t *v = vmem_seg_create(vmp, vsp->vs_aprev, vs_start, addr);
+		v->vs_span_createtime = parent_seg_span_createtime;
+		vmem_freelist_insert(vmp, v);
+	}
 
 	vsp->vs_start = addr;
 	vsp->vs_end = addr + size;
+
+	// not needed here? vsp->vs_span_createtime = parent_seg_span_createtime;
 
 	vmem_hash_insert(vmp, vsp);
 	return (vsp);
@@ -857,6 +959,7 @@ vmem_advance(vmem_t *vmp, vmem_seg_t *walker, vmem_seg_t *afterme)
 	if (vprev->vs_type == VMEM_FREE) {
 		if (vnext->vs_type == VMEM_FREE) {
 			ASSERT(vprev->vs_end == vnext->vs_start);
+			ASSERT(vprev->vs_span_createtime = vnext->vs_span_createtime);
 			vmem_freelist_delete(vmp, vnext);
 			vmem_freelist_delete(vmp, vprev);
 			vprev->vs_end = vnext->vs_end;
@@ -928,8 +1031,10 @@ vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 		ASSERT(highbit(vs_size) == highbit(vs_size - realsize));
 		addr = vsp->vs_start;
 		vsp->vs_start = addr + realsize;
+		hrtime_t t = vsp->vs_span_createtime;
 		vmem_hash_insert(vmp,
 						 vmem_seg_create(vmp, rotor->vs_aprev, addr, addr + size));
+		vsp->vs_span_createtime = t;
 		mutex_exit(&vmp->vm_lock);
 		return ((void *)addr);
 	}
@@ -3086,7 +3191,7 @@ vmem_init(const char *heap_name,
 		const int bucket_number = i - VMEM_BUCKET_LOWBIT;
 		vmem_t *b = vmem_create(buf, NULL, 0, heap_quantum,
 		    xnu_alloc_throttled, xnu_free_throttled, spl_default_arena_parent,
-		    minimum_allocsize, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE);
+		    minimum_allocsize, VM_SLEEP | VMC_POPULATOR | VMC_NO_QCACHE | VMC_TIMEFREE);
 		vmem_bucket_arena[bucket_number] = b;
 		vmem_bucket_id_to_bucket_number[b->vm_id] = bucket_number;
 	}

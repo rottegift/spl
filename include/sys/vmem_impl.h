@@ -62,6 +62,11 @@ extern "C" {
 		kthread_t	*vs_thread;
 		hrtime_t	vs_timestamp;
 		pc_t		vs_stack[VMEM_STACK_DEPTH];
+		/*
+		 * if VM_FREESORT is set on the arena, then
+		 * this field is set at span creation time.
+		 */
+		hrtime_t        vs_span_createtime;
 	};
 
 	typedef struct vmem_freelist {
