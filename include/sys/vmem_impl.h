@@ -57,16 +57,16 @@ extern "C" {
 		uint8_t		vs_import;	/* non-zero if segment was imported */
 		uint8_t		vs_depth;	/* stack depth if KMF_AUDIT active */
 		/*
+		 * if VM_FREESORT is set on the arena, then
+		 * this field is set at span creation time.
+		 */
+		hrtime_t        vs_span_createtime;
+		/*
 		 * The following fields are present only when KMF_AUDIT is set.
 		 */
 		kthread_t	*vs_thread;
 		hrtime_t	vs_timestamp;
 		pc_t		vs_stack[VMEM_STACK_DEPTH];
-		/*
-		 * if VM_FREESORT is set on the arena, then
-		 * this field is set at span creation time.
-		 */
-		hrtime_t        vs_span_createtime;
 	};
 
 	typedef struct vmem_freelist {
@@ -121,6 +121,7 @@ MAX(1 << highbit(3 * (max)), 64)
 		kcondvar_t		vm_cv;				/* cv for blocking allocations */
 		kmutex_t		vm_lock;			/* arena lock */
 		uint32_t		vm_id;				/* vmem id */
+		hrtime_t                vm_createtime;
 		uint32_t		vm_mtbf;			/* induced alloc failure rate */
 		int				vm_cflags;			/* arena creation flags */
 		int				vm_qshift;			/* log2(vm_quantum) */
@@ -144,7 +145,6 @@ MAX(1 << highbit(3 * (max)), 64)
 		void			*vm_qcache[VMEM_NQCACHE_MAX];	/* quantum caches */
 		vmem_freelist_t	vm_freelist[VMEM_FREELISTS + 1]; /* power-of-2 flists */
 		vmem_kstat_t	vm_kstat;		/* kstat data */
-		hrtime_t        vm_createtime;
 	};
 
 #ifdef	__cplusplus
