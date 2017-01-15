@@ -508,6 +508,8 @@ vmem_putseg(vmem_t *vmp, vmem_seg_t *vsp)
  * keeping the freelist sorted by age.
  */
 
+#define dprintf(...)
+
 static void
 vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 {
@@ -575,19 +577,19 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	     step++) {
 		ASSERT(n != NULL);
 		if (n == nextlist) {
-			printf("SPL: %s: at marker (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
+			dprintf("SPL: %s: at marker (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
 			    __func__, vmp->vm_name, step,
 			    (uintptr_t)p->vs_start, (uintptr_t)p->vs_end);
-			IOSleep(1);
+			// IOSleep(1);
 			// the next entry is the next marker (e.g. 16k marker)
 			break;
 		}
 		if (n->vs_start == 0) {
 			// from vmem_freelist_delete, this is a head
-			printf("SPL: %s: n->vs_start == 0 (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
+			dprintf("SPL: %s: n->vs_start == 0 (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
 			    __func__, vmp->vm_name, step,
 			    (uintptr_t)p->vs_start, (uintptr_t)p->vs_end);
-			IOSleep(1);
+			// IOSleep(1);
 			break;
 		}
 		if (step >= max_walk_steps) {
@@ -598,14 +600,14 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 				n = nextlist;
 				p = nextlist->vs_kprev;
 			}
-			printf("SPL: %s: walked out (%s)\n", __func__, vmp->vm_name);
-			IOSleep(1);
+			dprintf("SPL: %s: walked out (%s)\n", __func__, vmp->vm_name);
+			// IOSleep(1);
 			break;
 		}
 		if (n->vs_knext == NULL) {
-			printf("SPL: %s: n->vs_knext == NULL (my_listnum == %d)\n",
+			dprintf("SPL: %s: n->vs_knext == NULL (my_listnum == %d)\n",
 			    __func__, my_listnum);
-			IOSleep(1);
+			// IOSleep(1);
 			break;
 		}
 		p = n;
@@ -1045,7 +1047,6 @@ vmem_advance(vmem_t *vmp, vmem_seg_t *walker, vmem_seg_t *afterme)
  * for allocating things like process IDs, where we want to cycle through
  * all values in order.
  */
-#define dprintf if (0) printf
 static void *
 vmem_nextfit_alloc(vmem_t *vmp, size_t size, int vmflag)
 {
