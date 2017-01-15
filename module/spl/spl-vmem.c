@@ -1681,8 +1681,13 @@ vmem_alloc(vmem_t *vmp, size_t size, int vmflag)
 
 	if (flist-- == 0) {
 		mutex_exit(&vmp->vm_lock);
-		return (vmem_xalloc(vmp, size, vmp->vm_quantum,
+		if (0 == (vmp->vm_cflags & VMC_TIMEFREE))  {
+			return (vmem_xalloc(vmp, size, vmp->vm_quantum,
 							0, 0, NULL, NULL, vmflag));
+		} else {
+			return (vmem_xalloc(vmp, size, vmp->vm_quantum,
+				0, 0, NULL, NULL, vmflag | VM_BESTFIT));
+		}
 	}
 
 	ASSERT(size <= (1UL << flist));
