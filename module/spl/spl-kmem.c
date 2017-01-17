@@ -6352,7 +6352,29 @@ ks_set_cp(ksupp_t *ks, kmem_cache_t *cp, const size_t cachenum)
 
 	const uint64_t b = cachenum;
 
-	for ( ; ; ) {
+	for (uint32_t iter = 0; ; iter++) {
+		if (iter > (1 << 20)) {
+			kmem_cache_t *ksa = ks->cp_a;
+			kmem_cache_t *ksb = ks->cp_a;
+			char *astr = "NULL";
+			char *bstr = "NULL";
+			if (ksa != NULL)
+				astr = ksa->cache_name;
+			if (ksb != NULL)
+				bstr = ksb->cache_name;
+			panic("SPL: %s: iterated out, cp == %s, cp_{a,b} == %s, %s\n",
+			    __func__, cp->cache_name, astr, bstr);
+		}
+		if (ks->cp_a == cp) {
+			printf("SPL: %s: [2] ks->cp_a (b==%llu) already cp (%s)\n",
+			    __func__, b, cp->cache_name);
+			return;
+		}
+		if (ks->cp_b == cp) {
+			printf("SPL: %s: [2] ks->cp_b (b==%llu) already cp (%s)\n",
+			    __func__, b, cp->cache_name);
+			return;
+		}
 		if (ks->cp_b != cp && ks->cp_a == NULL) {
 			kmem_cache_t *expected = NULL;
 			// if ks->cp_a == expected (NULL) then atomically set
@@ -6384,37 +6406,55 @@ ks_set_cp(ksupp_t *ks, kmem_cache_t *cp, const size_t cachenum)
 				printf("SPL: %s: someone beat me to iskvec[%llu].ks->cp_b "
 				    " them == %s, me == %s\n",
 				    __func__, b, expected->cache_name, cp->cache_name);
-				if (ks->cp_b == cp || ks->cp_b == cp)
+				if (ks->cp_b == cp || ks->cp_a == cp)
 					return;
 			}
-		} else if (ks->cp_a == cp || ks->cp_b == cp) {
-			printf("SPL: %s someone beat me to both iskvec[%llu].ks->cp_[ab] (returning OK)",
-			    __func__, b);
-			return;
-		} else if (ks->cp_a == ks->cp_b) {
-			printf("SPL: %s WARNING: both iskvec[%llu].ks->cp_{a,b} set to same value!\n",
-			    __func__, b);
+		} else if (ks->cp_a == ks->cp_b && ks->cp_a != NULL) {
+			printf("SPL: %s WARNING: both iskvec[%llu].ks->cp_{a,b} set to same value (%s)!\n",
+			    __func__, b, ks->cp_a->cache_name);
 			// atomically set ks->cp_b to NULL and go through the loop again
 			ks->cp_b = NULL;
-		} else if (ks->cp_a != NULL && ks->cp_b != NULL) {
+			continue;
+		} else if (ks->cp_a != NULL && ks->cp_b != NULL && ks->cp_a != cp && ks->cp_b != cp) {
 			printf("SPL: %s ERROR: both iskvec[%llu].ks->cp_{a,b} set to not me! "
 			    "cp_a == %s, cp_b == %s, me == %s\n",
 			    __func__, b, ks->cp_a->cache_name, ks->cp_b->cache_name, cp->cache_name);
-			// sleep a millisecond for the printf == 1000 microseconds
-			extern void IODelay(unsigned microseconds);
-			IODelay(1000);
-			if (ks->cp_a == cp || ks->cp_b == cp || (ks->cp_a == ks->cp_b) ||
-			    ks->cp_a == NULL || ks->cp_b == NULL) {
-				printf("SPL: %s PANIC AVOIDED for %llu, %s", __func__, b, cp->cache_name);
+			// yield and sleep a millisecond for the printf
+			extern void IOSleep(unsigned milliseconds);
+			IOSleep(1);
+			if (ks->cp_a == NULL || ks->cp_b == NULL) {
+				printf("SPL: %s PANIC AVOIDED (via NULL) for %llu, %s\n",
+				    __func__, b, cp->cache_name);
 				continue;
+			} else if (ks->cp_a == ks->cp_b) {
+				printf("SPL: %s PANIC AVOIDED (via force NULL) for %llu, %s\n",
+				    __func__, b, cp->cache_name);
+				ks->cp_b = NULL;
+				continue;
+			} else if (ks->cp_a == cp || ks->cp_b == cp) {
+				printf("SPL: %s PANIC AVOIDED (returning OK) for %llu, %s\n",
+				    __func__, b, cp->cache_name);
+				return;
+			} else {
+				// don't double-panic by NULL dereference;
+				// also there are live threads possibly changing
+				// things underneath us.
+				char *astr = "NULL";
+				char *bstr = "NULL";
+				kmem_cache_t *ka = ks->cp_a;
+				kmem_cache_t *kb = ks->cp_b;
+				if (ka != NULL)
+					astr = ka->cache_name;
+				if (kb != NULL)
+					bstr = kb->cache_name;
+				panic("iskvec[%llu] : cannot set for %s, _a, _b == %s, %s", b,
+				    cp->cache_name, astr, bstr);
 			}
-			panic("iskvec[%llu] : cannot set for %s", b, cp->cache_name);
 		} else {
 			printf("SPL: %s: WTF how did I get here? (%s)\n", __func__, cp->cache_name);
 		}
 	}
 }
-
 
 void
 spl_zio_no_grow_init(void)
