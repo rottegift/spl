@@ -433,7 +433,6 @@ uint64_t spl_bucket_tunable_small_span = 0;
 static _Atomic uint32_t spl_vba_threads[VMEM_BUCKETS] = { 0 };
 static uint32_t vmem_bucket_id_to_bucket_number[NUMBER_OF_ARENAS_IN_VMEM_INIT] = { 0 };
 boolean_t spl_arc_no_grow(size_t);
-static _Atomic uint64_t spl_arc_no_grow_time[VMEM_BUCKETS] = { 0 };
 _Atomic uint64_t spl_arc_no_grow_bits = 0;
 uint64_t spl_arc_no_grow_count = 0;
 
@@ -3618,24 +3617,25 @@ spl_arc_no_grow_impl(const uint16_t b, const size_t size)
 	static _Atomic uint8_t frag_suppressions[VMEM_BUCKETS] = { 0 };
 
 	const uint64_t now = zfs_lbolt();
-	const uint64_t one_minute = hz * 60;
-	const uint64_t suppress_time = one_minute;
 
 	const bool fragmented = bucket_fragmented(b, now);
 
 	if (fragmented) {
-		if (frag_suppressions[b] > 100) {
+		const uint32_t b_bit = (uint32_t)1 << (uint32_t)b;
+		spl_arc_no_grow_bits |= b_bit;
+		const uint32_t sup_at_least_every = MIN(b_bit, 255);
+		const uint32_t sup_at_most_every = MAX(b_bit, 16);
+		const uint32_t sup_every = MIN(sup_at_least_every,sup_at_most_every);
+		if (frag_suppressions[b] >= sup_every) {
 			frag_suppressions[b] = 0;
-		} else {
-			frag_suppressions[b]++;
 			return (true);
+		} else {
+			return (false);
 		}
+	} else {
+		const uint32_t b_bit = (uint32_t)1 << (uint32_t)b;
+		spl_arc_no_grow_bits &= ~b_bit;
 	}
-
-	const bool still_suppressed = spl_arc_no_grow_time[b] + suppress_time > now;
-
-	if (still_suppressed == true)
-		return (true);
 
 	extern bool spl_zio_is_suppressed(const size_t, const uint64_t);
 
@@ -3656,14 +3656,11 @@ boolean_t
 spl_arc_no_grow(size_t size)
 {
 	const uint16_t b = vmem_bucket_number_arc_no_grow(size);
-	const uint16_t b_bit = (uint16_t)1 << b;
+
 	const bool rv = spl_arc_no_grow_impl(b, size);
 
 	if (rv) {
-		spl_arc_no_grow_bits |= b_bit;
 		atomic_inc_64(&spl_arc_no_grow_count);
-	} else {
-		spl_arc_no_grow_bits &= ~b_bit;
 	}
 
 	return((boolean_t)rv);
