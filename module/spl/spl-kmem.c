@@ -6315,8 +6315,8 @@ kmem_strstr(const char *in, const char *str)
 #define SPA_MAXBLOCKSIZE (1ULL << SPA_MAXBLOCKSHIFT)
 
 typedef struct {
-	_Atomic(kmem_cache_t *)cp_a;
-	_Atomic(kmem_cache_t *)cp_b;
+	_Atomic(kmem_cache_t *)cp_metadata;
+	_Atomic(kmem_cache_t *)cp_filedata;
         uint16_t pointed_to;
 	_Atomic int64_t suppress_count;
 	_Atomic uint64_t last_bumped;
@@ -6332,12 +6332,12 @@ iksupp_t iksvec[SPA_MAXBLOCKSIZE >> SPA_MINBLOCKSHIFT] = { { NULL } };
 static bool spl_zio_no_grow_inited = false;
 
 /*
- * Test that cp is in ks->cp_a or ks->cp_b; if so just return
+ * Test that cp is in ks->cp_metadata or ks->cp_filedata; if so just return
  * otherwise, choose the first (and possibly second)  NULL
  * and try to set it to cp.
  * If successful, return. otherwise, sanity check that
- * nobody has set ks->cp_a or ks->cp_b to cp already, and
- * that ks->cp_a != ks->cp_b.
+ * nobody has set ks->cp_metadata or ks->cp_filedata to cp already, and
+ * that ks->cp_metadata != ks->cp_filedata.
  */
 
 static void
@@ -6347,111 +6347,61 @@ ks_set_cp(ksupp_t *ks, kmem_cache_t *cp, const size_t cachenum)
 	ASSERT(cp != NULL);
 	ASSERT(ks != NULL);
 
-	if (ks->cp_a == cp || ks->cp_b == cp)
+	if (ks->cp_metadata == cp || ks->cp_filedata == cp)
 		return;
 
 	const uint64_t b = cachenum;
 
-	for (uint32_t iter = 0; ; iter++) {
-		if (iter > (1 << 20)) {
-			kmem_cache_t *ksa = ks->cp_a;
-			kmem_cache_t *ksb = ks->cp_a;
-			char *astr = "NULL";
-			char *bstr = "NULL";
-			if (ksa != NULL)
-				astr = ksa->cache_name;
-			if (ksb != NULL)
-				bstr = ksb->cache_name;
-			panic("SPL: %s: iterated out, cp == %s, cp_{a,b} == %s, %s\n",
-			    __func__, cp->cache_name, astr, bstr);
-		}
-		if (ks->cp_a == cp) {
-			printf("SPL: %s: [2] ks->cp_a (b==%llu) already cp (%s)\n",
-			    __func__, b, cp->cache_name);
-			return;
-		}
-		if (ks->cp_b == cp) {
-			printf("SPL: %s: [2] ks->cp_b (b==%llu) already cp (%s)\n",
-			    __func__, b, cp->cache_name);
-			return;
-		}
-		if (ks->cp_b != cp && ks->cp_a == NULL) {
+	bool cp_is_metadata = false;
+
+	vmem_t *vmp = cp->cache_arena;
+
+	ASSERT(vmp == zio_metadata_arena || vmp == zio_arena);
+
+	if (vmp == zio_metadata_arena)
+		cp_is_metadata = true;
+
+	if (cp_is_metadata) {
+		for (uint32_t i = 0; ; i++) {
+			if (i >= 1000000) {
+				panic("SPL: %s: iterated out trying to set ks->cp_metadata (%s)\n",
+				    __func__, cp->cache_name);
+			}
 			kmem_cache_t *expected = NULL;
-			// if ks->cp_a == expected (NULL) then atomically set
-			// ks->cp_a = cp and the result is true; otherwise
-			// the result is false, ks->cp_a was not NULL, and
-			// expected = cp.  we can safely deref expected, but
-			// not ks->cp_b, since another thread may win the race
-			// and set ks->cp_b to NULL.
-			if (__c11_atomic_compare_exchange_strong(&ks->cp_a, &expected, cp,
+			if (__c11_atomic_compare_exchange_strong(&ks->cp_metadata, &expected, cp,
 				__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
-				printf("SPL: %s: set iskvec[%llu].ks->cp_a (%s) OK\n",
+				printf("SPL: %s: set iskvec[%llu].ks->cp_metadata (%s) OK\n",
 				    __func__, b, cp->cache_name);
 				return;
+			} else if (ks->cp_metadata == cp) {
+				return;
+			} else if (ks->cp_metadata == NULL) {
+				continue;
 			} else {
-				printf("SPL: %s: someone beat me to iskvec[%llu].ks->cp_a"
-				    " them == %s, me == %s\n",
-				    __func__, b, expected->cache_name, cp->cache_name);
-				if (ks->cp_a == cp || ks->cp_b == cp)
-					return;
+				panic("%s: CAS failed for iksvec[%llu].ks->cp_metadata: %s wanted %s set\n",
+				    __func__, b, cp->cache_name, ks->cp_metadata->cache_name);
 			}
-		} else if (ks->cp_a != cp && ks->cp_b == NULL) {
+		}
+	} else {
+		for (int32_t j = 0; ; j++) {
+			if (j >= 1000000) {
+				panic("SPL: %s: iterated out trying to set ks->cp_filedata (%s)\n",
+				    __func__, cp->cache_name);
+			}
 			kmem_cache_t *expected = NULL;
-			if (__c11_atomic_compare_exchange_strong(&ks->cp_b, &expected, cp,
+			if (__c11_atomic_compare_exchange_strong(&ks->cp_filedata, &expected, cp,
 				__ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
-				printf("SPL: %s: set iskvec[%llu].ks->cp_b == %s OK\n",
+				printf("SPL: %s: set iskvec[%llu].ks->cp_filedata (%s) OK\n",
 				    __func__, b, cp->cache_name);
 				return;
-			} else {
-				printf("SPL: %s: someone beat me to iskvec[%llu].ks->cp_b "
-				    " them == %s, me == %s\n",
-				    __func__, b, expected->cache_name, cp->cache_name);
-				if (ks->cp_b == cp || ks->cp_a == cp)
-					return;
-			}
-		} else if (ks->cp_a == ks->cp_b && ks->cp_a != NULL) {
-			printf("SPL: %s WARNING: both iskvec[%llu].ks->cp_{a,b} set to same value (%s)!\n",
-			    __func__, b, ks->cp_a->cache_name);
-			// atomically set ks->cp_b to NULL and go through the loop again
-			ks->cp_b = NULL;
-			continue;
-		} else if (ks->cp_a != NULL && ks->cp_b != NULL && ks->cp_a != cp && ks->cp_b != cp) {
-			printf("SPL: %s ERROR: both iskvec[%llu].ks->cp_{a,b} set to not me! "
-			    "cp_a == %s, cp_b == %s, me == %s\n",
-			    __func__, b, ks->cp_a->cache_name, ks->cp_b->cache_name, cp->cache_name);
-			// yield and sleep a millisecond for the printf
-			extern void IOSleep(unsigned milliseconds);
-			IOSleep(1);
-			if (ks->cp_a == NULL || ks->cp_b == NULL) {
-				printf("SPL: %s PANIC AVOIDED (via NULL) for %llu, %s\n",
-				    __func__, b, cp->cache_name);
-				continue;
-			} else if (ks->cp_a == ks->cp_b) {
-				printf("SPL: %s PANIC AVOIDED (via force NULL) for %llu, %s\n",
-				    __func__, b, cp->cache_name);
-				ks->cp_b = NULL;
-				continue;
-			} else if (ks->cp_a == cp || ks->cp_b == cp) {
-				printf("SPL: %s PANIC AVOIDED (returning OK) for %llu, %s\n",
-				    __func__, b, cp->cache_name);
+			} else if (ks->cp_filedata == cp) {
 				return;
+			} else if (ks->cp_filedata == NULL) {
+				continue;
 			} else {
-				// don't double-panic by NULL dereference;
-				// also there are live threads possibly changing
-				// things underneath us.
-				char *astr = "NULL";
-				char *bstr = "NULL";
-				kmem_cache_t *ka = ks->cp_a;
-				kmem_cache_t *kb = ks->cp_b;
-				if (ka != NULL)
-					astr = ka->cache_name;
-				if (kb != NULL)
-					bstr = kb->cache_name;
-				panic("iskvec[%llu] : cannot set for %s, _a, _b == %s, %s", b,
-				    cp->cache_name, astr, bstr);
+				panic("%s: CAS failed for iksvec[%llu].ks->cp_metadata: %s wanted %s set\n",
+				    __func__, b, cp->cache_name, ks->cp_filedata->cache_name);
 			}
-		} else {
-			printf("SPL: %s: WTF how did I get here? (%s)\n", __func__, cp->cache_name);
 		}
 	}
 }
@@ -6514,7 +6464,7 @@ spl_zio_set_no_grow(const size_t size, kmem_cache_t *cp, const size_t cachenum)
 
 	ks_set_cp(ks, cp, cachenum);
 
-	if (ks->cp_a != cp && ks->cp_b != cp) {
+	if (ks->cp_metadata != cp && ks->cp_filedata != cp) {
 		panic("ks_cp_set bad for %s", cp->cache_name);
 	}
 
@@ -6524,7 +6474,7 @@ spl_zio_set_no_grow(const size_t size, kmem_cache_t *cp, const size_t cachenum)
 }
 
 bool
-spl_zio_is_suppressed(const size_t size, const uint64_t now)
+spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf_is_metadata)
 {
 
 	ASSERT(spl_zio_no_grow_inited == true);
@@ -6553,18 +6503,15 @@ spl_zio_is_suppressed(const size_t size, const uint64_t now)
 		} else {
 			ks->suppress_count--;
 		}
-		// the bump of the kmem_cache arc_no_grow kstat may happen
-		// to the partnered kmem_cache (i.e., zio_buf incremented
-		// instead of zio_data_buf, or vice-versa).  we have no exact
-		// way of knowing which of the two was selected.
-		kmem_cache_t *kscpa = ks->cp_a;
-		ASSERT(kscpa != NULL); // unlikely, but protect against early deref race.
-		if (kscpa != NULL) {
-			atomic_inc_64(&kscpa->arc_no_grow);
+		if (buf_is_metadata) {
+			ASSERT(ks->cp_metadata != NULL); // unlikely, but protect against deref
+			if (ks->cp_metadata != NULL) {
+				atomic_inc_64(&ks->cp_metadata->arc_no_grow);
+			}
 		} else {
-			kmem_cache_t *kscpb = ks->cp_b;
-			if (kscpb != NULL) {
-				atomic_inc_64(&kscpb->arc_no_grow);
+			ASSERT(ks->cp_filedata != NULL); // unlikely, but protect against deref
+			if (ks->cp_filedata != NULL) {
+				atomic_inc_64(&ks->cp_filedata->arc_no_grow);
 			}
 		}
 		return (true);

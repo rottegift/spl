@@ -432,7 +432,7 @@ uint64_t spl_bucket_tunable_small_span = 0;
 // for XAT & XATB visibility into VBA queue
 static _Atomic uint32_t spl_vba_threads[VMEM_BUCKETS] = { 0 };
 static uint32_t vmem_bucket_id_to_bucket_number[NUMBER_OF_ARENAS_IN_VMEM_INIT] = { 0 };
-boolean_t spl_arc_no_grow(size_t);
+boolean_t spl_arc_no_grow(size_t, boolean_t);
 _Atomic uint64_t spl_arc_no_grow_bits = 0;
 uint64_t spl_arc_no_grow_count = 0;
 
@@ -3611,7 +3611,7 @@ bucket_fragmented(const uint16_t bn, const uint64_t now)
  * return true if the bucket for size is fragmented
  * */
 static inline bool
-spl_arc_no_grow_impl(const uint16_t b, const size_t size)
+spl_arc_no_grow_impl(const uint16_t b, const size_t size, const boolean_t buf_is_metadata)
 {
 
 	static _Atomic uint8_t frag_suppressions[VMEM_BUCKETS] = { 0 };
@@ -3637,9 +3637,9 @@ spl_arc_no_grow_impl(const uint16_t b, const size_t size)
 		spl_arc_no_grow_bits &= ~b_bit;
 	}
 
-	extern bool spl_zio_is_suppressed(const size_t, const uint64_t);
+	extern bool spl_zio_is_suppressed(const size_t, const uint64_t, const boolean_t);
 
-	return (spl_zio_is_suppressed(size, now));
+	return (spl_zio_is_suppressed(size, now, buf_is_metadata));
 }
 
 static inline uint16_t
@@ -3653,11 +3653,11 @@ vmem_bucket_number_arc_no_grow(const size_t size)
 }
 
 boolean_t
-spl_arc_no_grow(size_t size)
+spl_arc_no_grow(size_t size, boolean_t buf_is_metadata)
 {
 	const uint16_t b = vmem_bucket_number_arc_no_grow(size);
 
-	const bool rv = spl_arc_no_grow_impl(b, size);
+	const bool rv = spl_arc_no_grow_impl(b, size, buf_is_metadata);
 
 	if (rv) {
 		atomic_inc_64(&spl_arc_no_grow_count);
