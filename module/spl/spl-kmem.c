@@ -6451,6 +6451,29 @@ spl_zio_no_grow_init(void)
 	printf("SPL: %s done.\n", __func__);
 }
 
+static void
+spl_zio_no_grow_clear()
+{
+	for (size_t c = 0; c < SPA_MAXBLOCKSIZE >> SPA_MINBLOCKSHIFT; c++) {
+		ksupp_t *ks = iksvec[c].ks_entry;
+		ks->cp_metadata = NULL;
+		ks->cp_filedata = NULL;
+		ks->pointed_to = false;
+		ks->suppress_count = 0;
+		ks->last_bumped = 0;
+		iksvec[c].ks_entry = NULL;
+	}
+}
+
+void
+spl_zio_no_grow_fini(void)
+{
+	// zio_fini() is at its end, so the kmem_caches are gone,
+	// consequently this is safe.
+	spl_zio_no_grow_inited = false;
+	spl_zio_no_grow_clear();
+	spl_zio_no_grow_init();
+}
 
 static void
 spl_zio_set_no_grow(const size_t size, kmem_cache_t *cp, const size_t cachenum)
