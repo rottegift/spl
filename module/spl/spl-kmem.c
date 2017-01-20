@@ -52,7 +52,6 @@
 // #define PRINT_CACHE_STATS 1
 
 // Uncomment to turn on kmems' debug features.
-#define DEBUG 1
 #define dprintf if (0) printf
 
 // ===============================================================
@@ -329,7 +328,7 @@ size_t	kmem_max_cached = KMEM_BIG_MAXBUF;	/* maximum kmem_alloc cache */
 // can be 0 or KMF_LITE
 // or KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS
 // with or without KMF_AUDIT
-int kmem_flags = 0 /* KMF_LITE */ /* KMF_AUDIT | */ /* KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS*/;
+int kmem_flags = KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS;
 #else
 int kmem_flags = 0;
 #endif
