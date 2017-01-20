@@ -3614,7 +3614,7 @@ static inline bool
 spl_arc_no_grow_impl(const uint16_t b, const size_t size, const boolean_t buf_is_metadata)
 {
 
-	static _Atomic uint8_t frag_suppressions[VMEM_BUCKETS] = { 0 };
+	static _Atomic uint8_t frag_suppression_counter[VMEM_BUCKETS] = { 0 };
 
 	const uint64_t now = zfs_lbolt();
 
@@ -3626,10 +3626,11 @@ spl_arc_no_grow_impl(const uint16_t b, const size_t size, const boolean_t buf_is
 		const uint32_t sup_at_least_every = MIN(b_bit, 255);
 		const uint32_t sup_at_most_every = MAX(b_bit, 16);
 		const uint32_t sup_every = MIN(sup_at_least_every,sup_at_most_every);
-		if (frag_suppressions[b] >= sup_every) {
-			frag_suppressions[b] = 0;
+		if (frag_suppression_counter[b] >= sup_every) {
+			frag_suppression_counter[b] = 0;
 			return (true);
 		} else {
+			frag_suppression_counter[b]++;
 			return (false);
 		}
 	} else {
