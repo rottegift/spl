@@ -3571,7 +3571,7 @@ bucket_fragmented(const uint16_t bn, const uint64_t now)
 
 	const uint64_t timeout = 5ULL * 60ULL * hz;
 
-	if (spl_free_last_pressure_wrapper() + timeout >= now)
+	if (spl_free_last_pressure_wrapper() + timeout <  now)
 		return (false);
 
 	const vmem_t *vmp = vmem_bucket_arena[bn];
