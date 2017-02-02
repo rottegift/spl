@@ -6603,3 +6603,60 @@ spl_zio_kmem_cache_alloc(kmem_cache_t *cp, int kmflag, size_t size, size_t cache
 
 	return(n);
 }
+
+/*
+ * return true if the reclaim thread should be awakened
+ * because we do not have enough memory on hand
+ */
+boolean_t
+spl_arc_reclaim_needed(const size_t bytes, kmem_cache_t **zp)
+{
+
+	/*
+	 * fast path:
+	 * if our argument is 0, then do the equivalent of
+	 * if (arc_available_memory() < 0) return (B_TRUE);
+	 * which is traditional arc.c appraoch
+	 * so we can arc_reclaim_needed() -> spl_arc_reclaim_needed(0)
+	 * if we desire.
+	 */
+	if (bytes == 0 && spl_free < 0) {
+		return (B_TRUE);
+	}
+
+	// take into account current memory conditions below
+
+	extern int vmem_canalloc_atomic(vmem_t *, size_t);
+	extern vmem_t *spl_heap_arena; /* kstat.spl.vmem.vmem.bucket_arena */
+	if (vmem_canalloc_atomic(spl_heap_arena, bytes)) {
+		return (B_FALSE);
+	}
+
+	extern vmem_t *spl_vmem_bucket_arena_by_size(size_t);
+	vmem_t *bvmp = spl_vmem_bucket_arena_by_size(bytes);
+	if (vmem_canalloc_atomic(bvmp, bytes)) {
+		return (B_FALSE);
+	}
+
+	// copy some code from zio_buf_alloc()
+	size_t c = (bytes - 1) >> SPA_MINBLOCKSHIFT;
+	VERIFY3U(c, <, SPA_MAXBLOCKSIZE >> SPA_MINBLOCKSHIFT);
+
+	// if there is free memory in the kmem cache slab layer
+	// then we do not have to reclaim
+
+	if (zp[c]->cache_bufslab > 1) {
+		return (B_FALSE);
+	}
+
+	extern uint64_t vmem_xnu_useful_bytes_free(void);
+	if (vmem_xnu_useful_bytes_free() > MAX(bytes,SPA_MAXBLOCKSIZE)) {
+		return (B_FALSE);
+	}
+
+	if (spl_free < 0) {
+		return (B_TRUE);
+	} else {
+		return (B_FALSE);
+	}
+}
