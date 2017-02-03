@@ -6644,9 +6644,14 @@ spl_arc_reclaim_needed(const size_t bytes, kmem_cache_t **zp)
 	extern uint64_t vmem_xnu_useful_bytes_free(void);
 	const uint64_t min_threshold = 64ULL*1024ULL*1024ULL;
 	const uint64_t pm_pct = real_total_memory >> 8;
-	const uint64_t threshold = MAX(min_threshold, (uint64_t)pm_pct);
+	const uint64_t high_threshold = MAX(min_threshold, (uint64_t)pm_pct);
+	const uint64_t low_threshold = bytes;
 
-	if (vmem_xnu_useful_bytes_free() > threshold) {
+	const uint64_t f = vmem_xnu_useful_bytes_free();
+
+	if (f <= low_threshold) {
+		return (B_TRUE);
+	} else if (f > high_threshold) {
 		if (spl_free < 0)
 			atomic_inc_64(&spl_arc_reclaim_avoided);
 		return (B_FALSE);
