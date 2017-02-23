@@ -301,7 +301,7 @@ static uint32_t kmem_reaping_idspace;
 /*
  * kmem tunables
  */
-static struct timespec kmem_reap_interval = {15, 0};
+static struct timespec kmem_reap_interval = {5, 0};
 int kmem_depot_contention = 3;	/* max failed tryenters per real interval */
 pgcnt_t kmem_reapahead = 0;	/* start reaping N pages before pageout */
 int kmem_panic = 1;		/* whether to panic on error */
@@ -329,7 +329,7 @@ size_t	kmem_max_cached = KMEM_BIG_MAXBUF;	/* maximum kmem_alloc cache */
 // can be 0 or KMF_LITE
 // or KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS
 // with or without KMF_AUDIT
-int kmem_flags = KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS;
+int kmem_flags = KMF_DEADBEEF | KMF_REDZONE;
 #else
 int kmem_flags = 0;
 #endif
@@ -550,6 +550,7 @@ extern uint64_t spl_arc_no_grow_count;
 
 extern uint64_t spl_frag_max_walk;
 extern uint64_t spl_frag_walked_out;
+extern uint64_t spl_frag_walk_cnt;
 
 uint64_t spl_buckets_mem_free = 0;
 uint64_t spl_arc_reclaim_avoided = 0;
@@ -611,6 +612,7 @@ typedef struct spl_stats {
 	kstat_named_t spl_arc_no_grow_count;
 	kstat_named_t spl_frag_max_walk;
 	kstat_named_t spl_frag_walked_out;
+	kstat_named_t spl_frag_walk_cnt;
 	kstat_named_t spl_arc_reclaim_avoided;
 } spl_stats_t;
 
@@ -672,6 +674,7 @@ static spl_stats_t spl_stats = {
 
 	{"spl_vmem_frag_max_walk", KSTAT_DATA_UINT64},
 	{"spl_vmem_frag_walked_out", KSTAT_DATA_UINT64},
+	{"spl_vmem_frag_walk_cnt", KSTAT_DATA_UINT64},
 	{"spl_arc_reclaim_avoided", KSTAT_DATA_UINT64},
 };
 
@@ -993,7 +996,9 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 	}
 
 	if (kmem_panic > 0) {
-		delay(hz);
+		//delay(hz);
+		extern  void IODelay(unsigned microseconds); // <IOKit/IOLib.h?
+		IODelay(1000000);
 		panic("kernel heap corruption detected");
 	}
 
@@ -1191,6 +1196,7 @@ kmem_slab_create(kmem_cache_t *cp, int kmflag)
 	sp->slab_stuck_offset = (uint32_t)-1;
 	sp->slab_later_count = 0;
 	sp->slab_flags = 0;
+	sp->slab_create_time = gethrtime();
 
 	ASSERT(chunks > 0);
 	while (chunks-- != 0) {
@@ -1800,7 +1806,7 @@ kmem_depot_ws_zero(kmem_cache_t *cp)
  * larger value (1GB) causes this to have virtually no effect.
  */
 //size_t kmem_reap_preempt_bytes = 1024 * 1024 * 1024;
-size_t kmem_reap_preempt_bytes = 1024 * 1024;
+size_t kmem_reap_preempt_bytes = 64 * 1024 * 1024;
 
 
 /*
@@ -3334,6 +3340,16 @@ kmem_partial_slab_cmp(const void *pp0, const void *pp1)
 	if (w0 > w1)
 		return (1);
 
+	// compare slab age if available
+	hrtime_t c0 = s0->slab_create_time, c1 = s1->slab_create_time;
+	if (c0 !=0 && c1 != 0 && c0 != c1) {
+		// higher time is newer; newer sorts before older
+		if (c0 < c1) // c0 is older than c1
+			return (1); // so c0 sorts after c1
+		if (c0 > c1)
+			return (-1);
+	}
+
 	/* compare pointer values */
 	if ((uintptr_t)s0 < (uintptr_t)s1)
 		return (-1);
@@ -3845,7 +3861,7 @@ kmem_alloc_caches_create(const int *array, size_t count,
 		(void) snprintf(name, sizeof (name),
 						"kmem_alloc_%lu", cache_size);
 		cp = kmem_cache_create(name, cache_size, align,
-							   NULL, NULL, NULL, NULL, NULL, KMC_KMEM_ALLOC);
+							   NULL, NULL, NULL, NULL, NULL, KMC_KMEM_ALLOC | KMF_HASH);
 
 		while (size <= cache_size) {
 			alloc_table[(size - 1) >> shift] = cp;
@@ -3956,7 +3972,7 @@ kmem_cache_init(int pass, int use_large_pages)
 		kmem_va_arena = vmem_create(KMEM_VA_PREFIX,
 									NULL, 0, PAGESIZE,
 									vmem_alloc, vmem_free, heap_arena,
-									16 * PAGESIZE, VM_SLEEP);
+									2 * PAGESIZE, VM_SLEEP);
 
 		kmem_default_arena = vmem_create("kmem_default",
 										 NULL, 0, PAGESIZE,
@@ -4246,8 +4262,7 @@ void
 spl_free_reap_caches(void)
 {
 	// note: this may take some time
-	vmem_qcache_reap(zio_arena);
-	vmem_qcache_reap(zio_metadata_arena);
+	vmem_qcache_reap(zio_arena_parent);
 	kmem_reap();
 	vmem_qcache_reap(kmem_va_arena);
 }
@@ -4639,10 +4654,7 @@ spl_free_thread()
 		// to the relative value of each up to arc.c.
 		// O3X arc.c does not (yet) take these arena sizes into
 		// account like Illumos's does.
-		uint64_t zio_size = vmem_size_semi_atomic(zio_arena, VMEM_ALLOC | VMEM_FREE);
-		uint64_t zio_metadata_size = vmem_size_semi_atomic(zio_metadata_arena,
-		    VMEM_ALLOC | VMEM_FREE);
-		zio_size += zio_metadata_size;
+		uint64_t zio_size = vmem_size_semi_atomic(zio_arena_parent, VMEM_ALLOC | VMEM_FREE);
 		// wrap this in a basic block for lexical scope SSA convenience
 		if (zio_size > 0) {
 			static uint64_t zio_last_too_big = 0;
@@ -4855,6 +4867,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 
 		ks->spl_frag_max_walk.value.ui64 = spl_frag_max_walk;
 		ks->spl_frag_walked_out.value.ui64 = spl_frag_walked_out;
+		ks->spl_frag_walk_cnt.value.ui64 = spl_frag_walk_cnt;
 
 		ks->spl_arc_reclaim_avoided.value.ui64 = spl_arc_reclaim_avoided;
 	}
@@ -6516,7 +6529,8 @@ spl_zio_set_no_grow(const size_t size, kmem_cache_t *cp, const size_t cachenum)
 }
 
 bool
-spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf_is_metadata)
+spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf_is_metadata,
+	kmem_cache_t **zp)
 {
 
 	ASSERT(spl_zio_no_grow_inited == true);
@@ -6546,15 +6560,34 @@ spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf
 			ks->suppress_count--;
 		}
 		if (buf_is_metadata) {
-			ASSERT(ks->cp_metadata != NULL); // unlikely, but protect against deref
-			if (ks->cp_metadata != NULL) {
+			if (ks->cp_metadata == NULL) {
+				ks_set_cp(ks, zp[cachenum], cachenum);
+				if (ks->cp_metadata != NULL) {
+					atomic_inc_64(&ks->cp_metadata->arc_no_grow);
+				} else {
+					printf("WARNING: %s: "
+					    "ks_set_cp->metadata == NULL after ks_set_cp !"
+					    "size = %lu\n",
+					    __func__, size);
+				}
+			} else {
 				atomic_inc_64(&ks->cp_metadata->arc_no_grow);
 			}
 		} else {
-			ASSERT(ks->cp_filedata != NULL); // unlikely, but protect against deref
-			if (ks->cp_filedata != NULL) {
+			if (ks->cp_filedata == NULL) {
+				ks_set_cp(ks, zp[cachenum], cachenum);
+				if (ks->cp_filedata != NULL) {
+					atomic_inc_64(&ks->cp_filedata->arc_no_grow);
+				} else {
+					printf("WARNING: %s: "
+					    "ks_set_cp->filedata == NULL after ks_set_cp !"
+					    "size = %lu\n",
+					    __func__, size);
+				}
+			} else {
 				atomic_inc_64(&ks->cp_filedata->arc_no_grow);
 			}
+
 		}
 		return (true);
 	}
@@ -6663,4 +6696,59 @@ spl_arc_reclaim_needed(const size_t bytes, kmem_cache_t **zp)
 	} else {
 		return (B_FALSE);
 	}
+}
+
+/* small auxiliary function since we do not export struct kmem_cache to zfs */
+size_t
+kmem_cache_bufsize(kmem_cache_t *cp)
+{
+	return (cp->cache_bufsize);
+}
+
+/*
+ * check that we would not have KMERR_BADCACHE error in the event
+ * we did kmem_cache_free(cp, buf) in a DEBUG setting
+ *
+ * returns: NULL if the buf is not found in any cache
+ *          cparg if the buf is found in cparg
+ *          a pointer to the cache the buf is found in, if not cparg
+ */
+
+kmem_cache_t *
+kmem_cache_buf_in_cache(kmem_cache_t *cparg, void *bufarg)
+{
+	kmem_cache_t *cp = cparg;
+	kmem_slab_t *sp;
+	void *buf = bufarg;
+
+	sp = kmem_findslab(cp, buf);
+	if (sp == NULL) {
+		for (cp = list_tail(&kmem_caches); cp != NULL;
+		     cp = list_prev(&kmem_caches, cp)) {
+			if ((sp = kmem_findslab(cp, buf)) != NULL)
+				break;
+		}
+	}
+
+	if (sp == NULL) {
+		printf("SPL: %s: KMERR_BADADDR orig cache = %s\n",
+		    __func__, cparg->cache_name);
+		return (NULL);
+	}
+
+	if (cp == NULL) {
+		printf("SPL: %s: ERROR cp == NULL; cparg == %s",
+		    __func__, cparg->cache_name);
+		return (NULL);
+	}
+
+	if (cp != cparg) {
+		printf("SPL: %s: KMERR_BADCACHE arg cache = %s but found in %s instead\n",
+		    __func__, cparg->cache_name, cp->cache_name);
+		return(cp);
+	}
+
+	ASSERT(cp==cparg);
+
+	return (cp);
 }
