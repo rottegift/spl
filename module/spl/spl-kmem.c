@@ -993,7 +993,9 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 	}
 
 	if (kmem_panic > 0) {
-		delay(hz);
+		//delay(hz);
+		extern  void IODelay(unsigned microseconds); // <IOKit/IOLib.h?
+		IODelay(1000000);
 		panic("kernel heap corruption detected");
 	}
 
