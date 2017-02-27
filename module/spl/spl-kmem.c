@@ -6666,3 +6666,9 @@ spl_arc_reclaim_needed(const size_t bytes, kmem_cache_t **zp)
 		return (B_FALSE);
 	}
 }
+
+size_t
+kmem_cache_bufsize(kmem_cache_t *cp)
+{
+	return (cp->cache_bufsize);
+}
