@@ -6667,8 +6667,57 @@ spl_arc_reclaim_needed(const size_t bytes, kmem_cache_t **zp)
 	}
 }
 
+/* small auxiliary function since we do not export struct kmem_cache to zfs */
 size_t
 kmem_cache_bufsize(kmem_cache_t *cp)
 {
 	return (cp->cache_bufsize);
+}
+
+/*
+ * check that we would not have KMERR_BADCACHE error in the event
+ * we did kmem_cache_free(cp, buf) in a DEBUG setting
+ *
+ * returns: NULL if the buf is not found in any cache
+ *          cparg if the buf is found in cparg
+ *          a pointer to the cache the buf is found in, if not cparg
+ */
+
+kmem_cache_t *
+kmem_cache_buf_in_cache(kmem_cache_t *cparg, void *bufarg)
+{
+	kmem_cache_t *cp = cparg;
+	kmem_slab_t *sp;
+	void *buf = bufarg;
+
+	sp = kmem_findslab(cp, buf);
+	if (sp == NULL) {
+		for (cp = list_tail(&kmem_caches); cp != NULL;
+		     cp = list_prev(&kmem_caches, cp)) {
+			if ((sp = kmem_findslab(cp, buf)) != NULL)
+				break;
+		}
+	}
+
+	if (sp == NULL) {
+		printf("SPL: %s: KMERR_BADADDR orig cache = %s\n",
+		    __func__, cparg->cache_name);
+		return (NULL);
+	}
+
+	if (cp == NULL) {
+		printf("SPL: %s: ERROR cp == NULL; cparg == %s",
+		    __func__, cparg->cache_name);
+		return (NULL);
+	}
+
+	if (cp != cparg) {
+		printf("SPL: %s: KMERR_BADCACHE arg cache = %s but found in %s instead\n",
+		    __func__, cparg->cache_name, cp->cache_name);
+		return(cp);
+	}
+
+	ASSERT(cp==cparg);
+
+	return (cp);
 }
