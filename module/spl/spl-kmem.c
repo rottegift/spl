@@ -3847,7 +3847,7 @@ kmem_alloc_caches_create(const int *array, size_t count,
 		(void) snprintf(name, sizeof (name),
 						"kmem_alloc_%lu", cache_size);
 		cp = kmem_cache_create(name, cache_size, align,
-							   NULL, NULL, NULL, NULL, NULL, KMC_KMEM_ALLOC);
+							   NULL, NULL, NULL, NULL, NULL, KMC_KMEM_ALLOC | KMF_HASH);
 
 		while (size <= cache_size) {
 			alloc_table[(size - 1) >> shift] = cp;
