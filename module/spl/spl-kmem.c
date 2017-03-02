@@ -6548,15 +6548,20 @@ spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf
 			ks->suppress_count--;
 		}
 		if (buf_is_metadata) {
-			ASSERT(ks->cp_metadata != NULL); // unlikely, but protect against deref
 			if (ks->cp_metadata != NULL) {
 				atomic_inc_64(&ks->cp_metadata->arc_no_grow);
+ 			} else {
+				printf("SPL: %s: WARNING  ks->cp_metadata == NULL; size == %lu\n",
+				    __func__, size);
 			}
 		} else {
-			ASSERT(ks->cp_filedata != NULL); // unlikely, but protect against deref
 			if (ks->cp_filedata != NULL) {
 				atomic_inc_64(&ks->cp_filedata->arc_no_grow);
+			} else {
+				printf("SPL: %s: WARNING ks->cp_filedata == NULL; size == %lu\n",
+				    __func__, size);
 			}
+
 		}
 		return (true);
 	}
