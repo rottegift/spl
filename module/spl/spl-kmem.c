@@ -550,6 +550,7 @@ extern uint64_t spl_arc_no_grow_count;
 
 extern uint64_t spl_frag_max_walk;
 extern uint64_t spl_frag_walked_out;
+extern uint64_t spl_frag_walk_cnt;
 
 uint64_t spl_buckets_mem_free = 0;
 uint64_t spl_arc_reclaim_avoided = 0;
@@ -611,6 +612,7 @@ typedef struct spl_stats {
 	kstat_named_t spl_arc_no_grow_count;
 	kstat_named_t spl_frag_max_walk;
 	kstat_named_t spl_frag_walked_out;
+	kstat_named_t spl_frag_walk_cnt;
 	kstat_named_t spl_arc_reclaim_avoided;
 } spl_stats_t;
 
@@ -672,6 +674,7 @@ static spl_stats_t spl_stats = {
 
 	{"spl_vmem_frag_max_walk", KSTAT_DATA_UINT64},
 	{"spl_vmem_frag_walked_out", KSTAT_DATA_UINT64},
+	{"spl_vmem_frag_walk_cnt", KSTAT_DATA_UINT64},
 	{"spl_arc_reclaim_avoided", KSTAT_DATA_UINT64},
 };
 
@@ -1193,6 +1196,7 @@ kmem_slab_create(kmem_cache_t *cp, int kmflag)
 	sp->slab_stuck_offset = (uint32_t)-1;
 	sp->slab_later_count = 0;
 	sp->slab_flags = 0;
+	sp->slab_create_time = gethrtime();
 
 	ASSERT(chunks > 0);
 	while (chunks-- != 0) {
@@ -3336,6 +3340,16 @@ kmem_partial_slab_cmp(const void *pp0, const void *pp1)
 	if (w0 > w1)
 		return (1);
 
+	// compare slab age if available
+	hrtime_t c0 = s0->slab_create_time, c1 = s1->slab_create_time;
+	if (c0 !=0 && c1 != 0 && c0 != c1) {
+		// higher time is newer; newer sorts before older
+		if (c0 < c1) // c0 is older than c1
+			return (1); // so c0 sorts after c1
+		if (c0 > c1)
+			return (-1);
+	}
+
 	/* compare pointer values */
 	if ((uintptr_t)s0 < (uintptr_t)s1)
 		return (-1);
@@ -3958,7 +3972,7 @@ kmem_cache_init(int pass, int use_large_pages)
 		kmem_va_arena = vmem_create(KMEM_VA_PREFIX,
 									NULL, 0, PAGESIZE,
 									vmem_alloc, vmem_free, heap_arena,
-									16 * PAGESIZE, VM_SLEEP);
+									4 * PAGESIZE, VM_SLEEP);
 
 		kmem_default_arena = vmem_create("kmem_default",
 										 NULL, 0, PAGESIZE,
@@ -4248,8 +4262,7 @@ void
 spl_free_reap_caches(void)
 {
 	// note: this may take some time
-	vmem_qcache_reap(zio_arena);
-	vmem_qcache_reap(zio_metadata_arena);
+	vmem_qcache_reap(zio_arena_parent);
 	kmem_reap();
 	vmem_qcache_reap(kmem_va_arena);
 }
@@ -4641,10 +4654,7 @@ spl_free_thread()
 		// to the relative value of each up to arc.c.
 		// O3X arc.c does not (yet) take these arena sizes into
 		// account like Illumos's does.
-		uint64_t zio_size = vmem_size_semi_atomic(zio_arena, VMEM_ALLOC | VMEM_FREE);
-		uint64_t zio_metadata_size = vmem_size_semi_atomic(zio_metadata_arena,
-		    VMEM_ALLOC | VMEM_FREE);
-		zio_size += zio_metadata_size;
+		uint64_t zio_size = vmem_size_semi_atomic(zio_arena_parent, VMEM_ALLOC | VMEM_FREE);
 		// wrap this in a basic block for lexical scope SSA convenience
 		if (zio_size > 0) {
 			static uint64_t zio_last_too_big = 0;
@@ -4857,6 +4867,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 
 		ks->spl_frag_max_walk.value.ui64 = spl_frag_max_walk;
 		ks->spl_frag_walked_out.value.ui64 = spl_frag_walked_out;
+		ks->spl_frag_walk_cnt.value.ui64 = spl_frag_walk_cnt;
 
 		ks->spl_arc_reclaim_avoided.value.ui64 = spl_arc_reclaim_avoided;
 	}

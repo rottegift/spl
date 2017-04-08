@@ -438,6 +438,7 @@ uint64_t spl_arc_no_grow_count = 0;
 
 uint64_t spl_frag_max_walk = 1000; // compare span ages this many steps from the head of the freelist
 uint64_t spl_frag_walked_out = 0;
+uint64_t spl_frag_walk_cnt = 0;
 
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
@@ -571,13 +572,17 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	vmem_seg_t *n = p->vs_knext;
 
 	// walk from the freelist head looking for
-	// a segment whose creation time is later than
+	// a segment whose creation time is earlier than
 	// the segment to be inserted's creation time,
 	// then insert before that segment.
 
 	for (uint32_t step = 0;
-	     p->vs_span_createtime <= vsp->vs_span_createtime;
+	     p->vs_span_createtime >= vsp->vs_span_createtime || p->vs_span_createtime == 0 || step == 0;
 	     step++) {
+		// iterating while predecessor pointer p was created
+		// at a later tick than funcarg vsp.
+		//
+		// below we set p to n and update n.
 		ASSERT(n != NULL);
 		if (n == nextlist) {
 			dprintf("SPL: %s: at marker (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
@@ -616,6 +621,7 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 		}
 		p = n;
 		n = n->vs_knext;
+		atomic_inc_64(&spl_frag_walk_cnt);
 	}
 
 	ASSERT(p != NULL);
