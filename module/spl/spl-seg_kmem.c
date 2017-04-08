@@ -249,7 +249,7 @@ segkmem_zio_init()
 
 	zio_arena_parent = vmem_create("zfs_qcache", NULL, 0,
 	    PAGESIZE, vmem_alloc, vmem_free, spl_heap_arena,
-	    64 * 1024, VM_SLEEP);
+	    32 * 1024, VM_SLEEP);
 
 	ASSERT(zio_arena_parent != NULL);
 
