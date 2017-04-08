@@ -1193,6 +1193,7 @@ kmem_slab_create(kmem_cache_t *cp, int kmflag)
 	sp->slab_stuck_offset = (uint32_t)-1;
 	sp->slab_later_count = 0;
 	sp->slab_flags = 0;
+	sp->slab_create_time = gethrtime();
 
 	ASSERT(chunks > 0);
 	while (chunks-- != 0) {
@@ -3335,6 +3336,16 @@ kmem_partial_slab_cmp(const void *pp0, const void *pp1)
 		return (-1);
 	if (w0 > w1)
 		return (1);
+
+	// compare slab age if available
+	hrtime_t c0 = s0->slab_create_time, c1 = s1->slab_create_time;
+	if (c0 !=0 && c1 != 0 && c0 != c1) {
+		// higher time is newer; newer sorts after older
+		if (c0 < c1) // c0 is older than c1
+			return (-1); // so c0 sorts before c1
+		if (c0 > c1)
+			return (1);
+	}
 
 	/* compare pointer values */
 	if ((uintptr_t)s0 < (uintptr_t)s1)
