@@ -3340,11 +3340,11 @@ kmem_partial_slab_cmp(const void *pp0, const void *pp1)
 	// compare slab age if available
 	hrtime_t c0 = s0->slab_create_time, c1 = s1->slab_create_time;
 	if (c0 !=0 && c1 != 0 && c0 != c1) {
-		// higher time is newer; newer sorts after older
+		// higher time is newer; newer sorts before older
 		if (c0 < c1) // c0 is older than c1
-			return (-1); // so c0 sorts before c1
+			return (1); // so c0 sorts after c1
 		if (c0 > c1)
-			return (1);
+			return (-1);
 	}
 
 	/* compare pointer values */

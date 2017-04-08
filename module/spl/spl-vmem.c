@@ -571,12 +571,12 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	vmem_seg_t *n = p->vs_knext;
 
 	// walk from the freelist head looking for
-	// a segment whose creation time is later than
+	// a segment whose creation time is earlier than
 	// the segment to be inserted's creation time,
 	// then insert before that segment.
 
 	for (uint32_t step = 0;
-	     p->vs_span_createtime <= vsp->vs_span_createtime;
+	     p->vs_span_createtime >= vsp->vs_span_createtime;
 	     step++) {
 		ASSERT(n != NULL);
 		if (n == nextlist) {
