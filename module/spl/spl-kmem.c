@@ -4248,8 +4248,7 @@ void
 spl_free_reap_caches(void)
 {
 	// note: this may take some time
-	vmem_qcache_reap(zio_arena);
-	vmem_qcache_reap(zio_metadata_arena);
+	vmem_qcache_reap(zio_arena_parent);
 	kmem_reap();
 	vmem_qcache_reap(kmem_va_arena);
 }
@@ -4641,10 +4640,7 @@ spl_free_thread()
 		// to the relative value of each up to arc.c.
 		// O3X arc.c does not (yet) take these arena sizes into
 		// account like Illumos's does.
-		uint64_t zio_size = vmem_size_semi_atomic(zio_arena, VMEM_ALLOC | VMEM_FREE);
-		uint64_t zio_metadata_size = vmem_size_semi_atomic(zio_metadata_arena,
-		    VMEM_ALLOC | VMEM_FREE);
-		zio_size += zio_metadata_size;
+		uint64_t zio_size = vmem_size_semi_atomic(zio_arena_parent, VMEM_ALLOC | VMEM_FREE);
 		// wrap this in a basic block for lexical scope SSA convenience
 		if (zio_size > 0) {
 			static uint64_t zio_last_too_big = 0;
