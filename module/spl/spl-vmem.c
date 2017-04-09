@@ -576,8 +576,12 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	// then insert before that segment.
 
 	for (uint32_t step = 0;
-	     p->vs_span_createtime >= vsp->vs_span_createtime;
+	     p->vs_span_createtime >= vsp->vs_span_createtime || p->vs_span_createtime == 0;
 	     step++) {
+		// iterating while predecessor pointer p was created
+		// at a later tick than funcarg vsp.
+		//
+		// below we set p to n and update n.
 		ASSERT(n != NULL);
 		if (n == nextlist) {
 			dprintf("SPL: %s: at marker (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",
