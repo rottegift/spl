@@ -438,6 +438,7 @@ uint64_t spl_arc_no_grow_count = 0;
 
 uint64_t spl_frag_max_walk = 1000; // compare span ages this many steps from the head of the freelist
 uint64_t spl_frag_walked_out = 0;
+uint64_t spl_frag_walk_cnt = 0;
 
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
@@ -582,6 +583,7 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 		// at a later tick than funcarg vsp.
 		//
 		// below we set p to n and update n.
+		atomic_inc_64(&spl_frag_walk_cnt);
 		ASSERT(n != NULL);
 		if (n == nextlist) {
 			dprintf("SPL: %s: at marker (%s)(steps: %u) p->vs_start, end == %lu, %lu\n",

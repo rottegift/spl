@@ -550,6 +550,7 @@ extern uint64_t spl_arc_no_grow_count;
 
 extern uint64_t spl_frag_max_walk;
 extern uint64_t spl_frag_walked_out;
+extern uint64_t spl_frag_walk_cnt;
 
 uint64_t spl_buckets_mem_free = 0;
 uint64_t spl_arc_reclaim_avoided = 0;
@@ -611,6 +612,7 @@ typedef struct spl_stats {
 	kstat_named_t spl_arc_no_grow_count;
 	kstat_named_t spl_frag_max_walk;
 	kstat_named_t spl_frag_walked_out;
+	kstat_named_t spl_frag_walk_cnt;
 	kstat_named_t spl_arc_reclaim_avoided;
 } spl_stats_t;
 
@@ -672,6 +674,7 @@ static spl_stats_t spl_stats = {
 
 	{"spl_vmem_frag_max_walk", KSTAT_DATA_UINT64},
 	{"spl_vmem_frag_walked_out", KSTAT_DATA_UINT64},
+	{"spl_vmem_frag_walk_cnt", KSTAT_DATA_UINT64},
 	{"spl_arc_reclaim_avoided", KSTAT_DATA_UINT64},
 };
 
@@ -4864,6 +4867,7 @@ spl_kstat_update(kstat_t *ksp, int rw)
 
 		ks->spl_frag_max_walk.value.ui64 = spl_frag_max_walk;
 		ks->spl_frag_walked_out.value.ui64 = spl_frag_walked_out;
+		ks->spl_frag_walk_cnt.value.ui64 = spl_frag_walk_cnt;
 
 		ks->spl_arc_reclaim_avoided.value.ui64 = spl_arc_reclaim_avoided;
 	}
