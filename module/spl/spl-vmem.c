@@ -3195,27 +3195,30 @@ vmem_init(const char *heap_name,
 	// allocations 1 MiB and smaller, but larger than 512 kiB.
 
 	// create arenas for the VMEM_BUCKETS, id 2 - id 14
+
+	extern uint64_t real_total_memory;
+	VERIFY3U(real_total_memory,>=,1024ULL*1024ULL*1024ULL);
+
+	// adjust minimum bucket span size for memory size
+	// we do not want to be smaller than 512 kiB
+	const uint64_t k = 1024ULL;
+	const uint64_t hm = 512ULL * k;
+	const uint64_t m = 1024ULL* k;
+	const uint64_t big = MAX(real_total_memory / (k * 32ULL), hm);
+	const uint64_t small = MAX(big / 2ULL, hm);
+	spl_bucket_tunable_large_span = MIN(big, 16ULL * m);
+	spl_bucket_tunable_small_span = small;
+	printf("SPL: %s: real_total_memory %llu, large spans %llu, small spans %llu\n",
+	    __func__, real_total_memory,
+	    spl_bucket_tunable_large_span, spl_bucket_tunable_small_span);
+
 	for (int32_t i = VMEM_BUCKET_LOWBIT; i <= VMEM_BUCKET_HIBIT; i++) {
+		size_t minimum_allocsize = 0;
 		const uint64_t bucket_largest_size = (1ULL << (uint64_t)i);
 		char *buf = vmem_alloc(spl_default_arena, VMEM_NAMELEN + 21, VM_SLEEP);
 		(void) snprintf(buf, VMEM_NAMELEN + 20, "%s_%llu",
 		    "bucket", bucket_largest_size);
 		printf("SPL: %s creating arena %s (i == %d)\n", __func__, buf, i);
-		extern uint64_t real_total_memory;
-		if (real_total_memory > 0) {
-			// adjust minimum bucket span size for memory size
-			// we do not want to be smaller than 1 MiB
-			const uint64_t k = 1024ULL;
-			const uint64_t m = 1024ULL* k;
-			const uint64_t b = MAX(real_total_memory / (k * 16ULL), m);
-			const uint64_t s = MAX(b / 2ULL, m);
-			spl_bucket_tunable_large_span = MIN(b, 16ULL * m);
-			spl_bucket_tunable_small_span = s;
-			printf("SPL: %s: real_total_memory %llu, large spans %llu, small spans %llu\n",
-			    __func__, real_total_memory,
-			    spl_bucket_tunable_large_span, spl_bucket_tunable_small_span);
-		}
-		size_t minimum_allocsize = 0;
 		switch (i) {
 		case 16:
 		case 17:
