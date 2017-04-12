@@ -2408,8 +2408,7 @@ xnu_alloc_throttled(vmem_t *bvmp, size_t size, int vmflag)
 
 	if (m != NULL) {
 		atomic_inc_64(&spl_xat_success);
-		if (now > hz)
-			atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+		spl_xat_lastalloc = gethrtime();
 		// wake up waiters on all the arena condvars
 		// since there is apparently no memory shortage.
 		vmem_bucket_wake_all_waiters();
@@ -2420,7 +2419,7 @@ xnu_alloc_throttled(vmem_t *bvmp, size_t size, int vmflag)
 
 	if (vmflag & VM_PANIC) {
 		// force an allocation now to avoid a panic
-		atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+		spl_xat_lastalloc = gethrtime();
 		spl_free_set_emergency_pressure(4LL * (int64_t)size);
 		void *p = spl_vmem_malloc_unconditionally(size);
 		// p cannot be NULL (unconditional kernel malloc always works or panics)
@@ -2439,8 +2438,7 @@ xnu_alloc_throttled(vmem_t *bvmp, size_t size, int vmflag)
 		if (p != NULL) {
 			atomic_inc_64(&spl_xat_late_success_nosleep);
 			cv_broadcast(&bvmp->vm_cv);
-			if (now > hz)
-				atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+			spl_xat_lastalloc = gethrtime();
 		}
 		// if p == NULL, then there will be an increment in the fail kstat
 		return (p);
@@ -2502,7 +2500,7 @@ xnu_alloc_throttled(vmem_t *bvmp, size_t size, int vmflag)
 			void *a = spl_vmem_malloc_if_no_pressure(size);
 			if (a != NULL) {
 				atomic_inc_64(&spl_xat_late_success);
-				atomic_swap_64(&spl_xat_lastalloc,  now / hz);
+				spl_xat_lastalloc = gethrtime();
 				waiters--;
 				// Wake up all waiters on the bucket arena locks,
 				// since the system apparently has memory again.
@@ -2535,7 +2533,7 @@ xnu_alloc_throttled(vmem_t *bvmp, size_t size, int vmflag)
 			}
 			void *b = xnu_alloc_throttled_bail(now, bvmp, size, vmflag);
 			bailing_threads--;
-			atomic_swap_64(&spl_xat_lastalloc, now / hz);
+			spl_xat_lastalloc = gethrtime();
 			// wake up waiters on the arena lock,
 			// since they now have memory they can use.
 			cv_broadcast(&bvmp->vm_cv);
@@ -2609,8 +2607,7 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	// protected by is_freeing.   Release it after the osif_free()
 	// call has been made and the lastfree bookkeeping has been done.
 	osif_free(vaddr, size);
-	uint64_t now = zfs_lbolt();
-	atomic_swap_64(&spl_xat_lastfree,  now / hz);
+	spl_xat_lastfree = gethrtime();
 	is_freeing = false;
 	a_waiters--;
 	kpreempt(KPREEMPT_SYNC);
