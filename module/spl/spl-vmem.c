@@ -3178,11 +3178,11 @@ vmem_init(const char *heap_name,
 	// smallest allocation that vmem_bucket_allocate will ask for.
 	//
 	// The bucket arenas in turn exchange memory with XNU's allocator/freer in
-	// large spans (> 1MiB).
+	// large spans (~ 1 MiB is stable on all systems but creates bucket fragmentation)
 	//
 	// Segregating by size constrains internal fragmentation within the bucket and
 	// provides kstat.vmem visiblity and span-size policy to be applied to particular
-	// buckets (notably the 128k one).
+	// buckets (notably the sources of most allocations, see the comments below)
 	//
 	// For VMEM_BUCKET_HIBIT == 12,
 	// vmem_bucket_arena[n] holds allocations from 2^[n+11]+1 to  2^[n+12],
@@ -3197,12 +3197,14 @@ vmem_init(const char *heap_name,
 	VERIFY3U(real_total_memory,>=,1024ULL*1024ULL*1024ULL);
 
 	// adjust minimum bucket span size for memory size
-	// we do not want to be smaller than 512 kiB
+	// see comments in the switch below
+	// large span: 1 MiB and bigger on large-memory (> 32 GiB)  systems
+	// small span: 256 kiB and bigger on large-memory systems
 	const uint64_t k = 1024ULL;
-	const uint64_t hm = 512ULL * k;
+	const uint64_t qm = 256ULL * k;
 	const uint64_t m = 1024ULL* k;
-	const uint64_t big = MAX(real_total_memory / (k * 32ULL), hm);
-	const uint64_t small = MAX(big / 2ULL, hm);
+	const uint64_t big = MAX(real_total_memory / (k * 32ULL), m);
+	const uint64_t small = MAX(real_total_memory / (k * 128ULL), qm);
 	spl_bucket_tunable_large_span = MIN(big, 16ULL * m);
 	spl_bucket_tunable_small_span = small;
 	printf("SPL: %s: real_total_memory %llu, large spans %llu, small spans %llu\n",
@@ -3217,39 +3219,60 @@ vmem_init(const char *heap_name,
 		    "bucket", bucket_largest_size);
 		printf("SPL: %s creating arena %s (i == %d)\n", __func__, buf, i);
 		switch (i) {
+		case 15:
 		case 16:
-		case 17:
-			// The 128k bucket will generally be the most fragmented of all
-			// because it is one step larger than the maximum qcache size
-			// and is a popular size for the zio data and metadata arenas,
-			// with a small amount of va heap use.
-			//
-			// These static factors and the dynamism of a busy zfs system lead
-			// to interleaving 128k allocations with very different lifespans
-			// into the same xnu allocation, and at 16MiB this tends to
-			// leads to substantial (~ 1/2 GiB) waste.   That does not seem
-			// like much memory for most sytems, but it tends to represent holding
-			// ~ 4x more memory than the ideal case of 0 waste, thus the division by
-			// four of minimum_allocate compared to the 16 MiB default.   Additionally,
-			// this interleaving makes it harder to shrink the overall SPL memory
-			// use when memory is cruicially low.
-			//
-			// The trade off here is contributing to the fragmentation of
-			// the xnu freelist, so the step-down should not be even smaller.
-			//
-			// The 64k bucket is typically very low bandwidth and often holds just
-			// one or two spans thanks to qcaching so does not need to be large.
+			/*
+			 * With the arrival of abd, the 2^15 (== 32768) and 2^16
+			 * buckets are by far the most busy, holding respectively
+			 * the qcache spans of kmem_va (the kmem_alloc et al. heap)
+			 * and zfs_qcache (notably the source for the abd_chunk arena)
+			 *
+			 * The lifetime of early (i.e., after import and mount)
+			 * allocations can be highly variable, leading
+			 * to persisting fragmentation from the first eviction after
+			 * arc has grown large.    This can happen if, for example,
+			 * there substantial import and mounting (and mds/mdworker and
+			 * backupd scanning) activity before a user logs in and starts
+			 * demanding memory in userland (e.g. by firing up a browser or
+			 * mail app).
+			 *
+			 * Crucially, this makes it difficult to give back memory to xnu
+			 * without holding the ARC size down for long periods of time.
+			 *
+			 * We can mitigate this by exchanging smaller
+			 * amounts of memory with xnu for these buckets.
+			 * There are two downsides: xnu's memory
+			 * freelist will be prone to greater
+			 * fragmentation, which will affect all
+			 * allocation and free activity using xnu's
+			 * allocator including kexts other than our; and
+			 * we are likely to have more waits in the throttled
+			 * alloc function, as more threads are likely to require
+			 * slab importing into the kmem layer and fewer threads
+			 * can be satisfied by a small allocation vs a large one.
+			 *
+			 * The import sizes are sysadmin-tunable by setting
+			 * kstat.spl.misc.spl_misc.spl_tunable_small_span
+			 * to a power-of-two number of bytes in zsysctl.conf
+			 * should a sysadmin prefer non-early allocations to
+			 * be larger or smaller depending on system performance
+			 * and workload.
+			 *
+			 * However, a zfs booting system must use the defaults
+			 * here for the earliest allocations, therefore they.
+			 * should be only large enough to protect system performance
+			 * if the sysadmin never changes the tunable span sizes.
+			 */
 			minimum_allocsize = MAX(spl_bucket_tunable_small_span,
 			    bucket_largest_size * 4);
 			break;
 		default:
-			// 16 MiB has proven to be a decent choice, with surprisingly
-			// little waste.   The greatest waste has in practice been in
-			// the 128k bucket (see above), the 256k bucket under unusual
-			// circumstances (although this is much  smaller as a percentage,
-			// and in particular less than 1/2, so a step change to 8 MiB would
-			// not be very worthwhile), the 64k bucket (see above), and the
-			// 2 MiB bucket (which will typically occupy only one span anyway).
+			/*
+			 * These buckets are all relatively low bandwidth and
+			 * with relatively uniform lifespans for most allocations
+			 * (borrowed arc buffers dominate).   They should be large
+			 * enough that they do not pester xnu.
+			 */
 			minimum_allocsize = MAX(spl_bucket_tunable_large_span,
 			    bucket_largest_size * 4);
 			break;
