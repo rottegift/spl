@@ -6529,7 +6529,8 @@ spl_zio_set_no_grow(const size_t size, kmem_cache_t *cp, const size_t cachenum)
 }
 
 bool
-spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf_is_metadata)
+spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf_is_metadata,
+	kmem_cache_t **zp)
 {
 
 	ASSERT(spl_zio_no_grow_inited == true);
@@ -6564,6 +6565,7 @@ spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf
  			} else {
 				printf("SPL: %s: WARNING  ks->cp_metadata == NULL; size == %lu\n",
 				    __func__, size);
+				ks_set_cp(ks, zp[cachenum], cachenum);
 			}
 		} else {
 			if (ks->cp_filedata != NULL) {
@@ -6571,6 +6573,7 @@ spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf
 			} else {
 				printf("SPL: %s: WARNING ks->cp_filedata == NULL; size == %lu\n",
 				    __func__, size);
+				ks_set_cp(ks, zp[cachenum], cachenum);
 			}
 
 		}
