@@ -6560,20 +6560,32 @@ spl_zio_is_suppressed(const size_t size, const uint64_t now, const boolean_t buf
 			ks->suppress_count--;
 		}
 		if (buf_is_metadata) {
-			if (ks->cp_metadata != NULL) {
-				atomic_inc_64(&ks->cp_metadata->arc_no_grow);
- 			} else {
-				printf("SPL: %s: WARNING  ks->cp_metadata == NULL; size == %lu\n",
-				    __func__, size);
+			if (ks->cp_metadata == NULL) {
 				ks_set_cp(ks, zp[cachenum], cachenum);
+				if (ks->cp_metadata != NULL) {
+					atomic_inc_64(&ks->cp_metadata->arc_no_grow);
+				} else {
+					printf("WARNING: %s: "
+					    "ks_set_cp->metadata == NULL after ks_set_cp !"
+					    "size = %lu\n",
+					    __func__, size);
+				}
+			} else {
+				atomic_inc_64(&ks->cp_metadata->arc_no_grow);
 			}
 		} else {
-			if (ks->cp_filedata != NULL) {
-				atomic_inc_64(&ks->cp_filedata->arc_no_grow);
-			} else {
-				printf("SPL: %s: WARNING ks->cp_filedata == NULL; size == %lu\n",
-				    __func__, size);
+			if (ks->cp_filedata == NULL) {
 				ks_set_cp(ks, zp[cachenum], cachenum);
+				if (ks->cp_filedata != NULL) {
+					atomic_inc_64(&ks->cp_filedata->arc_no_grow);
+				} else {
+					printf("WARNING: %s: "
+					    "ks_set_cp->filedata == NULL after ks_set_cp !"
+					    "size = %lu\n",
+					    __func__, size);
+				}
+			} else {
+				atomic_inc_64(&ks->cp_filedata->arc_no_grow);
 			}
 
 		}
