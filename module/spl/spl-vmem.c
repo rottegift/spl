@@ -513,11 +513,64 @@ vmem_putseg(vmem_t *vmp, vmem_seg_t *vsp)
 
 #define dprintf(...)
 
+/*
+ * return true when we continue the for loop in
+ * vmem_freelist_insert_sort_by_time
+ */
+static inline bool
+flist_sort_compare(bool newfirst,
+    const vmem_seg_t *vhead,
+    const vmem_seg_t *nextlist,
+    vmem_seg_t *p, vmem_seg_t *to_insert)
+{
+	/* vsp is the segment we are inserting into the freelist
+	 * p is a freelist poniter or an element inside a  non-empty freelist
+	 * if we return false, then vsp is inserted immedaitely after p,
+         */
+
+	// always enter the for loop if we're at the front of a flist
+	if (p == vhead)
+		return (true);
+
+
+	const vmem_seg_t *n = p->vs_knext;
+
+	if (n == nextlist || n == NULL) {
+		// if we are at the tail of the flist, then
+		// insert vsp between p and n
+		return (false);
+	}
+
+	if (n->vs_import == true && to_insert->vs_import == false) {
+		/* put non-imported segments before imported segments
+		 * no matter what their respective create times are,
+		 * thereby making imported segments more likely "age out"
+		 */
+		return (false);  // inserts to_insert between p and n
+	}
+
+	if (newfirst == true) {
+		if (n->vs_span_createtime < to_insert->vs_span_createtime) {
+			// n is older than me, so insert me between p and n
+			return (false);
+		}
+	} else {
+		if (n->vs_span_createtime > to_insert->vs_span_createtime) {
+			// n is newer than me, so insert me between p and n
+			return (false);
+		}
+	}
+	// continue iterating
+	return (true);
+}
+
 static void
 vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 {
 	ASSERT(vmp->vm_cflags & VMC_TIMEFREE);
 	ASSERT(vsp->vs_span_createtime > 0);
+
+	const bool newfirst = 0 == (vmp->vm_cflags & VMC_OLDFIRST);
 
 	const uint64_t abs_max_walk_steps = 1ULL << 30ULL;
 	uint32_t max_walk_steps = (uint32_t)MIN(spl_frag_max_walk, abs_max_walk_steps);
@@ -557,7 +610,7 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 
 	int next_listnum = my_listnum + 1;
 
-	vmem_seg_t *nextlist = (vmem_seg_t *)&vmp->vm_freelist[next_listnum];
+	const vmem_seg_t *nextlist = (vmem_seg_t *)&vmp->vm_freelist[next_listnum];
 
 	ASSERT(vsp->vs_span_createtime != 0);
 	if (vsp->vs_span_createtime == 0) {
@@ -568,6 +621,7 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	// continuing our example, starts with p at flist[8k]
 	// and n at the following freelist entry
 
+	const vmem_seg_t *vhead = vprev;
 	vmem_seg_t *p = vprev;
 	vmem_seg_t *n = p->vs_knext;
 
@@ -577,7 +631,7 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 	// then insert before that segment.
 
 	for (uint32_t step = 0;
-	     p->vs_span_createtime >= vsp->vs_span_createtime || p->vs_span_createtime == 0 || step == 0;
+	     flist_sort_compare(newfirst, vhead, nextlist, p, vsp) == true;
 	     step++) {
 		// iterating while predecessor pointer p was created
 		// at a later tick than funcarg vsp.
@@ -605,7 +659,7 @@ vmem_freelist_insert_sort_by_time(vmem_t *vmp, vmem_seg_t *vsp)
 			// we have walked far enough.
 			// put this segment at the tail of the freelist.
 			if (nextlist->vs_kprev != NULL) {
-				n = nextlist;
+				n = (vmem_seg_t *)nextlist;
 				p = nextlist->vs_kprev;
 			}
 			dprintf("SPL: %s: walked out (%s)\n", __func__, vmp->vm_name);
@@ -3297,7 +3351,7 @@ vmem_init(const char *heap_name,
 	spl_heap_arena = vmem_create("bucket_heap", // id 15
 	    NULL, 0, heap_quantum,
 	    vmem_bucket_alloc, vmem_bucket_free, spl_default_arena_parent, 0,
-	    VM_SLEEP);
+	    VM_SLEEP | VMC_TIMEFREE | VMC_OLDFIRST);
 
 	VERIFY(spl_heap_arena != NULL);
 

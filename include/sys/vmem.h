@@ -90,7 +90,8 @@ extern "C" {
 #define	VMC_DUMPSAFE	0x00200000	/* can use alternate dump memory */
 	// KMC_IDENTIFIER == 0x00400000
 	// KMC_PREFILL ==    0x00800000
-#define VMC_TIMEFREE    0x01000000      /* keep span creation time, old spans freelist heads */
+#define VMC_TIMEFREE    0x01000000      /* keep span creation time, newest spans to front */
+#define VMC_OLDFIRST    0x02000000	/* must accompany VMC_TIMEFREE, oldest spans to front */
 	/*
 	 * internal use only;	the import function uses the vmem_ximport_t interface
 	 *			and may increase the request size if it so desires.
