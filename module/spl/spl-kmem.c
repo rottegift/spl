@@ -1806,7 +1806,7 @@ kmem_depot_ws_zero(kmem_cache_t *cp)
  * larger value (1GB) causes this to have virtually no effect.
  */
 //size_t kmem_reap_preempt_bytes = 1024 * 1024 * 1024;
-size_t kmem_reap_preempt_bytes = 1024 * 1024;
+size_t kmem_reap_preempt_bytes = 64 * 1024 * 1024;
 
 
 /*
