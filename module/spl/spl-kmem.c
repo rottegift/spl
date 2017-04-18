@@ -301,7 +301,7 @@ static uint32_t kmem_reaping_idspace;
 /*
  * kmem tunables
  */
-static struct timespec kmem_reap_interval = {15, 0};
+static struct timespec kmem_reap_interval = {5, 0};
 int kmem_depot_contention = 3;	/* max failed tryenters per real interval */
 pgcnt_t kmem_reapahead = 0;	/* start reaping N pages before pageout */
 int kmem_panic = 1;		/* whether to panic on error */
