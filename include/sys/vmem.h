@@ -165,6 +165,7 @@ extern "C" {
 	extern size_t vmem_size_locked(vmem_t *, int);
 	extern size_t vmem_size_semi_atomic(vmem_t *, int);
 	extern void vmem_qcache_reap(vmem_t *vmp);
+	extern int64_t vmem_buckets_size(int);
 
 #ifdef	__cplusplus
 }
