@@ -126,6 +126,7 @@ extern uint64_t physmem;
     void kmem_cache_reap_now(kmem_cache_t *cache);
     void kmem_reap(void);
 	void kmem_reap_idspace(void);
+	kmem_cache_t *kmem_cache_buf_in_cache(kmem_cache_t *, void *);
 
     int kmem_debugging(void);
     void kmem_cache_set_move(kmem_cache_t *,
@@ -138,6 +139,7 @@ extern uint64_t physmem;
 	char *kmem_strstr(const char *in, const char *str);
 	void strident_canon(char *s, size_t n);
 
+boolean_t spl_arc_no_grow(size_t, boolean_t, kmem_cache_t **);
 
 #ifdef	__cplusplus
 }
