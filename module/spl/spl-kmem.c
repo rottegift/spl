@@ -2366,6 +2366,39 @@ kmem_cpucache_magazine_alloc(kmem_cpu_cache_t *ccp, kmem_cache_t *cp)
 }
 
 /*
+ * If the cache's parent arena is a leaf arena (i.e., it imports all its memory)
+ * then we can consider it fragmented if either there is 1 GiB free in the arena
+ * or one eighth of the arena is free.
+ *
+ * This is useful in kmem_cache_free{_debug} to determine whether to free to the
+ * slab layer if the loaded magazine is full.
+ */
+static inline boolean_t
+kmem_cache_parent_arena_fragmented(kmem_cache_t *cp)
+{
+		const vmem_kstat_t *kp = &cp->cache_arena->vm_kstat;
+		const int64_t vk_import = kp->vk_mem_import.value.ui64;
+		const int64_t vk_inuse = kp->vk_mem_inuse.value.ui64;
+
+		if (vk_import == vk_inuse) {
+			const int64_t vk_total = kp->vk_mem_total.value.ui64;
+			const int64_t vk_free = vk_total - vk_inuse;
+			const int64_t highthresh = 1024LL*1024LL*1024LL;
+			// we are fragmented if we have 1GiB free
+			if (vk_free >= highthresh)
+				return (B_TRUE);
+			// we are fragmented if at least 1/8 of the
+			// total arena space is free
+			if (vk_free > 0 && vk_total > 0) {
+				const int64_t eighth_total= vk_total / 8;
+				if (vk_free >= eighth_total)
+					return (B_TRUE);
+			}
+		}
+		return (B_FALSE);
+}
+
+/*
  * Free a constructed object to cache cp.
  */
 void
@@ -2418,6 +2451,20 @@ kmem_cache_free(kmem_cache_t *cp, void *buf)
 		if (ccp->cc_magsize == 0) {
 			break;
 		}
+
+		/*
+		 * The magazine layer is on, but the loaded magazine is now
+		 * full (of allocatable constructed elements).
+		 *
+		 * If the cache's arena is badly fragmented, break out now;
+		 * this frees to the slab layer.
+		 *
+		 * Note: this is not reflected in kmem_slab_prefill() which
+		 * deals with a freshly allocated slab.
+		 */
+
+		if (kmem_cache_parent_arena_fragmented(cp))
+			break;
 
 		/*
 		 * The loaded magazine is full.  If the previously loaded
