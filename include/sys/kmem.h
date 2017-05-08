@@ -98,6 +98,7 @@ extern uint64_t physmem;
 #define KMC_KMEM_ALLOC  0x00200000      /* internal use only */
 #define KMC_IDENTIFIER  0x00400000      /* internal use only */
 #define KMC_PREFILL     0x00800000
+#define KMC_ARENA_SLAB  0x01000000      /* use a bigger kmem cache */
 
 	struct kmem_cache;
 
@@ -123,7 +124,9 @@ extern uint64_t physmem;
     void kmem_cache_destroy(kmem_cache_t *cache);
     void *kmem_cache_alloc(kmem_cache_t *cache, int flags);
     void kmem_cache_free(kmem_cache_t *cache, void *buf);
+    void kmem_cache_free_to_slab(kmem_cache_t *cache, void *buf);
     void kmem_cache_reap_now(kmem_cache_t *cache);
+	void kmem_depot_ws_zero(kmem_cache_t *cache);
     void kmem_reap(void);
 	void kmem_reap_idspace(void);
 	kmem_cache_t *kmem_cache_buf_in_cache(kmem_cache_t *, void *);

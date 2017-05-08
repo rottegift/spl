@@ -555,6 +555,8 @@ extern uint64_t spl_frag_walk_cnt;
 uint64_t spl_buckets_mem_free = 0;
 uint64_t spl_arc_reclaim_avoided = 0;
 
+uint64_t kmem_free_to_slab_when_fragmented = 0;
+
 typedef struct spl_stats {
 	kstat_named_t spl_os_alloc;
 	kstat_named_t spl_active_threads;
@@ -614,6 +616,8 @@ typedef struct spl_stats {
 	kstat_named_t spl_frag_walked_out;
 	kstat_named_t spl_frag_walk_cnt;
 	kstat_named_t spl_arc_reclaim_avoided;
+
+	kstat_named_t kmem_free_to_slab_when_fragmented;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -676,6 +680,8 @@ static spl_stats_t spl_stats = {
 	{"spl_vmem_frag_walked_out", KSTAT_DATA_UINT64},
 	{"spl_vmem_frag_walk_cnt", KSTAT_DATA_UINT64},
 	{"spl_arc_reclaim_avoided", KSTAT_DATA_UINT64},
+
+	{"kmem_free_to_slab_when_fragmented", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -1789,7 +1795,7 @@ kmem_depot_ws_update(kmem_cache_t *cp)
  * Set the working set statistics for cp's depot to zero. (Everything is
  * eligible for reaping.)
  */
-static void
+void
 kmem_depot_ws_zero(kmem_cache_t *cp)
 {
 	mutex_enter(&cp->cache_depot_lock);
@@ -2366,6 +2372,39 @@ kmem_cpucache_magazine_alloc(kmem_cpu_cache_t *ccp, kmem_cache_t *cp)
 }
 
 /*
+ * If the cache's parent arena is a leaf arena (i.e., it imports all its memory)
+ * then we can consider it fragmented if either there is 1 GiB free in the arena
+ * or one eighth of the arena is free.
+ *
+ * This is useful in kmem_cache_free{_debug} to determine whether to free to the
+ * slab layer if the loaded magazine is full.
+ */
+static inline boolean_t
+kmem_cache_parent_arena_fragmented(kmem_cache_t *cp)
+{
+		const vmem_kstat_t *kp = &cp->cache_arena->vm_kstat;
+		const int64_t vk_import = kp->vk_mem_import.value.ui64;
+		const int64_t vk_inuse = kp->vk_mem_inuse.value.ui64;
+		const int64_t vk_total = kp->vk_mem_total.value.ui64;
+
+		if (vk_import == vk_total && vk_inuse < vk_total) {
+			const int64_t vk_free = vk_total - vk_inuse;
+			const int64_t highthresh = 1024LL*1024LL*1024LL;
+			// we are fragmented if we have 1GiB free
+			if (vk_free >= highthresh)
+				return (B_TRUE);
+			// we are fragmented if at least 1/8 of the
+			// total arena space is free
+			if (vk_free > 0 && vk_total > 0) {
+				const int64_t eighth_total= vk_total / 8;
+				if (vk_free >= eighth_total)
+					return (B_TRUE);
+			}
+		}
+		return (B_FALSE);
+}
+
+/*
  * Free a constructed object to cache cp.
  */
 void
@@ -2420,6 +2459,21 @@ kmem_cache_free(kmem_cache_t *cp, void *buf)
 		}
 
 		/*
+		 * The magazine layer is on, but the loaded magazine is now
+		 * full (of allocatable constructed elements).
+		 *
+		 * If the cache's arena is badly fragmented, break out now;
+		 * this frees to the slab layer.
+		 *
+		 * Note: this is not reflected in kmem_slab_prefill() which
+		 * deals with a freshly allocated slab.
+		 */
+
+		if (kmem_free_to_slab_when_fragmented == 1 &&
+		    kmem_cache_parent_arena_fragmented(cp))
+			break;
+
+		/*
 		 * The loaded magazine is full.  If the previously loaded
 		 * magazine was empty, exchange them and try again.
 		 */
@@ -2439,6 +2493,46 @@ kmem_cache_free(kmem_cache_t *cp, void *buf)
 	}
 	mutex_exit(&ccp->cc_lock);
 	kpreempt(KPREEMPT_SYNC);
+	kmem_slab_free_constructed(cp, buf, B_TRUE);
+}
+
+/*
+ * Free a constructed object to cache cp.
+ * Do not free to the magazine layer.
+ * This is essentially just kmem_cache_free() without
+ * the for(;;) loop or the ccp critical section.
+ */
+void
+kmem_cache_free_to_slab(kmem_cache_t *cp, void *buf)
+{
+	kmem_cpu_cache_t *ccp = KMEM_CPU_CACHE(cp);
+
+	/*
+	 * The client must not free either of the buffers passed to the move
+	 * callback function.
+	 */
+	ASSERT(cp->cache_defrag == NULL ||
+		   cp->cache_defrag->kmd_thread != spl_current_thread() ||
+		   (buf != cp->cache_defrag->kmd_from_buf &&
+			buf != cp->cache_defrag->kmd_to_buf));
+
+	if (ccp->cc_flags & (KMF_BUFTAG | KMF_DUMPDIVERT | KMF_DUMPUNSAFE)) {
+		if (ccp->cc_flags & KMF_DUMPUNSAFE) {
+			ASSERT(!(ccp->cc_flags & KMF_DUMPDIVERT));
+			/* log it so that we can warn about it */
+			KDI_LOG(cp, kdl_unsafe);
+		} else if (KMEM_DUMPCC(ccp) && !kmem_cache_free_dump(cp, buf)) {
+			return;
+		}
+		if (ccp->cc_flags & KMF_BUFTAG) {
+			if (kmem_cache_free_debug(cp, buf, caller()) == -1)
+				return;
+		}
+	}
+
+	/* omitted the for(;;) loop from kmem_cache_free */
+	/* also do not take ccp mutex */
+
 	kmem_slab_free_constructed(cp, buf, B_TRUE);
 }
 
@@ -3541,17 +3635,28 @@ kmem_cache_create(
 	/*
 	 * Now that we know the chunk size, determine the optimal slab size.
 	 */
+
+	size_t vquantum = vmp->vm_quantum;
+
+	if ((cflags & KMC_ARENA_SLAB) == KMC_ARENA_SLAB) {
+		VERIFY3U((vmp->vm_cflags & VMC_NO_QCACHE),==,0);
+		VERIFY3U(vmp->vm_min_import,>,0);
+		VERIFY3U(vmp->vm_min_import,>=,(2 * vmp->vm_quantum));
+		VERIFY(ISP2(vmp->vm_min_import));
+		vquantum = vmp->vm_min_import >> 1;
+	}
+
 	if (vmp == kmem_firewall_arena) {
-		cp->cache_slabsize = P2ROUNDUP(chunksize, vmp->vm_quantum);
+		cp->cache_slabsize = P2ROUNDUP(chunksize, vquantum);
 		cp->cache_mincolor = cp->cache_slabsize - chunksize;
 		cp->cache_maxcolor = cp->cache_mincolor;
 		cp->cache_flags |= KMF_HASH;
 		ASSERT(!(cp->cache_flags & KMF_BUFTAG));
 	} else if ((cflags & KMC_NOHASH) || (!(cflags & KMC_NOTOUCH) &&
 										 !(cp->cache_flags & KMF_AUDIT) &&
-										 chunksize < vmp->vm_quantum /
+										 chunksize < vquantum /
 										 KMEM_VOID_FRACTION)) {
-		cp->cache_slabsize = vmp->vm_quantum;
+		cp->cache_slabsize = vquantum;
 		cp->cache_mincolor = 0;
 		cp->cache_maxcolor =
 		(cp->cache_slabsize - sizeof (kmem_slab_t)) % chunksize;
@@ -3563,7 +3668,7 @@ kmem_cache_create(
 
 		for (chunks = 1; chunks <= KMEM_VOID_FRACTION; chunks++) {
 			slabsize = P2ROUNDUP(chunksize * chunks,
-								 vmp->vm_quantum);
+								 vquantum);
 			chunks = slabsize / chunksize;
 			waste = (slabsize % chunksize) / chunks;
 			if (waste < minwaste) {
@@ -3599,8 +3704,8 @@ kmem_cache_create(
 		kmem_bufctl_audit_cache : kmem_bufctl_cache;
 	}
 
-	if (cp->cache_maxcolor >= vmp->vm_quantum)
-		cp->cache_maxcolor = vmp->vm_quantum - 1;
+	if (cp->cache_maxcolor >= vquantum)
+		cp->cache_maxcolor = vquantum - 1;
 
 	cp->cache_color = cp->cache_mincolor;
 
@@ -4811,6 +4916,12 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			spl_frag_max_walk = ks->spl_frag_max_walk.value.ui64;
 		}
 
+		if (ks->kmem_free_to_slab_when_fragmented.value.ui64 !=
+		    kmem_free_to_slab_when_fragmented) {
+			kmem_free_to_slab_when_fragmented =
+			    ks->kmem_free_to_slab_when_fragmented.value.ui64;
+		}
+
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
 		ks->spl_active_threads.value.ui64 = zfs_threads;
@@ -4870,6 +4981,8 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_frag_walk_cnt.value.ui64 = spl_frag_walk_cnt;
 
 		ks->spl_arc_reclaim_avoided.value.ui64 = spl_arc_reclaim_avoided;
+
+		ks->kmem_free_to_slab_when_fragmented.value.ui64 = kmem_free_to_slab_when_fragmented;
 	}
 
 	return (0);
