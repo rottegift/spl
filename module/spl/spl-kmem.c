@@ -2489,6 +2489,46 @@ kmem_cache_free(kmem_cache_t *cp, void *buf)
 	kmem_slab_free_constructed(cp, buf, B_TRUE);
 }
 
+/*
+ * Free a constructed object to cache cp.
+ * Do not free to the magazine layer.
+ * This is essentially just kmem_cache_free() without
+ * the for(;;) loop or the ccp critical section.
+ */
+void
+kmem_cache_free_to_slab(kmem_cache_t *cp, void *buf)
+{
+	kmem_cpu_cache_t *ccp = KMEM_CPU_CACHE(cp);
+
+	/*
+	 * The client must not free either of the buffers passed to the move
+	 * callback function.
+	 */
+	ASSERT(cp->cache_defrag == NULL ||
+		   cp->cache_defrag->kmd_thread != spl_current_thread() ||
+		   (buf != cp->cache_defrag->kmd_from_buf &&
+			buf != cp->cache_defrag->kmd_to_buf));
+
+	if (ccp->cc_flags & (KMF_BUFTAG | KMF_DUMPDIVERT | KMF_DUMPUNSAFE)) {
+		if (ccp->cc_flags & KMF_DUMPUNSAFE) {
+			ASSERT(!(ccp->cc_flags & KMF_DUMPDIVERT));
+			/* log it so that we can warn about it */
+			KDI_LOG(cp, kdl_unsafe);
+		} else if (KMEM_DUMPCC(ccp) && !kmem_cache_free_dump(cp, buf)) {
+			return;
+		}
+		if (ccp->cc_flags & KMF_BUFTAG) {
+			if (kmem_cache_free_debug(cp, buf, caller()) == -1)
+				return;
+		}
+	}
+
+	/* omitted the for(;;) loop from kmem_cache_free */
+	/* also do not take ccp mutex */
+
+	kmem_slab_free_constructed(cp, buf, B_TRUE);
+}
+
 static void
 kmem_slab_prefill(kmem_cache_t *cp, kmem_slab_t *sp)
 {
