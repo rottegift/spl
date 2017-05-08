@@ -2379,9 +2379,9 @@ kmem_cache_parent_arena_fragmented(kmem_cache_t *cp)
 		const vmem_kstat_t *kp = &cp->cache_arena->vm_kstat;
 		const int64_t vk_import = kp->vk_mem_import.value.ui64;
 		const int64_t vk_inuse = kp->vk_mem_inuse.value.ui64;
+		const int64_t vk_total = kp->vk_mem_total.value.ui64;
 
-		if (vk_import == vk_inuse) {
-			const int64_t vk_total = kp->vk_mem_total.value.ui64;
+		if (vk_import == vk_total && vk_inuse < vk_total) {
 			const int64_t vk_free = vk_total - vk_inuse;
 			const int64_t highthresh = 1024LL*1024LL*1024LL;
 			// we are fragmented if we have 1GiB free
