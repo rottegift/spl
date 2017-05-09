@@ -555,6 +555,8 @@ extern uint64_t spl_frag_walk_cnt;
 uint64_t spl_buckets_mem_free = 0;
 uint64_t spl_arc_reclaim_avoided = 0;
 
+uint64_t kmem_free_to_slab_when_fragmented = 0;
+
 typedef struct spl_stats {
 	kstat_named_t spl_os_alloc;
 	kstat_named_t spl_active_threads;
@@ -614,6 +616,8 @@ typedef struct spl_stats {
 	kstat_named_t spl_frag_walked_out;
 	kstat_named_t spl_frag_walk_cnt;
 	kstat_named_t spl_arc_reclaim_avoided;
+
+	kstat_named_t kmem_free_to_slab_when_fragmented;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -676,6 +680,8 @@ static spl_stats_t spl_stats = {
 	{"spl_vmem_frag_walked_out", KSTAT_DATA_UINT64},
 	{"spl_vmem_frag_walk_cnt", KSTAT_DATA_UINT64},
 	{"spl_arc_reclaim_avoided", KSTAT_DATA_UINT64},
+
+	{"kmem_free_to_slab_when_fragmented", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -2463,7 +2469,8 @@ kmem_cache_free(kmem_cache_t *cp, void *buf)
 		 * deals with a freshly allocated slab.
 		 */
 
-		if (kmem_cache_parent_arena_fragmented(cp))
+		if (kmem_free_to_slab_when_fragmented == 1 &&
+		    kmem_cache_parent_arena_fragmented(cp))
 			break;
 
 		/*
@@ -4898,6 +4905,12 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			spl_frag_max_walk = ks->spl_frag_max_walk.value.ui64;
 		}
 
+		if (ks->kmem_free_to_slab_when_fragmented.value.ui64 !=
+		    kmem_free_to_slab_when_fragmented) {
+			kmem_free_to_slab_when_fragmented =
+			    ks->kmem_free_to_slab_when_fragmented.value.ui64;
+		}
+
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
 		ks->spl_active_threads.value.ui64 = zfs_threads;
@@ -4957,6 +4970,8 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_frag_walk_cnt.value.ui64 = spl_frag_walk_cnt;
 
 		ks->spl_arc_reclaim_avoided.value.ui64 = spl_arc_reclaim_avoided;
+
+		ks->kmem_free_to_slab_when_fragmented.value.ui64 = kmem_free_to_slab_when_fragmented;
 	}
 
 	return (0);
