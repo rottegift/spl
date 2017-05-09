@@ -1795,7 +1795,7 @@ kmem_depot_ws_update(kmem_cache_t *cp)
  * Set the working set statistics for cp's depot to zero. (Everything is
  * eligible for reaping.)
  */
-static void
+void
 kmem_depot_ws_zero(kmem_cache_t *cp)
 {
 	mutex_enter(&cp->cache_depot_lock);
