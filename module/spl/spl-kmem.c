@@ -3635,17 +3635,28 @@ kmem_cache_create(
 	/*
 	 * Now that we know the chunk size, determine the optimal slab size.
 	 */
+
+	size_t vquantum = vmp->vm_quantum;
+
+	if ((cflags & KMC_ARENA_SLAB) == KMC_ARENA_SLAB) {
+		VERIFY3U((vmp->vm_cflags & VMC_NO_QCACHE),==,0);
+		VERIFY3U(vmp->vm_min_import,>,0);
+		VERIFY3U(vmp->vm_min_import,>=,(2 * vmp->vm_quantum));
+		VERIFY(ISP2(vmp->vm_min_import));
+		vquantum = vmp->vm_min_import >> 1;
+	}
+
 	if (vmp == kmem_firewall_arena) {
-		cp->cache_slabsize = P2ROUNDUP(chunksize, vmp->vm_quantum);
+		cp->cache_slabsize = P2ROUNDUP(chunksize, vquantum);
 		cp->cache_mincolor = cp->cache_slabsize - chunksize;
 		cp->cache_maxcolor = cp->cache_mincolor;
 		cp->cache_flags |= KMF_HASH;
 		ASSERT(!(cp->cache_flags & KMF_BUFTAG));
 	} else if ((cflags & KMC_NOHASH) || (!(cflags & KMC_NOTOUCH) &&
 										 !(cp->cache_flags & KMF_AUDIT) &&
-										 chunksize < vmp->vm_quantum /
+										 chunksize < vquantum /
 										 KMEM_VOID_FRACTION)) {
-		cp->cache_slabsize = vmp->vm_quantum;
+		cp->cache_slabsize = vquantum;
 		cp->cache_mincolor = 0;
 		cp->cache_maxcolor =
 		(cp->cache_slabsize - sizeof (kmem_slab_t)) % chunksize;
@@ -3657,7 +3668,7 @@ kmem_cache_create(
 
 		for (chunks = 1; chunks <= KMEM_VOID_FRACTION; chunks++) {
 			slabsize = P2ROUNDUP(chunksize * chunks,
-								 vmp->vm_quantum);
+								 vquantum);
 			chunks = slabsize / chunksize;
 			waste = (slabsize % chunksize) / chunks;
 			if (waste < minwaste) {
@@ -3693,8 +3704,8 @@ kmem_cache_create(
 		kmem_bufctl_audit_cache : kmem_bufctl_cache;
 	}
 
-	if (cp->cache_maxcolor >= vmp->vm_quantum)
-		cp->cache_maxcolor = vmp->vm_quantum - 1;
+	if (cp->cache_maxcolor >= vquantum)
+		cp->cache_maxcolor = vquantum - 1;
 
 	cp->cache_color = cp->cache_mincolor;
 

@@ -98,6 +98,7 @@ extern uint64_t physmem;
 #define KMC_KMEM_ALLOC  0x00200000      /* internal use only */
 #define KMC_IDENTIFIER  0x00400000      /* internal use only */
 #define KMC_PREFILL     0x00800000
+#define KMC_ARENA_SLAB  0x01000000      /* use a bigger kmem cache */
 
 	struct kmem_cache;
 
