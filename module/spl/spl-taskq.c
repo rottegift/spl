@@ -1002,7 +1002,7 @@ void
 system_taskq_init(void)
 {
 	system_taskq = taskq_create_common("system_taskq", 0,
-	    system_taskq_size * max_ncpus, minclsyspri, 4, 512, &p0, 0,
+	    system_taskq_size * max_ncpus, maxclsyspri, 4, 1024, &p0, 0,
 	    TASKQ_DYNAMIC | TASKQ_PREPOPULATE);
 }
 
