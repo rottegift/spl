@@ -411,6 +411,7 @@ spl_start (kmod_info_t * ki, void * d)
     //max_ncpus = processor_avail_count;
     int ncpus;
     size_t len = sizeof(ncpus);
+    boolean_t manual = B_FALSE;
 
 	printf("SPL: start\n");
 
@@ -424,6 +425,10 @@ spl_start (kmod_info_t * ki, void * d)
 			    printf("SPL: %s sleeping %d milliseconds waiting for total_memory\n",
 				__func__, i);
 		    }
+		    if (i > 5000) {
+			    manual = B_TRUE;
+			    break;
+		    }
 	}
 
     sysctlbyname("hw.logicalcpu_max", &max_ncpus, &len, NULL, 0);
@@ -431,6 +436,11 @@ spl_start (kmod_info_t * ki, void * d)
 
 	len = sizeof(total_memory);
     sysctlbyname("hw.memsize", &total_memory, &len, NULL, 0);
+
+    if (manual == B_TRUE) {
+	    max_ncpus = 4;
+	    total_memory = 17179869184;
+    }
 
 	/*
 	 * Setting the total memory to physmem * 80% here, since kmem is
