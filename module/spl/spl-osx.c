@@ -405,13 +405,26 @@ int ddi_copyinstr(const void *uaddr, void *kaddr, size_t len, size_t *done)
 	return ret;
 }
 
-kern_return_t spl_start (kmod_info_t * ki, void * d)
+kern_return_t
+spl_start (kmod_info_t * ki, void * d)
 {
     //max_ncpus = processor_avail_count;
     int ncpus;
     size_t len = sizeof(ncpus);
 
 	printf("SPL: start\n");
+
+	for (int i = 1;; i++) {
+		    sysctlbyname("hw.logicalcpu_max", &max_ncpus, &len, NULL, 0);
+		    sysctlbyname("hw.memsize", &total_memory, &len, NULL, 0);
+		    if (max_ncpus > 0 && total_memory > 0)
+			    break;
+		    IOSleep(1);
+		    if ((i%1000) == 0) {
+			    printf("SPL: %s sleeping %d milliseconds waiting for total_memory\n",
+				__func__, i);
+		    }
+	}
 
     sysctlbyname("hw.logicalcpu_max", &max_ncpus, &len, NULL, 0);
 	if (!max_ncpus) max_ncpus = 1;
