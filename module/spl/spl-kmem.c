@@ -835,10 +835,15 @@ kmem_cache_applyall_id(void (*func)(kmem_cache_t *), taskq_t *tq, int tqflag)
  */
 
 static boolean_t
-kmem_findslab_kmem_slab_member(kmem_slab_t *sp, void *buf)
+kmem_findslab_kmem_slab_member(kmem_slab_t *sp, void *buf, char *cn, const char *w)
 {
 	VERIFY3P(sp,!=,NULL);
 	VERIFY3P(buf,!=,NULL);
+	if (sp->slab_cache == NULL) {
+		panic("SPL: %s: sp->slab_cache is NULL for %s (%s)",
+		    __func__, cn, w);
+        }
+	VERIFY3P(sp->slab_base,!=,NULL);
 	return(KMEM_SLAB_MEMBER(sp, buf));
 }
 
@@ -863,7 +868,7 @@ kmem_findslab(kmem_cache_t *cp, void *buf)
 	mutex_enter(&cp->cache_lock);
 	for (sp = list_head(&cp->cache_complete_slabs); sp != NULL;
 		 sp = list_next(&cp->cache_complete_slabs, sp)) {
-		if (kmem_findslab_kmem_slab_member(sp, buf)) {
+		if (kmem_findslab_kmem_slab_member(sp, buf, cp->cache_name, "complete")) {
 			mutex_exit(&cp->cache_lock);
 			return (sp);
 		}
@@ -871,7 +876,7 @@ kmem_findslab(kmem_cache_t *cp, void *buf)
 
 	for (sp = avl_first(&cp->cache_partial_slabs); sp != NULL;
 		 sp = kmem_findslab_avl_next(&cp->cache_partial_slabs, sp)) {
-		if (kmem_findslab_kmem_slab_member(sp, buf)) {
+		if (kmem_findslab_kmem_slab_member(sp, buf, cp->cache_name, "partial")) {
 			mutex_exit(&cp->cache_lock);
 			return (sp);
 		}
