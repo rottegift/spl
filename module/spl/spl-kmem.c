@@ -1032,6 +1032,10 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 		}
 	}
 
+#ifdef DEBUG
+	spl_backtrace("kmem_error()");
+#endif
+
 	if (kmem_panic > 0) {
 		//delay(hz);
 		extern  void IODelay(unsigned microseconds); // <IOKit/IOLib.h?
