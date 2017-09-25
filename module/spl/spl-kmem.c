@@ -838,6 +838,9 @@ kmem_findslab(kmem_cache_t *cp, void *buf)
 {
 	kmem_slab_t *sp;
 
+	VERIFY3P(cp,!=,NULL);
+	VERIFY3P(cp->cache_name,!=,NULL);
+
 	mutex_enter(&cp->cache_lock);
 	for (sp = list_head(&cp->cache_complete_slabs); sp != NULL;
 		 sp = list_next(&cp->cache_complete_slabs, sp)) {
@@ -846,6 +849,7 @@ kmem_findslab(kmem_cache_t *cp, void *buf)
 			return (sp);
 		}
 	}
+
 	for (sp = avl_first(&cp->cache_partial_slabs); sp != NULL;
 		 sp = AVL_NEXT(&cp->cache_partial_slabs, sp)) {
 		if (KMEM_SLAB_MEMBER(sp, buf)) {
@@ -861,6 +865,9 @@ kmem_findslab(kmem_cache_t *cp, void *buf)
 static void
 kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 {
+	VERIFY3P(cparg,!=,NULL);
+	VERIFY3P(bufarg,!=,NULL);
+
 	kmem_buftag_t *btp = NULL;
 	kmem_bufctl_t *bcp = NULL;
 	kmem_cache_t *cp = cparg;
@@ -1640,6 +1647,9 @@ kmem_cache_alloc_debug(kmem_cache_t *cp, void *buf, int kmflag, int construct,
 static int
 kmem_cache_free_debug(kmem_cache_t *cp, void *buf, caddr_t caller)
 {
+	VERIFY3P(cp,!=,NULL);
+	VERIFY3P(buf,!=,NULL);
+
 	kmem_buftag_t *btp = KMEM_BUFTAG(cp, buf);
 	kmem_bufctl_audit_t *bcp = (kmem_bufctl_audit_t *)btp->bt_bufctl;
 	kmem_slab_t *sp;
@@ -6837,6 +6847,9 @@ kmem_cache_bufsize(kmem_cache_t *cp)
 kmem_cache_t *
 kmem_cache_buf_in_cache(kmem_cache_t *cparg, void *bufarg)
 {
+	VERIFY3P(cparg,!=,NULL);
+	VERIFY3P(bufarg,!=,NULL);
+
 	kmem_cache_t *cp = cparg;
 	kmem_slab_t *sp;
 	void *buf = bufarg;
