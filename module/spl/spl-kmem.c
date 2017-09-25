@@ -886,7 +886,7 @@ kmem_findslab(kmem_cache_t *cp, void *buf)
 	return (NULL);
 }
 
-static void
+void
 kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 {
 	VERIFY3P(cparg,!=,NULL);
