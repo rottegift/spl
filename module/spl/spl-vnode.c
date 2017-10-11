@@ -640,3 +640,10 @@ void spl_decmpfs_cnode_destroy(struct decmpfs_cnode *cp)
 {
 	decmpfs_cnode_destroy(cp);
 }
+
+extern int UBCINFOEXISTS(const struct vnode * vp);
+int
+spl_UBCINFOEXISTS(const struct vnode *vp)
+{
+	return(UBCINFOEXISTS(vp));
+}

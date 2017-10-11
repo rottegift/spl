@@ -315,4 +315,6 @@ int spl_decmpfs_file_is_compressed(struct vnode *vp, struct decmpfs_cnode *cp);
 void spl_decmpfs_cnode_init(struct decmpfs_cnode *cp);
 void spl_decmpfs_cnode_destroy(struct decmpfs_cnode *cp);
 
+extern int spl_UBCINFOEXISTS(const struct vnode *vp);
+
 #endif /* SPL_VNODE_H */
