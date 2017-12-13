@@ -35,3 +35,5 @@ _decmpfs_cnode_init
 _decmpfs_cnode_destroy
 _throttle_set_thread_io_policy
 _UBCINFOEXISTS
+_ubc_is_mapped
+_ubc_is_mapped_writable

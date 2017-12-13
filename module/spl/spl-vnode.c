@@ -647,3 +647,18 @@ spl_UBCINFOEXISTS(const struct vnode *vp)
 {
 	return(UBCINFOEXISTS(vp));
 }
+
+extern __attribute__((pure)) boolean_t ubc_is_mapped(const struct vnode *vp, boolean_t *writable);
+extern __attribute__((pure)) boolean_t ubc_is_mapped_writable(const struct vnode *vp);
+
+boolean_t
+spl_ubc_is_mapped(const struct vnode *vp, boolean_t *writable)
+{
+	return (ubc_is_mapped(vp, writable));
+}
+
+boolean_t
+spl_ubc_is_mapped_writable(const struct vnode *vp)
+{
+	return (ubc_is_mapped_writable(vp));
+}

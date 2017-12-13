@@ -316,5 +316,7 @@ void spl_decmpfs_cnode_init(struct decmpfs_cnode *cp);
 void spl_decmpfs_cnode_destroy(struct decmpfs_cnode *cp);
 
 extern int spl_UBCINFOEXISTS(const struct vnode *vp);
+extern __attribute__((pure)) boolean_t spl_ubc_is_mapped(const struct vnode *vp, boolean_t *writable);
+extern __attribute__((pure)) boolean_t spl_ubc_is_mapped_writable(const struct vnode *);
 
 #endif /* SPL_VNODE_H */
