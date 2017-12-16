@@ -37,3 +37,4 @@ _throttle_set_thread_io_policy
 _UBCINFOEXISTS
 _ubc_is_mapped
 _ubc_is_mapped_writable
+_lf_advlock

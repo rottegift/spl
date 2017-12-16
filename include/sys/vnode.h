@@ -319,4 +319,6 @@ extern int spl_UBCINFOEXISTS(const struct vnode *vp);
 extern __attribute__((pure)) boolean_t spl_ubc_is_mapped(const struct vnode *vp, boolean_t *writable);
 extern __attribute__((pure)) boolean_t spl_ubc_is_mapped_writable(const struct vnode *);
 
+extern int spl_lf_advlock(struct vnop_advlock_args *ap);
+
 #endif /* SPL_VNODE_H */

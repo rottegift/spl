@@ -662,3 +662,11 @@ spl_ubc_is_mapped_writable(const struct vnode *vp)
 {
 	return (ubc_is_mapped_writable(vp));
 }
+
+extern int lf_advlock(struct vnop_advlock_args *ap);
+
+int
+spl_lf_advlock(struct vnop_advlock_args *ap)
+{
+	return (lf_advlock(ap));
+}
