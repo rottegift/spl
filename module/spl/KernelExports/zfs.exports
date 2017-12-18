@@ -27,3 +27,9 @@ _vnode_notify
 _vfs_get_notify_attributes
 _kauth_cred_getgroups
 _rootvnode
+_decmpfs_cnode_alloc
+_decmpfs_cnode_free
+_decmpfs_decompress_file
+_decmpfs_file_is_compressed
+_decmpfs_cnode_init
+_decmpfs_cnode_destroy
