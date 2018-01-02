@@ -259,9 +259,9 @@ chklock(struct vnode *vp, int iomode, unsigned long long offset, ssize_t len, in
 
 
 #ifdef ZFS_LEOPARD_ONLY
-#define vn_has_cached_data(VP)  (spl_ubc_is_mapped(VP, NULL) || (VTOZ(VP))->z_mod_while_mapped != 0)
+#define vn_has_cached_data(VP)  (spl_ubc_is_mapped(VP, NULL))
 #else
-#define vn_has_cached_data(VP)  (spl_ubc_is_mapped(VP, NULL) || (VTOZ(VP))->z_mod_while_mapped != 0 || vnode_isswap(VP))
+#define vn_has_cached_data(VP)  (spl_ubc_is_mapped(VP, NULL) || vnode_isswap(VP))
 #endif
 
 #define vn_ismntpt(vp)   (vnode_mountedhere(vp) != NULL)
