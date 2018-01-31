@@ -395,6 +395,16 @@ void spl_mutex_enter(kmutex_t *mp)
     mp->m_owner = current_thread();
 
 #ifdef SPL_DEBUG_MUTEX
+    if (mp->state == DESTROY) {
+	    printf("SPL: %s:%d: ANOMALY mp->state 0x%x"
+		" mp->file %s mp->line %d mp->func %s"
+		" my caller: file %s line %d func %s\n",
+		__func__, __LINE__,
+		mp->state,
+		mp->file, mp->line, mp->func,
+		file, line, func);
+    }
+
 	if (mp->leak) {
 		struct leak *leak = (struct leak *)mp->leak;
 		leak->wdlist_locktime = gethrestime_sec();
@@ -481,6 +491,15 @@ int spl_mutex_tryenter(kmutex_t *mp)
     if (held) {
         mp->m_owner = current_thread();
 #ifdef SPL_DEBUG_MUTEX
+	if (mp->state == DESTROY) {
+		printf("SPL: %s:%d: ANOMALY mp->state 0x%x"
+		    " mp->file %s mp->line %d mp->func %s"
+		    " my caller: file %s line %d func %s\n",
+		    __func__, __LINE__,
+		    mp->state,
+		    mp->file, mp->line, mp->func,
+		    file, line, func);
+	}
 	if (mp->leak) {
 		struct leak *leak = (struct leak *)mp->leak;
 		leak->wdlist_locktime = gethrestime_sec();
