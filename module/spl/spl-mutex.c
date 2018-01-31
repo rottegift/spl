@@ -405,16 +405,16 @@ void spl_mutex_enter(kmutex_t *mp)
 		file, line, func);
     }
 
-	if (mp->leak) {
-		struct leak *leak = (struct leak *)mp->leak;
-		leak->wdlist_locktime = gethrestime_sec();
-		strlcpy(leak->wdlist_file, file, sizeof(leak->wdlist_file));
-		leak->wdlist_line = line;
-	}
-	mp->file = file;
-	mp->line = line;
-	mp->func = func;
-	mp->state = ENTER;
+    if (mp->leak) {
+	    struct leak *leak = (struct leak *)mp->leak;
+	    leak->wdlist_locktime = gethrestime_sec();
+	    strlcpy(leak->wdlist_file, file, sizeof(leak->wdlist_file));
+	    leak->wdlist_line = line;
+    }
+    mp->file = file;
+    mp->line = line;
+    mp->func = func;
+    mp->state = ENTER;
 #endif
 }
 
@@ -437,7 +437,7 @@ void spl_mutex_exit(kmutex_t *mp)
 #endif
 
 #ifdef SPL_DEBUG_MUTEX
-	if ((mp->state != ENTER && mp->state != TRYENTER)
+	if ((mp->state != ENTER && mp->state != TRYENTER && mp->state != EXIT)
 	    || !MUTEX_HELD(mp)) {
 		printf("SPL: %s:%d: ANOMALY: mutex state 0x%x (held? %d)"
 		    " my caller: file %s line %d func %s"
