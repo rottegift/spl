@@ -47,11 +47,11 @@ typedef struct {
 
 #ifdef SPL_DEBUG_MUTEX
 typedef enum kmutex_state {
-	INIT,
-	ENTER,
-	TRYENTER,
-	EXIT,
-	DESTROY,
+	INIT = 1,
+	ENTER = 2,
+	TRYENTER = 3,
+	EXIT = 4,
+	DESTROY = 5,
 } kmutex_state_t;
 #endif
 
