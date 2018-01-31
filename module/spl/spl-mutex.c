@@ -437,7 +437,8 @@ void spl_mutex_exit(kmutex_t *mp)
 #endif
 
 #ifdef SPL_DEBUG_MUTEX
-	if (mp->state != ENTER || mp->state != TRYENTER || !MUTEX_HELD(mp)) {
+	if ((mp->state != ENTER && mp->state != TRYENTER)
+	    || !MUTEX_HELD(mp)) {
 		printf("SPL: %s:%d: ANOMALY: mutex state 0x%x (held? %d)"
 		    " my caller: file %s line %d func %s"
 		    " mutex: mfile %s mline %d mfunc %s\n",
