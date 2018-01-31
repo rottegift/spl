@@ -61,8 +61,14 @@ spl_cv_broadcast(kcondvar_t *cvp)
  * Block on the indicated condition variable and
  * release the associated mutex while blocked.
  */
+#ifdef SPL_DEBUG_MUTEX
+void
+spl_cv_wait(kcondvar_t *cvp, kmutex_t *mp, int flags, const char *msg,
+    const char * const file, const int line, const char * const func)
+#else
 void
 spl_cv_wait(kcondvar_t *cvp, kmutex_t *mp, int flags, const char *msg)
+#endif
 {
     if (msg != NULL && msg[0] == '&')
         ++msg;  /* skip over '&' prefixes */
@@ -70,11 +76,19 @@ spl_cv_wait(kcondvar_t *cvp, kmutex_t *mp, int flags, const char *msg)
 #ifdef SPL_DEBUG_MUTEX
     VERIFY3S(mp->m_destroying, !=, B_TRUE);
 	spl_wdlist_settime(mp->leak, 0);
+	mp->state = SLEEP;
+	mp->file = file;
+	mp->line = line;
+	mp->func = func;
 #endif
 	mp->m_owner = NULL;
     (void) msleep(cvp, (lck_mtx_t *)&mp->m_lock, flags, msg, 0);
     mp->m_owner = current_thread();
 #ifdef SPL_DEBUG_MUTEX
+    mp->state = ENTER;
+    mp->file = file;
+    mp->line = line;
+    mp->func = func;
     VERIFY3S(mp->m_destroying, !=, B_TRUE);
 	spl_wdlist_settime(mp->leak, gethrestime_sec());
 #endif
@@ -87,9 +101,16 @@ spl_cv_wait(kcondvar_t *cvp, kmutex_t *mp, int flags, const char *msg)
  * Returns the amount of time left from the original 'tim' value
  * when it was unblocked.
  */
+#ifdef SPL_DEBUG_MUTEX
+int
+spl_cv_timedwait(kcondvar_t *cvp, kmutex_t *mp, clock_t tim, int flags,
+    const char *msg, const char * const file, const int line,
+    const char * const func)
+#else
 int
 spl_cv_timedwait(kcondvar_t *cvp, kmutex_t *mp, clock_t tim, int flags,
 				 const char *msg)
+#endif
 {
     struct timespec ts;
     int result;
@@ -116,14 +137,22 @@ spl_cv_timedwait(kcondvar_t *cvp, kmutex_t *mp, clock_t tim, int flags,
 	}
 #ifdef SPL_DEBUG_MUTEX
     VERIFY3S(mp->m_destroying, !=, B_TRUE);
-	spl_wdlist_settime(mp->leak, 0);
+    spl_wdlist_settime(mp->leak, 0);
+    mp->file = file;
+    mp->line = line;
+    mp->func = func;
+    mp->state = SLEEP;
 #endif
     mp->m_owner = NULL;
     result = msleep(cvp, (lck_mtx_t *)&mp->m_lock, flags, msg, &ts);
     mp->m_owner = current_thread();
 #ifdef SPL_DEBUG_MUTEX
+    mp->state = ENTER;
+    mp->file = file;
+    mp->line = line;
+    mp->func = func;
     VERIFY3S(mp->m_destroying, !=, B_TRUE);
-	spl_wdlist_settime(mp->leak, gethrestime_sec());
+    spl_wdlist_settime(mp->leak, gethrestime_sec());
 #endif
     return (result == EWOULDBLOCK ? -1 : 0);
 
@@ -133,9 +162,16 @@ spl_cv_timedwait(kcondvar_t *cvp, kmutex_t *mp, clock_t tim, int flags,
 /*
 * Compatibility wrapper for the cv_timedwait_hires() Illumos interface.
 */
+#ifdef SPL_DEBUG_MUTEX
+clock_t
+spl_cv_timedwait_hires(kcondvar_t *cvp, kmutex_t *mp, hrtime_t tim,
+    hrtime_t res, int flag,
+    const char * const file, const int line, const char * const func)
+#else
 clock_t
 cv_timedwait_hires(kcondvar_t *cvp, kmutex_t *mp, hrtime_t tim,
                  hrtime_t res, int flag)
+#endif
 {
     struct timespec ts;
     int result;
@@ -171,12 +207,20 @@ cv_timedwait_hires(kcondvar_t *cvp, kmutex_t *mp, hrtime_t tim,
 
 #ifdef SPL_DEBUG_MUTEX
     VERIFY3S(mp->m_destroying, !=, B_TRUE);
-	spl_wdlist_settime(mp->leak, 0);
+    spl_wdlist_settime(mp->leak, 0);
+    mp->file = file;
+    mp->line = line;
+    mp->func = func;
+    mp->state = SLEEP;
 #endif
     mp->m_owner = NULL;
     result = msleep(cvp, (lck_mtx_t *)&mp->m_lock, PRIBIO, "cv_timedwait_hires", &ts);
     mp->m_owner = current_thread();
 #ifdef SPL_DEBUG_MUTEX
+    mp->state = ENTER;
+    mp->file = file;
+    mp->line = line;
+    mp->func = func;
     VERIFY3S(mp->m_destroying, !=, B_TRUE);
 	spl_wdlist_settime(mp->leak, gethrestime_sec());
 #endif

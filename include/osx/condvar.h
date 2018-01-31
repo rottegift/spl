@@ -18,12 +18,40 @@ struct cv {
 typedef struct cv  kcondvar_t;
 
 
-
-
 void spl_cv_init(kcondvar_t *cvp, char *name, kcv_type_t type, void *arg);
 void spl_cv_destroy(kcondvar_t *cvp);
 void spl_cv_signal(kcondvar_t *cvp);
 void spl_cv_broadcast(kcondvar_t *cvp);
+
+#ifdef SPL_DEBUG_MUTEX
+void spl_cv_wait(kcondvar_t *cvp, kmutex_t *mp, int flags, const char *msg,
+    const char * const file, const int line, const char * const func);
+int spl_cv_timedwait(kcondvar_t *cvp, kmutex_t *mp, clock_t tim, int flags,
+    const char *msg, const char * const file, const int line,
+    const char * const func);
+clock_t
+spl_cv_timedwait_hires(kcondvar_t *cvp, kmutex_t *mp, hrtime_t tim,
+    hrtime_t res, int flag,
+    const char * const file, const int line, const char * const func);
+#define cv_timedwait_hires(cvp, mp, tim, res, flag) \
+	spl_cv_timedwait_hires((cvp), (mp), (tim), (res), (flag), __FILE__, __LINE__, __func__)
+#define cv_wait(cvp, mp) \
+	spl_cv_wait((cvp), (mp), PRIBIO, #cvp, __FILE__, __LINE__, __func__)
+#define cv_wait_io(cvp, mp)                     \
+	spl_cv_wait((cvp), (mp), PRIBIO, #cvp, __FILE__, __LINE__, __func__)
+#define cv_timedwait(cvp, mp, tim)      \
+	spl_cv_timedwait((cvp), (mp), (tim), PRIBIO, #cvp, __FILE__, __LINE__, __func__)
+#define cv_wait_interruptible(cvp, mp)        \
+	spl_cv_wait((cvp), (mp), PRIBIO|PCATCH, #cvp, __FILE__, __LINE__, __func__)
+#define cv_timedwait_interruptible(cvp, mp, tim)  \
+	spl_cv_timedwait((cvp), (mp), (tim), PRIBIO|PCATCH, #cvp, __FILE__, __LINE__, __func__)
+#define cv_wait_sig(cvp, mp)        \
+	spl_cv_wait((cvp), (mp), PRIBIO|PCATCH, #cvp, __FILE__, __LINE__, __func__)
+#define cv_timedwait_sig(cvp, mp, tim)  \
+	spl_cv_timedwait((cvp), (mp), (tim), PRIBIO|PCATCH, #cvp, __FILE__, __LINE__, __func__)
+
+#else
+
 void spl_cv_wait(kcondvar_t *cvp, kmutex_t *mp, int flags, const char *msg);
 int  spl_cv_timedwait(kcondvar_t *cvp,kmutex_t *mp, clock_t tim, int flags,
 					  const char *msg);
@@ -61,6 +89,7 @@ clock_t cv_timedwait_hires(kcondvar_t *cvp, kmutex_t *mp,
 #define cv_timedwait_sig(cvp, mp, tim)  \
 	spl_cv_timedwait((cvp), (mp), (tim), PRIBIO|PCATCH, #cvp)
 
+#endif
 
 #define TICK_TO_NSEC(tick)              ((hrtime_t)(tick) * 1000000000 / hz)
 #define cv_reltimedwait(cvp, mp, tim, type) \

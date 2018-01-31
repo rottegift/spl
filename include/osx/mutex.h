@@ -52,6 +52,7 @@ typedef enum kmutex_state {
 	TRYENTER = 3,
 	EXIT = 4,
 	DESTROY = 5,
+	SLEEP = 6,
 } kmutex_state_t;
 #endif
 
