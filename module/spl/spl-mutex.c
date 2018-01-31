@@ -140,8 +140,6 @@ int spl_mutex_subsystem_init(void)
 	return 0;
 }
 
-
-
 void spl_mutex_subsystem_fini(void)
 {
 #ifdef SPL_DEBUG_MUTEX
@@ -215,7 +213,7 @@ void spl_mutex_subsystem_fini(void)
 
 #ifdef SPL_DEBUG_MUTEX
 void spl_mutex_init(kmutex_t *mp, char *name, kmutex_type_t type, void *ibc,
-					const char *file, const char *fn, int line)
+    const char * const file, const char * const fn, const int line)
 #else
 void spl_mutex_init(kmutex_t *mp, char *name, kmutex_type_t type, void *ibc)
 #endif
@@ -257,10 +255,19 @@ void spl_mutex_init(kmutex_t *mp, char *name, kmutex_type_t type, void *ibc)
 	leak->wdlist_locktime = 0;
 	leak->wdlist_file[0] = 0;
 	leak->wdlist_line = 0;
+	mp->file = file;
+	mp->line = line;
+	mp->func = fn;
+	mp->state = INIT;
 #endif
 }
 
+#ifdef SPL_DEBUG_MUTEX
+void spl_mutex_destroy(kmutex_t *mp, const char * const file, const int line,
+    const char * const func)
+#else
 void spl_mutex_destroy(kmutex_t *mp)
+#endif
 {
 	ASSERT3P(mp, !=, NULL);
     if (!mp) return;
@@ -268,12 +275,27 @@ void spl_mutex_destroy(kmutex_t *mp)
 	if (mp->m_owner != 0) panic("SPL: releasing held mutex");
 #else
 	mp->m_destroying = B_TRUE;
+	// should possibly copy the mp to the stack to prevent
+	// its innards from changing underneath us.
 	const kmutex_t *c_mp = mp;
 	const thread_t *c_mo = mp->m_owner;
-        if (c_mp->m_owner != NULL) {
-		ASSERT3P(c_mo, ==, c_mp->m_owner);
-		printf("SPL: %s releasing held mutex, searching", __func__);
+        if (c_mp->m_owner != NULL
+		|| c_mp->state == ENTER
+		|| c_mp->state == TRYENTER) {
+		printf("SPL: %s:%d releasing held mutex,"
+		    " c_mp->file %s c_mp->line %d"
+		    " c_mp->func %s c_mp->state 0x%x"
+		    " my caller: file %s line %d func %s"
+		    " searching\n", __func__, __LINE__,
+		    c_mp->file,
+		    c_mp->line,
+		    c_mp->func,
+		    c_mp->state,
+		    file, line, func);
+		extern void IODelay(unsigned microseconds);
+		IODelay(500000);
 		lck_mtx_lock((lck_mtx_t *)&mutex_list_mutex.m_lock);
+		ASSERT3P(c_mo, ==, c_mp->m_owner);
 		printf("SPL: %s scanning %llu locks\n", __func__, zfs_active_mutex);
 		ASSERT3P(c_mo, ==, c_mp->m_owner);
 		boolean_t went_null = B_FALSE;
@@ -284,11 +306,11 @@ void spl_mutex_destroy(kmutex_t *mp)
 		     l = list_next(&mutex_list, l)) {
 			step++;
 			if (l->mp == c_mp) {
-				printf("SPL: %s releasing held mutex, holder '%s':%llu",
+				printf("SPL: %s releasing held mutex, holder '%s':%llu\n",
 				    __func__, l->wdlist_file, l->wdlist_line);
 				lck_mtx_unlock((lck_mtx_t *)&mutex_list_mutex.m_lock);
 				extern void IODelay(unsigned microseconds);
-				delay(1000000);
+				IODelay(500000);
 				panic("SPL: releasing held mutex, holder '%s':%llu",
 				    l->wdlist_file, l->wdlist_line);
 			}
@@ -314,11 +336,20 @@ void spl_mutex_destroy(kmutex_t *mp)
 		}
 		lck_mtx_unlock((lck_mtx_t *)&mutex_list_mutex.m_lock); // avoid double panic?
 		if (went_null == B_TRUE) {
+			extern void IODelay(unsigned microseconds);
+			IODelay(500000);
 			panic("SPL: (race) m_owner went NULL during scan, no caller found\n");
 		} else {
+			extern void IODelay(unsigned microseconds);
+			IODelay(500000);
 			panic("SPL: releasing held mutex, could not find holder");
 		}
 	}
+
+	mp->file = __FILE__;
+	mp->line = __LINE__;
+	mp->func = __func__;
+	mp->state = DESTROY;
 #endif
 
     //lck_mtx_free(mp->m_lock, zfs_mutex_group);
@@ -341,7 +372,8 @@ void spl_mutex_destroy(kmutex_t *mp)
 
 
 #ifdef SPL_DEBUG_MUTEX
-void spl_mutex_enter(kmutex_t *mp, char *file, int line)
+void spl_mutex_enter(kmutex_t *mp, const char * const file, const int line,
+    const char * const func)
 #else
 void spl_mutex_enter(kmutex_t *mp)
 #endif
@@ -369,11 +401,19 @@ void spl_mutex_enter(kmutex_t *mp)
 		strlcpy(leak->wdlist_file, file, sizeof(leak->wdlist_file));
 		leak->wdlist_line = line;
 	}
+	mp->file = file;
+	mp->line = line;
+	mp->func = func;
+	mp->state = ENTER;
 #endif
-
 }
 
+#ifdef SPL_DEBUG_MUTEX
+void spl_mutex_exit(kmutex_t *mp, const char * const file, const int line,
+    const char * const func)
+#else
 void spl_mutex_exit(kmutex_t *mp)
+#endif
 {
 
 #ifdef SPL_DEBUG_MUTEX
@@ -387,6 +427,17 @@ void spl_mutex_exit(kmutex_t *mp)
 #endif
 
 #ifdef SPL_DEBUG_MUTEX
+	if (mp->state != ENTER || mp->state != TRYENTER || !MUTEX_HELD(mp)) {
+		printf("SPL: %s:%d: ANOMALY: mutex state 0x%x (held? %d)"
+		    " my caller: file %s line %d func %s"
+		    " mutex: mfile %s mline %d mfunc %s\n",
+		    __func__, __LINE__,
+		    mp->state, MUTEX_HELD(mp),
+		    file, line, func,
+		    mp->file, mp->line, mp->func);
+		extern void IODelay(unsigned microseconds);
+		IODelay(100);
+	}
 	if (mp->leak) {
 		struct leak *leak = (struct leak *)mp->leak;
 		uint64_t locktime = leak->wdlist_locktime;
@@ -401,13 +452,21 @@ void spl_mutex_exit(kmutex_t *mp)
 		leak->wdlist_file[0] = 0;
 		leak->wdlist_line = 0;
 	}
+	mp->file = file;
+	mp->line = line;
+	mp->func = func;
+	mp->state = EXIT;
 #endif
     mp->m_owner = NULL;
     lck_mtx_unlock((lck_mtx_t *)&mp->m_lock);
 }
 
-
+#ifdef SPL_DEBUG_MUTEX
+int spl_mutex_tryenter(kmutex_t *mp, const char * const file, const int line,
+    const char * const func)
+#else
 int spl_mutex_tryenter(kmutex_t *mp)
+#endif
 {
     int held;
 
@@ -421,7 +480,6 @@ int spl_mutex_tryenter(kmutex_t *mp)
     held = lck_mtx_try_lock((lck_mtx_t *)&mp->m_lock);
     if (held) {
         mp->m_owner = current_thread();
-
 #ifdef SPL_DEBUG_MUTEX
 	if (mp->leak) {
 		struct leak *leak = (struct leak *)mp->leak;
@@ -429,10 +487,13 @@ int spl_mutex_tryenter(kmutex_t *mp)
 		strlcpy(leak->wdlist_file, "tryenter", sizeof(leak->wdlist_file));
 		leak->wdlist_line = 123;
 	}
+	mp->file = file;
+	mp->line = line;
+	mp->func = func;
+	mp->state = TRYENTER;
 #endif
-
-	}
-	return (held);
+    }
+    return (held);
 }
 
 int spl_mutex_owned(kmutex_t *mp)

@@ -45,16 +45,29 @@ typedef struct {
  * aligned.
  */
 
+#ifdef SPL_DEBUG_MUTEX
+typedef enum kmutex_state {
+	INIT,
+	ENTER,
+	TRYENTER,
+	EXIT,
+	DESTROY,
+} kmutex_state_t;
+#endif
+
 typedef struct kmutex {
     void           *m_owner;
 	mutex_t m_lock;
 #ifdef SPL_DEBUG_MUTEX
 	void *leak;
 	_Atomic boolean_t m_destroying;
+	const char *func;
+	const char *file;
+	int line;
+	_Atomic kmutex_state_t state;
 #endif
 
 } kmutex_t;
-
 
 #define MUTEX_HELD(x)           (mutex_owned(x))
 #define MUTEX_NOT_HELD(x)       (!mutex_owned(x))
@@ -76,22 +89,28 @@ void spl_mutex_init(kmutex_t *mp, char *name, kmutex_type_t type, void *ibc);
 #endif
 
 #ifdef SPL_DEBUG_MUTEX
-#define mutex_enter(X) spl_mutex_enter((X), __FILE__, __LINE__)
-void spl_mutex_enter(kmutex_t *mp, char *file, int line);
+#define mutex_enter(X) spl_mutex_enter((X), __FILE__, __LINE__, __func__)
+void spl_mutex_enter(kmutex_t *mp, const char * const file, const int line,  const char * const func);
+#define mutex_tryenter(X) spl_mutex_tryenter((X), __FILE__, __LINE__, __func__)
+int spl_mutex_tryenter(kmutex_t *mp, char const *file, const int line, const char * const func);
+#define mutex_exit(X) spl_mutex_exit((X), __FILE__, __LINE__, __func__)
+void spl_mutex_exit(kmutex_t *mp, const char * const file, const int line, const char * const func);
+#define mutex_destroy(X) spl_mutex_destroy((X), __FILE__, __LINE__, __func__)
+void spl_mutex_destroy(kmutex_t *mp, const char * const file, const int line, const char * const func);
 #else
 #define mutex_enter spl_mutex_enter
-void spl_mutex_enter(kmutex_t *mp);
-#endif
-
-#define	mutex_destroy spl_mutex_destroy
 #define	mutex_exit spl_mutex_exit
 #define	mutex_tryenter spl_mutex_tryenter
+#define	mutex_destroy spl_mutex_destroy
+void spl_mutex_enter(kmutex_t *mp);
+void spl_mutex_exit(kmutex_t *mp);
+int  spl_mutex_tryenter(kmutex_t *mp);
+void spl_mutex_exit(kmutex_t *mp);
+#endif
+
 #define	mutex_owned spl_mutex_owned
 #define	mutex_owner spl_mutex_owner
 
-void spl_mutex_destroy(kmutex_t *mp);
-void spl_mutex_exit(kmutex_t *mp);
-int  spl_mutex_tryenter(kmutex_t *mp);
 int  spl_mutex_owned(kmutex_t *mp);
 struct kthread *spl_mutex_owner(kmutex_t *mp);
 
