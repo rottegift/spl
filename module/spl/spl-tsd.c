@@ -59,7 +59,7 @@
 #include <spl-debug.h>
 
 /* Initial size of array, and realloc growth size */
-#define TSD_ALLOC_SIZE 5
+#define TSD_ALLOC_SIZE 8
 
 /* array of dtors, allocated in init */
 static dtor_func_t *tsd_dtor_array = NULL;
