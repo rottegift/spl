@@ -632,3 +632,11 @@ spl_lf_advlock(struct vnop_advlock_args *ap)
 {
 	return (lf_advlock(ap));
 }
+
+extern upl_size_t upl_get_size(upl_t);
+
+upl_size_t
+spl_upl_get_size(upl_t upl)
+{
+	return(upl_get_size(upl));
+}

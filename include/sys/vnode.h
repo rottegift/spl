@@ -314,4 +314,6 @@ extern __attribute__((pure)) boolean_t spl_ubc_is_mapped_writable(const struct v
 
 extern int spl_lf_advlock(struct vnop_advlock_args *ap);
 
+extern upl_size_t spl_upl_get_size(upl_t upl);
+
 #endif /* SPL_VNODE_H */
