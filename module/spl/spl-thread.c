@@ -67,7 +67,7 @@ spl_thread_create(
 
 		/* Improve the priority when asked to do so */
 		if (pri > minclsyspri) {
-			thread_precedence_policy_data_t policy;
+			thread_precedence_policy_data_t policy = { 0 };
 
 			/* kernel priorities (osfmk/kern/sched.h)
 			 *
@@ -91,7 +91,7 @@ spl_thread_create(
 			 *
 			 * So asking for pri (85) we do 85-81 = 4.
 			 *
-q			 * IllumOS priorities are:
+			 * IllumOS priorities are:
 			 * #define MAXCLSYSPRI     99
 			 * #define MINCLSYSPRI     60
 			 */

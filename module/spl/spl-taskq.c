@@ -504,6 +504,10 @@
 #include <sys/sdt.h>
 #include <sys/sysdc.h>
 #include <sys/note.h>
+#ifdef __APPLE__
+#include <mach/thread_act.h>
+#include <mach/thread_policy.h>
+#endif
 
 static kmem_cache_t *taskq_ent_cache, *taskq_cache;
 
@@ -1633,10 +1637,35 @@ taskq_thread(void *arg)
 	}
 
 #else
+	if (tq->tq_flags & TASKQ_DC_BATCH) {
+		thread_extended_policy_data_t policy = { .timeshare = TRUE };
+
+		kern_return_t kret = thread_policy_set(current_thread(),
+		    THREAD_EXTENDED_POLICY,
+		    (thread_policy_t)&policy,
+		    THREAD_EXTENDED_POLICY_COUNT);
+		if (kret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
+			    __func__, __LINE__, kret);
+		}
+
+		const int THREAD_QOS_LEGACY = 4; // from osfmk/mach/thread_policy.h
+		thread_throughput_qos_policy_data_t qosp = { 0 };
+		qosp.thread_throughput_qos_tier = THREAD_QOS_LEGACY;
+		kern_return_t qoskret = thread_policy_set(current_thread(),
+		    THREAD_THROUGHPUT_QOS_POLICY,
+		    (thread_policy_t)&policy,
+		    THREAD_THROUGHPUT_QOS_POLICY_COUNT);
+		if (qoskret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d\n",
+			    __func__, __LINE__, qoskret);
+		}
+
+	}
 
 	CALLB_CPR_INIT(&cprinfo, &tq->tq_lock, callb_generic_cpr,
 				   tq->tq_name);
-#endif
+#endif // APPLE
 
 	mutex_enter(&tq->tq_lock);
 	thread_id = ++tq->tq_nthreads;
