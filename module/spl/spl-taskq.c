@@ -1563,7 +1563,7 @@ taskq_thread_create(taskq_t *tq)
 	if (tq->tq_flags & TASKQ_THREADS_CPU_PCT) {
 #ifdef __APPLE__
 		mutex_enter(&tq->tq_lock);
-		taskq_update_nthreads(tq, max_ncpus);
+		taskq_update_nthreads(tq, physical_ncpus);
 		mutex_exit(&tq->tq_lock);
 #else
 		taskq_cpupct_install(tq, t->t_cpupart);

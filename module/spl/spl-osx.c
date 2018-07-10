@@ -48,6 +48,7 @@ struct utsname utsname = { { 0 } };
 //extern struct machine_info      machine_info;
 
 unsigned int max_ncpus = 0;
+unsigned int physical_ncpus = 0;
 uint64_t  total_memory = 0;
 uint64_t  real_total_memory = 0;
 
@@ -416,7 +417,13 @@ kern_return_t spl_start (kmod_info_t * ki, void * d)
     sysctlbyname("hw.logicalcpu_max", &max_ncpus, &len, NULL, 0);
 	if (!max_ncpus) max_ncpus = 1;
 
+	len = sizeof(physical_ncpus);
+	sysctlbyname("hw.physicalcpu", &physical_ncpus, &len, NULL, 0);
+	if (!physical_ncpus) physical_ncpus = 1;
+	ASSERT3S(max_ncpus, >=, physical_ncpus);
+
 	len = sizeof(total_memory);
+
     sysctlbyname("hw.memsize", &total_memory, &len, NULL, 0);
 
 	/*
