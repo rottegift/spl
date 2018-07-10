@@ -1548,6 +1548,10 @@ taskq_thread_create(taskq_t *tq)
 		ASSERT3P(tq->tq_proc, !=, &p0);
 		t = lwp_kernel_create(tq->tq_proc, taskq_thread, tq, TS_RUN,
 		    tq->tq_pri);
+#else
+		ASSERT3P(tq->tq_proc, !=, &p0);
+		t = thread_create(NULL, 0, taskq_thread, tq, 0, tq->tq_proc,
+		    TS_RUN, tq->tq_pri);
 #endif
 	} else {
 		t = thread_create(NULL, 0, taskq_thread, tq, 0, tq->tq_proc,
