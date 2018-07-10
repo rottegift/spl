@@ -1543,7 +1543,6 @@ taskq_thread_create(taskq_t *tq)
 	 */
 	if ((tq->tq_flags & TASKQ_DUTY_CYCLE) != 0) {
 		/* Enforced in taskq_create_common */
-		printf("SPL: taskq_thread_create(TASKQ_DUTY_CYCLE) seen\n");
 #ifndef __APPLE__
 		ASSERT3P(tq->tq_proc, !=, &p0);
 		t = lwp_kernel_create(tq->tq_proc, taskq_thread, tq, TS_RUN,
