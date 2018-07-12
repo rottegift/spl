@@ -415,7 +415,7 @@ kern_return_t spl_start (kmod_info_t * ki, void * d)
 
 	printf("SPL: start\n");
 
-	sysctlbyname("hw.physicalcpu_max", &max_ncpus, &len, NULL, 0);
+	sysctlbyname("hw.logicalcpu_max", &max_ncpus, &len, NULL, 0);
 	ASSERT3S(max_ncpus, >=, 1);
 	if (!max_ncpus) max_ncpus = 1;
 
