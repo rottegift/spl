@@ -1652,9 +1652,13 @@ taskq_thread(void *arg)
 			    __func__, __LINE__, kret);
 		}
 
-		const int THREAD_QOS_LEGACY = 4; // from osfmk/mach/thread_policy.h
+		/*
+		 * 0: UNSPECIFIED 1: MAINTENANCE, 2: BACKGROUND, 3: UTILITY,
+		 * 4: LEGACY, 5: USER_INITIATED, 6: USER_INTERACTIVE
+		 */
+		const int THREAD_QOS_LEVEL = 5; // from osfmk/mach/thread_policy.h
 		thread_throughput_qos_policy_data_t qosp = { 0 };
-		qosp.thread_throughput_qos_tier = THREAD_QOS_LEGACY;
+		qosp.thread_throughput_qos_tier = THREAD_QOS_LEVEL;
 		kern_return_t qoskret = thread_policy_set(current_thread(),
 		    THREAD_THROUGHPUT_QOS_POLICY,
 		    (thread_policy_t)&policy,
