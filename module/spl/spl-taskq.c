@@ -1661,8 +1661,8 @@ taskq_thread(void *arg)
 		qosp.thread_throughput_qos_tier = THREAD_QOS_LEVEL;
 		kern_return_t qoskret = thread_policy_set(current_thread(),
 		    THREAD_THROUGHPUT_QOS_POLICY,
-		    (thread_policy_t)&policy,
-		    2);
+		    (thread_policy_t)&qosp,
+		    THREAD_THROUGHPUT_QOS_POLICY_COUNT);
 		if (qoskret != KERN_SUCCESS) {
 			printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d "
 			    " (THREAD_{THROUGHPUT,LATENCY}_QOS_POLICY_COUNT = {%d, %d}\n",
