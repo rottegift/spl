@@ -1662,10 +1662,12 @@ taskq_thread(void *arg)
 		kern_return_t qoskret = thread_policy_set(current_thread(),
 		    THREAD_THROUGHPUT_QOS_POLICY,
 		    (thread_policy_t)&policy,
-		    THREAD_LATENCY_QOS_POLICY_COUNT);
+		    2);
 		if (qoskret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d\n",
-			    __func__, __LINE__, qoskret);
+			printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d "
+			    " (THREAD_{THROUGHPUT,LATENCY}_QOS_POLICY_COUNT = {%d, %d}\n",
+			    __func__, __LINE__, qoskret,
+			    THREAD_THROUGHPUT_QOS_POLICY_COUNT, THREAD_LATENCY_QOS_POLICY_COUNT);
 		} else {
 			printf("SPL: %s:%d SUCCESS setting thread throughput policy\n", __func__, __LINE__);
 		}
