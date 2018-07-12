@@ -85,6 +85,7 @@ extern int cpu_number(void);
 
 extern unsigned int max_ncpus;
 extern unsigned int physical_ncpus;
+extern unsigned int logical_ncpus;
 
 #ifndef RLIM64_INFINITY
 #define RLIM64_INFINITY			(~0ULL)

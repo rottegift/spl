@@ -49,6 +49,7 @@ struct utsname utsname = { { 0 } };
 
 unsigned int max_ncpus = 0;
 unsigned int physical_ncpus = 0;
+unsigned int logical_ncpus = 0;
 uint64_t  total_memory = 0;
 uint64_t  real_total_memory = 0;
 
@@ -414,7 +415,7 @@ kern_return_t spl_start (kmod_info_t * ki, void * d)
 
 	printf("SPL: start\n");
 
-	sysctlbyname("hw.physicalcpu", &max_ncpus, &len, NULL, 0);
+	sysctlbyname("hw.physicalcpu_max", &max_ncpus, &len, NULL, 0);
 	ASSERT3S(max_ncpus, >=, 1);
 	if (!max_ncpus) max_ncpus = 1;
 
@@ -423,6 +424,13 @@ kern_return_t spl_start (kmod_info_t * ki, void * d)
 	ASSERT3S(max_ncpus, >=, 1);
 	if (!physical_ncpus) physical_ncpus = 1;
 	ASSERT3S(max_ncpus, >=, physical_ncpus);
+
+	len = sizeof(logical_ncpus);
+	sysctlbyname("hw.logicalcpu", &physical_ncpus, &len, NULL, 0);
+	ASSERT3S(max_ncpus, >=, 1);
+	if (!logical_ncpus) logical_ncpus = 1;
+	ASSERT3S(max_ncpus, >=, logical_ncpus);
+	ASSERT3S(physical_ncpus, <=, logical_ncpus);
 
 	len = sizeof(total_memory);
 

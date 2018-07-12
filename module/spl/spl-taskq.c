@@ -523,7 +523,7 @@ taskq_t	*system_taskq = NULL;
  * Maximum number of entries in global system taskq is
  *	system_taskq_size * max_ncpus
  */
-#define	SYSTEM_TASKQ_SIZE 64
+#define	SYSTEM_TASKQ_SIZE 128;
 int system_taskq_size = SYSTEM_TASKQ_SIZE;
 
 /*
@@ -1006,7 +1006,7 @@ void
 system_taskq_init(void)
 {
 	system_taskq = taskq_create_common("system_taskq", 0,
-	    system_taskq_size * max_ncpus, minclsyspri, 4, 512, &p0, 0,
+	    system_taskq_size * logical_ncpus, minclsyspri, 4, 512, &p0, 0,
 	    TASKQ_DYNAMIC | TASKQ_PREPOPULATE);
 }
 
@@ -1570,7 +1570,7 @@ taskq_thread_create(taskq_t *tq)
 	if (tq->tq_flags & TASKQ_THREADS_CPU_PCT) {
 #ifdef __APPLE__
 		mutex_enter(&tq->tq_lock);
-		taskq_update_nthreads(tq, physical_ncpus);
+		taskq_update_nthreads(tq, max_ncpus);
 		mutex_exit(&tq->tq_lock);
 #else
 		taskq_cpupct_install(tq, t->t_cpupart);
