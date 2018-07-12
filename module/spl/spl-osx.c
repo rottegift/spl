@@ -414,17 +414,20 @@ kern_return_t spl_start (kmod_info_t * ki, void * d)
 
 	printf("SPL: start\n");
 
-    sysctlbyname("hw.logicalcpu_max", &max_ncpus, &len, NULL, 0);
+	sysctlbyname("hw.physicalcpu", &max_ncpus, &len, NULL, 0);
+	ASSERT3S(max_ncpus, >=, 1);
 	if (!max_ncpus) max_ncpus = 1;
 
 	len = sizeof(physical_ncpus);
 	sysctlbyname("hw.physicalcpu", &physical_ncpus, &len, NULL, 0);
+	ASSERT3S(max_ncpus, >=, 1);
 	if (!physical_ncpus) physical_ncpus = 1;
 	ASSERT3S(max_ncpus, >=, physical_ncpus);
 
 	len = sizeof(total_memory);
 
     sysctlbyname("hw.memsize", &total_memory, &len, NULL, 0);
+    VERIFY3U(total_memory, >=, (2ULL*1024ULL*1024ULL*1024ULL));
 
 	/*
 	 * Setting the total memory to physmem * 80% here, since kmem is
