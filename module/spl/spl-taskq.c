@@ -1652,6 +1652,7 @@ taskq_thread(void *arg)
 			    __func__, __LINE__, kret);
 		}
 
+#if 0
 		/*
 		 * 0: UNSPECIFIED 1: MAINTENANCE, 2: BACKGROUND, 3: UTILITY,
 		 * 4: LEGACY, 5: USER_INITIATED, 6: USER_INTERACTIVE
@@ -1670,6 +1671,49 @@ taskq_thread(void *arg)
 			    THREAD_THROUGHPUT_QOS_POLICY_COUNT, THREAD_LATENCY_QOS_POLICY_COUNT);
 		} else {
 			printf("SPL: %s:%d SUCCESS setting thread throughput policy\n", __func__, __LINE__);
+		}
+#endif
+
+#define THREAD_QOS_POLICY               9
+
+		struct thread_qos_policy {
+			integer_t qos_tier;
+			integer_t tier_importance;
+		};
+
+		typedef struct thread_qos_policy       thread_qos_policy_data_t;
+
+#define THREAD_QOS_POLICY_COUNT    ((mach_msg_type_number_t)		\
+        (sizeof (thread_qos_policy_data_t) / sizeof (integer_t)))
+
+#define THREAD_QOS_USER_INITIATED       5
+#define BASEPRI_PREEMPT                93
+
+		thread_qos_policy_data_t pol = { 0, 0 };
+		pol.tier_importance = 0;
+		pol.qos_tier = THREAD_QOS_USER_INITIATED;
+		kern_return_t polret = thread_policy_set(current_thread(),
+		    THREAD_QOS_POLICY,
+		    (thread_policy_t)&pol,
+		    THREAD_QOS_POLICY_COUNT);
+		if (polret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set thread policy retval %d\n",
+			    __func__, __LINE__, polret);
+		} else {
+			printf("SPL: %s:%d SUCCESS setting thread policy\n", __func__, __LINE__);
+		}
+
+		thread_precedence_policy_data_t prec = { 0 };
+		prec.importance = BASEPRI_PREEMPT - 1;
+		kern_return_t precret = thread_policy_set(current_thread(),
+		    THREAD_PRECEDENCE_POLICY,
+		    (thread_policy_t)&prec,
+		    THREAD_PRECEDENCE_POLICY_COUNT);
+		if (precret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d\n",
+			    __func__, __LINE__, precret);
+		} else {
+			printf("SPL: %s:%d: SUCCESS setting thread precedence\n", __func__, __LINE__);
 		}
 
 	}
