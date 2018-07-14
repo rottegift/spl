@@ -1666,8 +1666,11 @@ taskq_thread(void *arg)
 		 * so we'll be gentle and make it 10,
 		 * which should give us a thread staring at 10
 		 * and decaying with CPU use to 81
+		 *
+		 * actually, first let's just try at 82 and
+		 * have it climb or sink as appropriate
 		 */
-		prec.importance = 10;
+		prec.importance = 1;
 		kern_return_t precret = thread_policy_set(current_thread(),
 		    THREAD_PRECEDENCE_POLICY,
 		    (thread_policy_t)&prec,
