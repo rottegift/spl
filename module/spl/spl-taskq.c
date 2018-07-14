@@ -1642,7 +1642,7 @@ taskq_thread(void *arg)
 #else
 
 	/* Deal with Duty Cycle BATCH mode */
-	if (tq->tq_flags & TASKQ_DC_BATCH) {
+	if (tq->tq_flags & TASKQ_DUTY_CYCLE) {
 		/*
 		 * Approximate Illumos's SYSDC
 		 * (/usr/src/uts/common/disp/sysdc.c)
