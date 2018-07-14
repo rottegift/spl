@@ -1640,7 +1640,9 @@ taskq_thread(void *arg)
 	}
 
 #else
-
+#ifndef dprintf
+#define dprintf(...)
+#endif
 	/* Deal with Duty Cycle BATCH mode */
 	if (tq->tq_flags & TASKQ_DUTY_CYCLE) {
 		/*
@@ -1664,13 +1666,13 @@ taskq_thread(void *arg)
 		 * BASEPRI_PREEMPT - 1 == 93 - 1 == 92;
 		 * 92 - BASEPRI_KERNEL == 92 - 81 = 11;
 		 * so we'll be gentle and make it 10,
-		 * which should give us a thread staring at 10
-		 * and decaying with CPU use to 81
-		 *
-		 * actually, first let's just try at 82 and
-		 * have it climb or sink as appropriate
+		 * which should give us a thread with base 91
+		 * and decaying with CPU use to 81 or lower;
+		 * we'll also slightly penalize BATCH
 		 */
-		prec.importance = 1;
+		prec.importance = 10;
+		if (tq->tq_flags & TASKQ_DC_BATCH)
+			prec.importance--;
 		kern_return_t precret = thread_policy_set(current_thread(),
 		    THREAD_PRECEDENCE_POLICY,
 		    (thread_policy_t)&prec,
@@ -1679,7 +1681,7 @@ taskq_thread(void *arg)
 			printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d\n",
 			    __func__, __LINE__, precret);
 		} else {
-			printf("SPL: %s:%d: SUCCESS setting thread precedence %x, %s\n", __func__, __LINE__,
+			dprintf("SPL: %s:%d: SUCCESS setting thread precedence %x, %s\n", __func__, __LINE__,
 			    prec.importance, tq->tq_name);
 		}
 
@@ -1687,9 +1689,12 @@ taskq_thread(void *arg)
 		 * TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
 		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
 		 */
-		const thread_throughput_qos_t desired_throughput = THROUGHPUT_QOS_TIER_1;
+		const thread_throughput_qos_t sysdc_throughput = THROUGHPUT_QOS_TIER_1;
+		const thread_throughput_qos_t batch_throughput = THROUGHPUT_QOS_TIER_2;
 		thread_throughput_qos_policy_data_t qosp = { 0 };
-		qosp.thread_throughput_qos_tier = desired_throughput;
+		qosp.thread_throughput_qos_tier = sysdc_throughput;
+		if (tq->tq_flags & TASKQ_DC_BATCH)
+			qosp.thread_throughput_qos_tier = batch_throughput;
 		kern_return_t qoskret = thread_policy_set(current_thread(),
 		    THREAD_THROUGHPUT_QOS_POLICY,
 		    (thread_policy_t)&qosp,
@@ -1697,10 +1702,10 @@ taskq_thread(void *arg)
 		if (qoskret != KERN_SUCCESS) {
 			printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d "
 			    " (THREAD_THROUGHPUT_QOS_POLICY %x), %s",
-			    __func__, __LINE__, qoskret, desired_throughput, tq->tq_name);
+			    __func__, __LINE__, qoskret, qosp.thread_throughput_qos_tier, tq->tq_name);
 		} else {
-			printf("SPL: %s:%d SUCCESS setting thread throughput policy to %x, %s\n",
-			    __func__, __LINE__, desired_throughput, tq->tq_name);
+			dprintf("SPL: %s:%d SUCCESS setting thread throughput policy to %x, %s\n",
+			    __func__, __LINE__, qosp.thread_througput_qos_tier, tq->tq_name);
 		}
 
 		thread_extended_policy_data_t policy = { .timeshare = TRUE };
@@ -1712,7 +1717,7 @@ taskq_thread(void *arg)
 			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d, %s\n",
 			    __func__, __LINE__, kret, tq->tq_name);
 		} else {
-			printf("SPL: %s:%d: SUCCESS setting timeshare policy, %s\n", __func__, __LINE__,
+			dprintf("SPL: %s:%d: SUCCESS setting timeshare policy, %s\n", __func__, __LINE__,
 			    tq->tq_name);
 		}
 	}
