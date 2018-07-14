@@ -1641,30 +1641,36 @@ taskq_thread(void *arg)
 
 #else
 
-#define BASEPRI_PREEMPT 93 /* from osfmk/kern/sched.h */
-	thread_precedence_policy_data_t prec = { 0 };
-	prec.importance = BASEPRI_PREEMPT - 1;
-	kern_return_t precret = thread_policy_set(current_thread(),
-	    THREAD_PRECEDENCE_POLICY,
-	    (thread_policy_t)&prec,
-	    THREAD_PRECEDENCE_POLICY_COUNT);
-	if (precret != KERN_SUCCESS) {
-		printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d\n",
-		    __func__, __LINE__, precret);
-	} else {
-		printf("SPL: %s:%d: SUCCESS setting thread precedence\n", __func__, __LINE__);
-	}
-
+	/* Deal with Duty Cycle BATCH mode */
 	if (tq->tq_flags & TASKQ_DC_BATCH) {
-		thread_extended_policy_data_t policy = { .timeshare = TRUE };
-
-		kern_return_t kret = thread_policy_set(current_thread(),
-		    THREAD_EXTENDED_POLICY,
-		    (thread_policy_t)&policy,
-		    THREAD_EXTENDED_POLICY_COUNT);
-		if (kret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
-			    __func__, __LINE__, kret);
+		/*
+		 * Approximate Illumos's SYSDC
+		 * (/usr/src/uts/common/disp/sysdc.c)
+		 *
+		 * SYSDC tracks cpu runtime itself, and yields to
+		 * other threads if
+		 * onproc time / (onproc time + runnable time)
+		 * exceeds the Duty Cycle threshold.
+		 *
+		 * Approximate this by [a] setting the thread precedence
+		 * to high (just shy of urgent), [b] setthing the
+		 * thread throughput policy to high (but just shy
+		 * of USER_INTERACTIVE), and [c] turning on the
+		 * TIMESHARE policy, which adjusts the thread
+		 * priority based on cpu usage.
+		 */
+#define BASEPRI_PREEMPT 93 /* from osfmk/kern/sched.h */
+		thread_precedence_policy_data_t prec = { 0 };
+		prec.importance = BASEPRI_PREEMPT - 1;
+		kern_return_t precret = thread_policy_set(current_thread(),
+		    THREAD_PRECEDENCE_POLICY,
+		    (thread_policy_t)&prec,
+		    THREAD_PRECEDENCE_POLICY_COUNT);
+		if (precret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d\n",
+			    __func__, __LINE__, precret);
+		} else {
+			printf("SPL: %s:%d: SUCCESS setting thread precedence\n", __func__, __LINE__);
 		}
 
 		/*
@@ -1685,6 +1691,16 @@ taskq_thread(void *arg)
 		} else {
 			printf("SPL: %s:%d SUCCESS setting thread throughput policy to %x\n",
 			    __func__, __LINE__, desired_throughput);
+		}
+
+		thread_extended_policy_data_t policy = { .timeshare = TRUE };
+		kern_return_t kret = thread_policy_set(current_thread(),
+		    THREAD_EXTENDED_POLICY,
+		    (thread_policy_t)&policy,
+		    THREAD_EXTENDED_POLICY_COUNT);
+		if (kret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
+			    __func__, __LINE__, kret);
 		}
 	}
 
