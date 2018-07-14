@@ -1661,7 +1661,11 @@ taskq_thread(void *arg)
 		 */
 #define BASEPRI_PREEMPT 93 /* from osfmk/kern/sched.h */
 		thread_precedence_policy_data_t prec = { 0 };
-		prec.importance = BASEPRI_PREEMPT - 1;
+		prec.importance = tq->tq_pri - minclsyspri;
+		ASSERT3S(prec.importance, >=, 0);
+		ASSERT3S(prec.importance, <=, 14); // 81+14==95==MAXPRI_KERNEL
+		if (prec.importance < 0) prec.importance = 0;
+		if (prec.importance > 14) prec.importance = 14;
 		kern_return_t precret = thread_policy_set(current_thread(),
 		    THREAD_PRECEDENCE_POLICY,
 		    (thread_policy_t)&prec,
