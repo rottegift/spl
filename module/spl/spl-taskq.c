@@ -1640,6 +1640,21 @@ taskq_thread(void *arg)
 	}
 
 #else
+
+#define BASEPRI_PREEMPT 93 /* from osfmk/kern/sched.h */
+	thread_precedence_policy_data_t prec = { 0 };
+	prec.importance = BASEPRI_PREEMPT - 1;
+	kern_return_t precret = thread_policy_set(current_thread(),
+	    THREAD_PRECEDENCE_POLICY,
+	    (thread_policy_t)&prec,
+	    THREAD_PRECEDENCE_POLICY_COUNT);
+	if (precret != KERN_SUCCESS) {
+		printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d\n",
+		    __func__, __LINE__, precret);
+	} else {
+		printf("SPL: %s:%d: SUCCESS setting thread precedence\n", __func__, __LINE__);
+	}
+
 	if (tq->tq_flags & TASKQ_DC_BATCH) {
 		thread_extended_policy_data_t policy = { .timeshare = TRUE };
 
@@ -1652,70 +1667,25 @@ taskq_thread(void *arg)
 			    __func__, __LINE__, kret);
 		}
 
-#if 0
 		/*
-		 * 0: UNSPECIFIED 1: MAINTENANCE, 2: BACKGROUND, 3: UTILITY,
-		 * 4: LEGACY, 5: USER_INITIATED, 6: USER_INTERACTIVE
+		 * TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
+		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
 		 */
-		const int THREAD_QOS_LEVEL = 5; // from osfmk/mach/thread_policy.h
+		const thread_throughput_qos_t desired_throughput = THROUGHPUT_QOS_TIER_1;
 		thread_throughput_qos_policy_data_t qosp = { 0 };
-		qosp.thread_throughput_qos_tier = THREAD_QOS_LEVEL;
+		qosp.thread_throughput_qos_tier = desired_throughput;
 		kern_return_t qoskret = thread_policy_set(current_thread(),
 		    THREAD_THROUGHPUT_QOS_POLICY,
 		    (thread_policy_t)&qosp,
 		    THREAD_THROUGHPUT_QOS_POLICY_COUNT);
 		if (qoskret != KERN_SUCCESS) {
 			printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d "
-			    " (THREAD_{THROUGHPUT,LATENCY}_QOS_POLICY_COUNT = {%d, %d}\n",
-			    __func__, __LINE__, qoskret,
-			    THREAD_THROUGHPUT_QOS_POLICY_COUNT, THREAD_LATENCY_QOS_POLICY_COUNT);
+			    " (THREAD_THROUGHPUT_QOS_POLICY %x)",
+			    __func__, __LINE__, qoskret, desired_throughput);
 		} else {
-			printf("SPL: %s:%d SUCCESS setting thread throughput policy\n", __func__, __LINE__);
+			printf("SPL: %s:%d SUCCESS setting thread throughput policy to %x\n",
+			    __func__, __LINE__, desired_throughput);
 		}
-#endif
-
-#define THREAD_QOS_POLICY               9
-
-		struct thread_qos_policy {
-			integer_t qos_tier;
-			integer_t tier_importance;
-		};
-
-		typedef struct thread_qos_policy       thread_qos_policy_data_t;
-
-#define THREAD_QOS_POLICY_COUNT    ((mach_msg_type_number_t)		\
-        (sizeof (thread_qos_policy_data_t) / sizeof (integer_t)))
-
-#define THREAD_QOS_USER_INITIATED       5
-#define BASEPRI_PREEMPT                93
-
-		thread_qos_policy_data_t pol = { 0, 0 };
-		pol.tier_importance = 0;
-		pol.qos_tier = THREAD_QOS_USER_INITIATED;
-		kern_return_t polret = thread_policy_set(current_thread(),
-		    THREAD_QOS_POLICY,
-		    (thread_policy_t)&pol,
-		    THREAD_QOS_POLICY_COUNT);
-		if (polret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set thread policy retval %d\n",
-			    __func__, __LINE__, polret);
-		} else {
-			printf("SPL: %s:%d SUCCESS setting thread policy\n", __func__, __LINE__);
-		}
-
-		thread_precedence_policy_data_t prec = { 0 };
-		prec.importance = BASEPRI_PREEMPT - 1;
-		kern_return_t precret = thread_policy_set(current_thread(),
-		    THREAD_PRECEDENCE_POLICY,
-		    (thread_policy_t)&prec,
-		    THREAD_PRECEDENCE_POLICY_COUNT);
-		if (precret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d\n",
-			    __func__, __LINE__, precret);
-		} else {
-			printf("SPL: %s:%d: SUCCESS setting thread precedence\n", __func__, __LINE__);
-		}
-
 	}
 
 	CALLB_CPR_INIT(&cprinfo, &tq->tq_lock, callb_generic_cpr,
