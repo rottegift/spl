@@ -1670,7 +1670,8 @@ taskq_thread(void *arg)
 			printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d\n",
 			    __func__, __LINE__, precret);
 		} else {
-			printf("SPL: %s:%d: SUCCESS setting thread precedence\n", __func__, __LINE__);
+			printf("SPL: %s:%d: SUCCESS setting thread precedence %x, %s\n", __func__, __LINE__,
+			    prec.importance, tq->tq_name);
 		}
 
 		/*
@@ -1686,11 +1687,11 @@ taskq_thread(void *arg)
 		    THREAD_THROUGHPUT_QOS_POLICY_COUNT);
 		if (qoskret != KERN_SUCCESS) {
 			printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d "
-			    " (THREAD_THROUGHPUT_QOS_POLICY %x)",
-			    __func__, __LINE__, qoskret, desired_throughput);
+			    " (THREAD_THROUGHPUT_QOS_POLICY %x), %s",
+			    __func__, __LINE__, qoskret, desired_throughput, tq->tq_name);
 		} else {
-			printf("SPL: %s:%d SUCCESS setting thread throughput policy to %x\n",
-			    __func__, __LINE__, desired_throughput);
+			printf("SPL: %s:%d SUCCESS setting thread throughput policy to %x, %s\n",
+			    __func__, __LINE__, desired_throughput, tq->tq_name);
 		}
 
 		thread_extended_policy_data_t policy = { .timeshare = TRUE };
@@ -1699,8 +1700,11 @@ taskq_thread(void *arg)
 		    (thread_policy_t)&policy,
 		    THREAD_EXTENDED_POLICY_COUNT);
 		if (kret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
-			    __func__, __LINE__, kret);
+			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d, %s\n",
+			    __func__, __LINE__, kret, tq->tq_name);
+		} else {
+			printf("SPL: %s:%d: SUCCESS setting timeshare policy, %s\n", __func__, __LINE__,
+			    tq->tq_name);
 		}
 	}
 
@@ -2057,6 +2061,10 @@ taskq_create_sysdc(const char *name, int nthreads, int minalloc,
 #ifndef __APPLE__
 	ASSERT(proc->p_flag & SSYS);
 #endif
+	printf("SPL: %s:%d: taskq_create_sysdc(%s, nthreads: %d,"
+	    " minalloc: %d, maxalloc: %d, proc, dc: %u, flags: %x)\n",
+	    __func__, __LINE__, name, nthreads,
+	    minalloc, maxalloc, dc, flags);
 	return (taskq_create_common(name, 0, nthreads, minclsyspri, minalloc,
 	    maxalloc, proc, dc, flags | TASKQ_NOINSTANCE | TASKQ_DUTY_CYCLE));
 }
