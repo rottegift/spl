@@ -1659,13 +1659,15 @@ taskq_thread(void *arg)
 		 * TIMESHARE policy, which adjusts the thread
 		 * priority based on cpu usage.
 		 */
-#define BASEPRI_PREEMPT 93 /* from osfmk/kern/sched.h */
 		thread_precedence_policy_data_t prec = { 0 };
-		prec.importance = tq->tq_pri - minclsyspri;
-		ASSERT3S(prec.importance, >=, 0);
-		ASSERT3S(prec.importance, <=, 14); // 81+14==95==MAXPRI_KERNEL
-		if (prec.importance < 0) prec.importance = 0;
-		if (prec.importance > 14) prec.importance = 14;
+		/*
+		 * BASEPRI_PREEMPT - 1 == 93 - 1 == 92;
+		 * 92 - BASEPRI_KERNEL == 92 - 81 = 11;
+		 * so we'll be gentle and make it 10,
+		 * which should give us a thread staring at 10
+		 * and decaying with CPU use to 81
+		 */
+		prec.importance = 10;
 		kern_return_t precret = thread_policy_set(current_thread(),
 		    THREAD_PRECEDENCE_POLICY,
 		    (thread_policy_t)&prec,
