@@ -1649,7 +1649,9 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		 * and decaying with CPU use to 81 or lower;
 		 * we'll also slightly penalize BATCH
 		 */
-		prec.importance = 9;
+		prec.importance = 6;
+		if (tq->tq_DC <= 50)
+			prec.importance = 2;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
 			prec.importance = 1;
 		kern_return_t precret = thread_policy_set(current_thread(),
