@@ -1611,38 +1611,17 @@ taskq_thread_wait(taskq_t *tq, kmutex_t *mx, kcondvar_t *cv,
 }
 
 /*
- * Worker thread for processing task queue.
+ * Adjust thread policies for SYSDC and BATCH task threads
  */
-static void
-taskq_thread(void *arg)
-{
-	int thread_id;
 
-	taskq_t *tq = arg;
-	taskq_ent_t *tqe;
-	callb_cpr_t cprinfo;
-	hrtime_t start, end;
-	boolean_t freeit;
-
-#ifndef __APPLE__
-	curthread->t_taskq = tq;	/* mark ourselves for taskq_member() */
-
-	if (curproc != &p0 && (tq->tq_flags & TASKQ_DUTY_CYCLE)) {
-		sysdc_thread_enter(curthread, tq->tq_DC,
-		    (tq->tq_flags & TASKQ_DC_BATCH) ? SYSDC_THREAD_BATCH : 0);
-	}
-
-	if (tq->tq_flags & TASKQ_CPR_SAFE) {
-		CALLB_CPR_INIT_SAFE(curthread, tq->tq_name);
-	} else {
-		CALLB_CPR_INIT(&cprinfo, &tq->tq_lock, callb_generic_cpr,
-		    tq->tq_name);
-	}
-
-#else
+#if defined(__APPLE__)
 #ifndef dprintf
 #define dprintf(...)
 #endif
+
+static void
+taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
+{
 	/* Deal with Duty Cycle BATCH mode */
 	if (tq->tq_flags & TASKQ_DUTY_CYCLE) {
 		/*
@@ -1670,17 +1649,19 @@ taskq_thread(void *arg)
 		 * and decaying with CPU use to 81 or lower;
 		 * we'll also slightly penalize BATCH
 		 */
-		prec.importance = 10;
+		prec.importance = 9;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
-			prec.importance--;
+			prec.importance = 1;
 		kern_return_t precret = thread_policy_set(current_thread(),
 		    THREAD_PRECEDENCE_POLICY,
 		    (thread_policy_t)&prec,
 		    THREAD_PRECEDENCE_POLICY_COUNT);
 		if (precret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d\n",
-			    __func__, __LINE__, precret);
+			printf("SPL: %s:%d: WARNING failed to set thread precedence retval %d"
+			    " (prec now %d)\n",
+			    __func__, __LINE__, precret, prec.importance);
 		} else {
+			tq->tq_pri = minclsyspri + prec.importance;
 			dprintf("SPL: %s:%d: SUCCESS setting thread precedence %x, %s\n", __func__, __LINE__,
 			    prec.importance, tq->tq_name);
 		}
@@ -1689,8 +1670,8 @@ taskq_thread(void *arg)
 		 * TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
 		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
 		 */
-		const thread_throughput_qos_t sysdc_throughput = THROUGHPUT_QOS_TIER_1;
-		const thread_throughput_qos_t batch_throughput = THROUGHPUT_QOS_TIER_2;
+		const thread_throughput_qos_t sysdc_throughput = THROUGHPUT_QOS_TIER_2;
+		const thread_throughput_qos_t batch_throughput = THROUGHPUT_QOS_TIER_3;
 		thread_throughput_qos_policy_data_t qosp = { 0 };
 		qosp.thread_throughput_qos_tier = sysdc_throughput;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
@@ -1708,6 +1689,29 @@ taskq_thread(void *arg)
 			    __func__, __LINE__, qosp.thread_througput_qos_tier, tq->tq_name);
 		}
 
+		if (tq->tq_flags & TASKQ_DC_BATCH) {
+			const thread_latency_qos_t batch_latency = LATENCY_QOS_TIER_3;
+			thread_latency_qos_policy_data_t lqosp = { 0 };
+			lqosp.thread_latency_qos_tier = batch_latency;
+			kern_return_t lqoskret = thread_policy_set(current_thread(),
+			    THREAD_LATENCY_QOS_POLICY,
+			    (thread_policy_t)&lqosp,
+			    THREAD_LATENCY_QOS_POLICY_COUNT);
+			if (lqoskret != KERN_SUCCESS) {
+				printf("SPL: %s:%d: WARNING failed to set thread"
+				    " latency policy to %x, %s\n",
+				    __func__, __LINE__,
+				    lqosp.thread_latency_qos_tier,
+				    tq->tq_name);
+			} else {
+				printf("SPL: %s:%d: SUCCESS setting thread"
+				    " latency policy to %x, %s\n",
+				    __func__, __LINE__,
+				    lqosp.thread_latency_qos_tier,
+				    tq->tq_name);
+			}
+		}
+
 		thread_extended_policy_data_t policy = { .timeshare = TRUE };
 		kern_return_t kret = thread_policy_set(current_thread(),
 		    THREAD_EXTENDED_POLICY,
@@ -1721,10 +1725,43 @@ taskq_thread(void *arg)
 			    tq->tq_name);
 		}
 	}
+}
+#endif // __APPLE__
 
-	CALLB_CPR_INIT(&cprinfo, &tq->tq_lock, callb_generic_cpr,
-				   tq->tq_name);
-#endif // APPLE
+/*
+ * Worker thread for processing task queue.
+ */
+static void
+taskq_thread(void *arg)
+{
+	int thread_id;
+
+	taskq_t *tq = arg;
+	taskq_ent_t *tqe;
+	callb_cpr_t cprinfo;
+	hrtime_t start, end;
+	boolean_t freeit;
+
+#ifndef __APPLE__
+	curthread->t_taskq = tq;	/* mark ourselves for taskq_member() */
+
+	if (curproc != &p0 && (tq->tq_flags & TASKQ_DUTY_CYCLE)) {
+		sysdc_thread_enter(curthread, tq->tq_DC,
+		    (tq->tq_flags & TASKQ_DC_BATCH) ? SYSDC_THREAD_BATCH : 0);
+	}
+
+	if (tq->tq_flags & TASKQ_CPR_SAFE) {
+		CALLB_CPR_INIT_SAFE(curthread, tq->tq_name);
+	} else {
+		CALLB_CPR_INIT(&cprinfo, &tq->tq_lock, callb_generic_cpr,
+		    tq->tq_name);
+	}
+#else
+	taskq_sysdc_thread_enter_emulate_maybe(tq);
+
+        CALLB_CPR_INIT(&cprinfo, &tq->tq_lock, callb_generic_cpr,
+                                   tq->tq_name);
+#endif // !APPLE
 
 	mutex_enter(&tq->tq_lock);
 	thread_id = ++tq->tq_nthreads;
