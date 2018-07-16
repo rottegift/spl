@@ -1624,9 +1624,20 @@ taskq_thread_wait(taskq_t *tq, kmutex_t *mx, kcondvar_t *cv,
  *
  * limit [is] a percentage of CPU over an interval in nanoseconds
  *
+ * in particular limittime = (interval_ns * percentage) / 100
+ *
+ * when a thread has enough cpu time accumulated to hit limittime,
+ * ast_taken->thread_block is seen in a stackshot (e.g. spindump)
+ *
  * thread.h 204:#define MINIMUM_CPULIMIT_INTERVAL_MS 1
+ *
+ * Illumos's sysdc updates its stats every 20 ms
+ * (sysdc_update_interval_msec)
+ * which is the tunable we can deal with here; xnu will
+ * take care of the bookkeeping and the amount of "break",
+ * which are the other Illumos tunables.
  */
-#define CPULIMIT_INTERVAL (MSEC2NSEC(2ULL))
+#define CPULIMIT_INTERVAL (MSEC2NSEC(20ULL))
 #define THREAD_CPULIMIT_BLOCK 0x1
 extern int thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns);
 
@@ -1636,8 +1647,32 @@ taskq_thread_set_cpulimit(taskq_t *tq)
 	if (tq->tq_flags & TASKQ_DUTY_CYCLE) {
 		ASSERT3U(tq->tq_DC, <=, 100);
 		ASSERT3U(tq->tq_DC, >, 0);
-		uint8_t percent = MIN(100,MAX(tq->tq_DC,1));
-		uint64_t interval_ns = CPULIMIT_INTERVAL;
+		const uint8_t inpercent = MIN(100,MAX(tq->tq_DC,1));
+		const uint64_t interval_ns = CPULIMIT_INTERVAL;
+
+		/*
+		 * deflate tq->tq_DC (a percentage of cpu) by the
+		 * ratio of max_ncpus (logical cpus) to physical_ncpu.
+		 *
+		 * we don't want hyperthread resources to get starved
+		 * out by a large DUTY CYCLE, and we aren't doing
+		 * processor set pinning of threads to CPUs of either
+		 * type (neither does Illumos, but sysdc does take
+		 * account of psets when calculating the duty cycle,
+		 * and I don't know how to do that yet).
+		 *
+		 * do some scaled integer division to get
+		 * decpct = percent/(maxcpus/physcpus)
+		 */
+		const uint64_t m100 = (uint64_t)max_ncpus * 100ULL;
+		const uint64_t r100 = m100 / physical_ncpus;
+		const uint64_t pct100 = inpercent * 100ULL;
+		const uint64_t decpct = pct100 / r100;
+
+		uint8_t percent = MIN(decpct, inpercent);
+
+		ASSERT3U(percent, <=, 100);
+		ASSERT3U(percent, >, 0);
 
 		int ret = thread_set_cpulimit(THREAD_CPULIMIT_BLOCK,
 		    percent, interval_ns);
