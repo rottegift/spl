@@ -33,3 +33,4 @@ _ubc_is_mapped
 _ubc_is_mapped_writable
 _lf_advlock
 _upl_get_size
+_thread_set_cpulimit

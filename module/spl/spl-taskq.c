@@ -1619,6 +1619,36 @@ taskq_thread_wait(taskq_t *tq, kmutex_t *mx, kcondvar_t *cv,
 #define dprintf(...)
 #endif
 
+/*
+ * from osfmk/kern/thread.[hc] and osfmk/kern/ledger.c
+ *
+ * limit [is] a percentage of CPU over an interval in nanoseconds
+ *
+ * thread.h 204:#define MINIMUM_CPULIMIT_INTERVAL_MS 1
+ */
+#define CPULIMIT_INTERVAL (MSEC2NSEC(2ULL))
+#define THREAD_CPULIMIT_BLOCK 0x1
+extern int thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns);
+
+static void
+taskq_thread_set_cpulimit(taskq_t *tq)
+{
+	if (tq->tq_flags & TASKQ_DUTY_CYCLE) {
+		ASSERT3U(tq->tq_DC, <=, 100);
+		ASSERT3U(tq->tq_DC, >, 0);
+		uint8_t percent = MIN(100,MAX(tq->tq_DC,1));
+		uint64_t interval_ns = CPULIMIT_INTERVAL;
+
+		int ret = thread_set_cpulimit(THREAD_CPULIMIT_BLOCK,
+		    percent, interval_ns);
+
+		if (ret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING thread_set_cpulimit returned %d\n",
+			    __func__, __LINE__, ret);
+		}
+	}
+}
+
 static void
 taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 {
@@ -1633,13 +1663,19 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		 * onproc time / (onproc time + runnable time)
 		 * exceeds the Duty Cycle threshold.
 		 *
-		 * Approximate this by [a] setting the thread precedence
-		 * to high (just shy of urgent), [b] setthing the
-		 * thread throughput policy to high (but just shy
-		 * of USER_INTERACTIVE), and [c] turning on the
+		 * Approximate this by
+		 * [a] setting a thread_cpu_limit percentage,
+		 * [b] setting the thread precedence
+		 * slightly higher than normal,
+		 * [c] setting the thread throughput and latency policies
+		 * just less than USER_INTERACTIVE, and
+		 * [d] turning on the
 		 * TIMESHARE policy, which adjusts the thread
 		 * priority based on cpu usage.
 		 */
+
+		taskq_thread_set_cpulimit(tq);
+
 		thread_precedence_policy_data_t prec = { 0 };
 		/*
 		 * BASEPRI_PREEMPT - 1 == 93 - 1 == 92;
