@@ -1777,13 +1777,16 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 				    lqosp.thread_latency_qos_tier,
 				    tq->tq_name);
 			} else {
-				printf("SPL: %s:%d: SUCCESS setting thread"
+				dprintf("SPL: %s:%d: SUCCESS setting thread"
 				    " latency policy to %x, %s\n",
 				    __func__, __LINE__,
 				    lqosp.thread_latency_qos_tier,
 				    tq->tq_name);
 			}
 		}
+
+		/* Passivate I/Os for this thread */
+		throttle_set_thread_io_policy(IOPOL_PASSIVE); // default is IOPOL_IMPORTANT
 
 		thread_extended_policy_data_t policy = { .timeshare = TRUE };
 		kern_return_t kret = thread_policy_set(current_thread(),
@@ -2185,7 +2188,7 @@ taskq_create_sysdc(const char *name, int nthreads, int minalloc,
 #ifndef __APPLE__
 	ASSERT(proc->p_flag & SSYS);
 #endif
-	printf("SPL: %s:%d: taskq_create_sysdc(%s, nthreads: %d,"
+	dprintf("SPL: %s:%d: taskq_create_sysdc(%s, nthreads: %d,"
 	    " minalloc: %d, maxalloc: %d, proc, dc: %u, flags: %x)\n",
 	    __func__, __LINE__, name, nthreads,
 	    minalloc, maxalloc, dc, flags);
