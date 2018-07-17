@@ -1637,7 +1637,7 @@ taskq_thread_wait(taskq_t *tq, kmutex_t *mx, kcondvar_t *cv,
  * take care of the bookkeeping and the amount of "break",
  * which are the other Illumos tunables.
  */
-#define CPULIMIT_INTERVAL (MSEC2NSEC(20ULL))
+#define CPULIMIT_INTERVAL (MSEC2NSEC(10ULL))
 #define THREAD_CPULIMIT_BLOCK 0x1
 extern int thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns);
 
@@ -1719,12 +1719,17 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		 * which should give us a thread with base 91
 		 * and decaying with CPU use to 81 or lower;
 		 * we'll also slightly penalize BATCH
+		 *
+		 * Note that xnu's TIMESHARE threads can rise in
+		 * importance as well as lower, so starting at 0
+		 * (meaning BASEPRI_KERNEL, meaning pri 81)
+		 * is fine.
 		 */
-		prec.importance = 6;
+		prec.importance = 0;
 		if (tq->tq_DC <= 50)
-			prec.importance = 2;
+			prec.importance--;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
-			prec.importance = 1;
+			prec.importance--;
 		kern_return_t precret = thread_policy_set(current_thread(),
 		    THREAD_PRECEDENCE_POLICY,
 		    (thread_policy_t)&prec,
