@@ -1637,7 +1637,7 @@ taskq_thread_wait(taskq_t *tq, kmutex_t *mx, kcondvar_t *cv,
  * take care of the bookkeeping and the amount of "break",
  * which are the other Illumos tunables.
  */
-#define CPULIMIT_INTERVAL (MSEC2NSEC(10ULL))
+#define CPULIMIT_INTERVAL (MSEC2NSEC(100ULL))
 #define THREAD_CPULIMIT_BLOCK 0x1
 extern int thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns);
 
