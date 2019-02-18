@@ -108,6 +108,20 @@ spl_thread_create(
 			}
 		}
 
+		/* Threads with lower priority than maxclsyspri are TIMESHARE threads */
+
+		if (pri < maxclsyspri) {
+			thread_extended_policy_data_t policy = { .timeshare = TRUE };
+			kern_return_t kret = thread_policy_set(current_thread(),
+			    THREAD_EXTENDED_POLICY,
+			    (thread_policy_t)&policy,
+			    THREAD_EXTENDED_POLICY_COUNT);
+			if (kret != KERN_SUCCESS) {
+				printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
+				    __func__, __LINE__, kret);
+			}
+		}
+
         thread_deallocate(thread);
 
         atomic_inc_64(&zfs_threads);
