@@ -105,9 +105,9 @@ extern unsigned int logical_ncpus;
  * swap priority is at 92. Most ZFS priorities should probably
  * stay below this, but kmem_reap needs to be higher.
  */
-#define minclsyspri  81 /* BASEPRI_KERNEL */
+#define minclsyspri  80 /* MINPRI_KERNEL */
 #define defclsyspri  81 /* BASEPRI_KERNEL */
-#define maxclsyspri  95
+#define maxclsyspri  95 /* MAXPRI_KERNEL */
 
 
 #define NICE_TO_PRIO(nice)		(MAX_RT_PRIO + (nice) + 20)

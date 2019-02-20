@@ -82,21 +82,25 @@ spl_thread_create(
 			 * 79           System high priority
 			 *
 			 * spl/include/sys/sysmacros.h
-			 * #define maxclsyspri  89
-			 * #define minclsyspri  81  BASEPRI_KERNEL
+			 * #define maxclsyspri  95  MAXPRI_KERNEL
+			 * #define minclsyspri  80  MINPRI_KERNEL
 			 * #define defclsyspri  81  BASEPRI_KERNEL
 			 *
 			 * Calling policy.importance = 10 will create
-			 * a default pri (81) at pri (91).
+			 * a default pri (BASEPRI_KERNEL 81) at pri (91).
 			 *
 			 * So asking for pri (85) we do 85-81 = 4.
+			 *
+			 * Asking for minclsyspri gives us 80 - 81 = -1
+			 * Asking for defclsyspri gives us 81 - 81 = 0
+			 * Asking for maxclsyspri gives us 95 - 81 = 14
 			 *
 			 * IllumOS priorities are:
 			 * #define MAXCLSYSPRI     99
 			 * #define MINCLSYSPRI     60
 			 */
 
-			policy.importance = (pri - minclsyspri);
+			policy.importance = (pri - defclsyspri);
 
 			kern_return_t pol_prec_kret = thread_policy_set(thread,
 							  THREAD_PRECEDENCE_POLICY,
