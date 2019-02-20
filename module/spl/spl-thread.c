@@ -108,11 +108,14 @@ spl_thread_create(
 			}
 		}
 
-		/* Threads with lower priority than maxclsyspri are TIMESHARE threads */
+		/* set TIMESHARE policy on our non-maxclsyspri; busiest
+		 * threads should decay to avoid hurting GUI
+		 * performance
+		 */
 
 		if (pri < maxclsyspri) {
 			thread_extended_policy_data_t policy = { .timeshare = TRUE };
-			kern_return_t kret = thread_policy_set(current_thread(),
+			kern_return_t kret = thread_policy_set(thread,
 			    THREAD_EXTENDED_POLICY,
 			    (thread_policy_t)&policy,
 			    THREAD_EXTENDED_POLICY_COUNT);
@@ -120,6 +123,62 @@ spl_thread_create(
 				printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
 				    __func__, __LINE__, kret);
 			}
+		}
+
+		/* TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
+                 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
+		 */
+
+		/* throughput: less than user_interactive in all cases,
+		 *             we can be maint for defclsyspri and lower
+		 */
+
+		const thread_throughput_qos_t tput_high = THROUGHPUT_QOS_TIER_1;
+		const thread_throughput_qos_t tput_normal = THROUGHPUT_QOS_TIER_3;
+		const thread_throughput_qos_t tput_low = THROUGHPUT_QOS_TIER_5;
+		thread_throughput_qos_policy_data_t throughput_qos = { 0 };
+		if (pri >= maxclsyspri)
+			throughput_qos.thread_throughput_qos_tier = tput_high;
+		else if (pri > defclsyspri)
+			throughput_qos.thread_throughput_qos_tier = tput_normal;
+		else
+			throughput_qos.thread_throughput_qos_tier = tput_low;
+
+		/* sysdc latency is 3
+		 * so we want to be a better QOS than that for normal threads,
+		 * and less than that for the lowest-priority ones
+		 */
+
+		const thread_latency_qos_t latency_high = LATENCY_QOS_TIER_1;
+		const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_2;
+		const thread_latency_qos_t latency_low = LATENCY_QOS_TIER_4;
+		thread_latency_qos_policy_data_t latency_qos = { 0 };
+		if (pri >= maxclsyspri)
+			latency_qos.thread_latency_qos_tier = latency_high;
+		else if (pri > defclsyspri)
+			latency_qos.thread_latency_qos_tier = latency_normal;
+		else
+			latency_qos.thread_latency_qos_tier = latency_low;
+
+		kern_return_t qoskret = thread_policy_set(thread,
+                    THREAD_THROUGHPUT_QOS_POLICY,
+                    (thread_policy_t)&throughput_qos,
+                    THREAD_THROUGHPUT_QOS_POLICY_COUNT);
+                if (qoskret != KERN_SUCCESS) {
+                        printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d "
+                            " (THREAD_THROUGHPUT_QOS_POLICY %x)",
+                            __func__, __LINE__, qoskret, throughput_qos.thread_throughput_qos_tier);
+		}
+
+		qoskret = thread_policy_set(thread,
+		    THREAD_LATENCY_QOS_POLICY,
+		    (thread_policy_t)&latency_qos,
+		    THREAD_LATENCY_QOS_POLICY_COUNT);
+		if (qoskret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set thread"
+			    " latency policy retval: %d latency policy %x\n",
+			    __func__, __LINE__,
+			    qoskret, latency_qos.thread_latency_qos_tier);
 		}
 
         thread_deallocate(thread);
