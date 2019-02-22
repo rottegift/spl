@@ -1768,7 +1768,7 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		}
 
 		if (tq->tq_flags & TASKQ_DC_BATCH) {
-			const thread_latency_qos_t batch_latency = LATENCY_QOS_TIER_1;
+			const thread_latency_qos_t batch_latency = LATENCY_QOS_TIER_4;
 			thread_latency_qos_policy_data_t lqosp = { 0 };
 			lqosp.thread_latency_qos_tier = batch_latency;
 			kern_return_t lqoskret = thread_policy_set(current_thread(),
