@@ -143,7 +143,7 @@ spl_thread_create(
 		thread_throughput_qos_policy_data_t throughput_qos = { 0 };
 		if (pri >= maxclsyspri)
 			throughput_qos.thread_throughput_qos_tier = tput_high;
-		else if (pri > defclsyspri)
+		else if (pri >= defclsyspri)
 			throughput_qos.thread_throughput_qos_tier = tput_normal;
 		else
 			throughput_qos.thread_throughput_qos_tier = tput_low;
@@ -154,12 +154,12 @@ spl_thread_create(
 		 */
 
 		const thread_latency_qos_t latency_high = LATENCY_QOS_TIER_1;
-		const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_2;
-		const thread_latency_qos_t latency_low = LATENCY_QOS_TIER_4;
+		const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_3;
+		const thread_latency_qos_t latency_low = LATENCY_QOS_TIER_5;
 		thread_latency_qos_policy_data_t latency_qos = { 0 };
 		if (pri >= maxclsyspri)
 			latency_qos.thread_latency_qos_tier = latency_high;
-		else if (pri > defclsyspri)
+		else if (pri >= defclsyspri)
 			latency_qos.thread_latency_qos_tier = latency_normal;
 		else
 			latency_qos.thread_latency_qos_tier = latency_low;
