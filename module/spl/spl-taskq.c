@@ -1713,19 +1713,18 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 
 		thread_precedence_policy_data_t prec = { 0 };
 		/*
-		 * BASEPRI_PREEMPT - 1 == 93 - 1 == 92;
-		 * 92 - BASEPRI_KERNEL == 92 - 81 = 11;
-		 * so we'll be gentle and make it 10,
-		 * which should give us a thread with base 91
-		 * and decaying with CPU use to 81 or lower;
-		 * we'll also slightly penalize BATCH
+		 * maxclsyspri importance is clamped to 9
+		 * in spl_thread_create, which makes a thread
+		 * base priority of BASEPRI_KERNEL + 9 = 90.
+		 * Setting TIMESHARE extended attribute causes
+		 * a decay to lower priority under load.
 		 *
-		 * Note that xnu's TIMESHARE threads can rise in
-		 * importance as well as lower, so starting at 0
-		 * (meaning BASEPRI_KERNEL, meaning pri 81)
-		 * is fine.
+		 * We want reasonably high throughput QOS,
+		 * but not as high as USER_INTERACTIVE.
+		 *
+		 * We can live with lower latency QOS.
 		 */
-		prec.importance = 0;
+		prec.importance = 9;
 		if (tq->tq_DC <= 50)
 			prec.importance--;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
@@ -1749,7 +1748,7 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
 		 */
 		const thread_throughput_qos_t sysdc_throughput = THROUGHPUT_QOS_TIER_1;
-		const thread_throughput_qos_t batch_throughput = THROUGHPUT_QOS_TIER_2;
+		const thread_throughput_qos_t batch_throughput = THROUGHPUT_QOS_TIER_1;
 		thread_throughput_qos_policy_data_t qosp = { 0 };
 		qosp.thread_throughput_qos_tier = sysdc_throughput;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
