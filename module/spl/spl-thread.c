@@ -114,10 +114,10 @@ spl_thread_create(
 	 * performance
 	 */
 
-	thread_extended_policy_data_t policy = { .timeshare = TRUE };
+	thread_extended_policy_data_t ext_policy = { .timeshare = TRUE };
 	kern_return_t kret = thread_policy_set(thread,
 	    THREAD_EXTENDED_POLICY,
-	    (thread_policy_t)&policy,
+	    (thread_policy_t)&ext_policy,
 	    THREAD_EXTENDED_POLICY_COUNT);
 	if (kret != KERN_SUCCESS) {
 		printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
