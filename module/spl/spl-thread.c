@@ -142,8 +142,8 @@ spl_thread_create(
 	 *             we can be maint for defclsyspri and lower
 	 */
 
-	const thread_throughput_qos_t tput_high = THROUGHPUT_QOS_TIER_3;
-	const thread_throughput_qos_t tput_normal = THROUGHPUT_QOS_TIER_4;
+	const thread_throughput_qos_t tput_high = THROUGHPUT_QOS_TIER_1;
+	const thread_throughput_qos_t tput_normal = THROUGHPUT_QOS_TIER_3;
 	const thread_throughput_qos_t tput_low = THROUGHPUT_QOS_TIER_5;
 	thread_throughput_qos_policy_data_t throughput_qos = { 0 };
 	if (pri >= maxclsyspri)
