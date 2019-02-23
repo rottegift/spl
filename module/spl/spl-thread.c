@@ -100,6 +100,13 @@ spl_thread_create(
 
 	policy.importance = (pri - defclsyspri);
 
+	/* scale policy.importance down so we aren't fighting
+	 * with hw driver threads (mainly networking) or vm activity,
+	 * which run at base priorities 92-97
+	 */
+	if (policy.importance > 9)
+		policy.importance = 9;
+
 	kern_return_t pol_prec_kret = thread_policy_set(thread,
 	    THREAD_PRECEDENCE_POLICY,
 	    (thread_policy_t)&policy,
