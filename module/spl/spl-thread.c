@@ -151,8 +151,8 @@ spl_thread_create(
 	 * and less than that for the lowest-priority ones
 	 */
 
-	const thread_latency_qos_t latency_high = LATENCY_QOS_TIER_3;
-	const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_4;
+	const thread_latency_qos_t latency_high = LATENCY_QOS_TIER_1;
+	const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_3;
 	const thread_latency_qos_t latency_low = LATENCY_QOS_TIER_5;
 	thread_latency_qos_policy_data_t latency_qos = { 0 };
 	if (pri >= maxclsyspri)
