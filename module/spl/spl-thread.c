@@ -127,8 +127,8 @@ spl_thread_create(
 	 */
 
 	const thread_throughput_qos_t tput_high = THROUGHPUT_QOS_TIER_1;
-	const thread_throughput_qos_t tput_normal = THROUGHPUT_QOS_TIER_3;
-	const thread_throughput_qos_t tput_low = THROUGHPUT_QOS_TIER_5;
+	const thread_throughput_qos_t tput_normal = THROUGHPUT_QOS_TIER_2;
+	const thread_throughput_qos_t tput_low = THROUGHPUT_QOS_TIER_4;
 	thread_throughput_qos_policy_data_t throughput_qos = { 0 };
 	if (pri >= maxclsyspri)
 		throughput_qos.thread_throughput_qos_tier = tput_high;
@@ -143,8 +143,8 @@ spl_thread_create(
 	 */
 
 	const thread_latency_qos_t latency_high = LATENCY_QOS_TIER_1;
-	const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_3;
-	const thread_latency_qos_t latency_low = LATENCY_QOS_TIER_5;
+	const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_2;
+	const thread_latency_qos_t latency_low = LATENCY_QOS_TIER_4;
 	thread_latency_qos_policy_data_t latency_qos = { 0 };
 	if (pri >= maxclsyspri)
 		latency_qos.thread_latency_qos_tier = latency_high;
