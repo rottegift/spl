@@ -174,7 +174,6 @@ spl_thread_create(
 		    __func__, __LINE__,
 		    qoskret, latency_qos.thread_latency_qos_tier);
 	}
-#endif
 
 	/* set TIMESHARE policy on our threads; busiest
 	 * threads should decay to avoid hurting GUI
@@ -193,6 +192,8 @@ spl_thread_create(
 			    __func__, __LINE__, kret);
 		}
 	}
+
+#endif
 
         thread_deallocate(thread);
 
