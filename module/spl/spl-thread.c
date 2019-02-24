@@ -126,7 +126,7 @@ spl_thread_create(
 			    __func__, __LINE__, pri - minclsyspri, pol_prec_kret);
 		}
 	}
-
+#if 0
 		/* TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
 		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
 		 */
@@ -182,7 +182,7 @@ spl_thread_create(
 				    __func__, __LINE__,
 				    qoskret, latency_qos.thread_latency_qos_tier);
 			}
-#if 0
+
 
 			/* set TIMESHARE policy on our threads; busiest
 			 * threads should decay to avoid hurting GUI
@@ -198,8 +198,8 @@ spl_thread_create(
 				printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
 				    __func__, __LINE__, kret);
 			}
-#endif
 		}
+#endif
 
         thread_deallocate(thread);
 

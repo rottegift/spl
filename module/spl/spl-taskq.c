@@ -1743,6 +1743,7 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 			    prec.importance, tq->tq_name);
 		}
 
+#if 0
 		/*
 		 * TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
 		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
@@ -1804,6 +1805,7 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 			dprintf("SPL: %s:%d: SUCCESS setting timeshare policy, %s\n", __func__, __LINE__,
 			    tq->tq_name);
 		}
+#endif
 	}
 }
 #endif // __APPLE__
