@@ -1742,7 +1742,7 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 			dprintf("SPL: %s:%d: SUCCESS setting thread precedence %x, %s\n", __func__, __LINE__,
 			    prec.importance, tq->tq_name);
 		}
-#if 0
+
 		/*
 		 * TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
 		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
@@ -1765,7 +1765,6 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 			dprintf("SPL: %s:%d SUCCESS setting thread throughput policy to %x, %s\n",
 			    __func__, __LINE__, qosp.thread_througput_qos_tier, tq->tq_name);
 		}
-
 
 		if (tq->tq_flags & TASKQ_DC_BATCH) {
 			const thread_latency_qos_t batch_latency = LATENCY_QOS_TIER_3;
@@ -1805,7 +1804,6 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 			dprintf("SPL: %s:%d: SUCCESS setting timeshare policy, %s\n", __func__, __LINE__,
 			    tq->tq_name);
 		}
-#endif
 	}
 }
 #endif // __APPLE__

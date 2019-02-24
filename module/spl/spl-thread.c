@@ -98,9 +98,16 @@ spl_thread_create(
 	 * #define MINCLSYSPRI     60
 	 */
 
-	/* scale the importance to illumos clsyspri */
+	/* scale tier_importance
+	 * it is an integer_t with lowest legal value of 0
+	 * and sets the precedence RELATIVE to the task precedence,
+	 * the task being the kernel task.
+	 * Higher is better, and is relative to BASEPRI_KERNEL.
+	 * Setting a negative value causes lock priority inversions,
+	 * and will hang the system.
+	 */
 
-	integer_t tier_importance = (pri - defclsyspri);
+	integer_t tier_importance = (pri - minclsyspri);
 
 	if (tier_importance < 0)
 		tier_importance = 0;
@@ -127,8 +134,6 @@ spl_thread_create(
 	/* throughput: less than user_interactive in all cases,
 	 *             we can be maint for defclsyspri and lower
 	 */
-
-#if 0
 	const thread_throughput_qos_t tput_high = THROUGHPUT_QOS_TIER_1;
 	const thread_throughput_qos_t tput_normal = THROUGHPUT_QOS_TIER_3;
 	const thread_throughput_qos_t tput_low = THROUGHPUT_QOS_TIER_4;
@@ -179,23 +184,18 @@ spl_thread_create(
 
 	/* set TIMESHARE policy on our threads; busiest
 	 * threads should decay to avoid hurting GUI
-	 * performance. Don't do this for maxclsyspri
-	 * so as to avoid lock priority inversion problems
+	 * performance.
 	 */
 
-	if (pri < maxclsyspri) {
-		thread_extended_policy_data_t ext_policy = { .timeshare = TRUE };
-		kern_return_t kret = thread_policy_set(thread,
-		    THREAD_EXTENDED_POLICY,
-		    (thread_policy_t)&ext_policy,
-		    THREAD_EXTENDED_POLICY_COUNT);
-		if (kret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
-			    __func__, __LINE__, kret);
-		}
+	thread_extended_policy_data_t ext_policy = { .timeshare = TRUE };
+	kern_return_t kret = thread_policy_set(thread,
+	    THREAD_EXTENDED_POLICY,
+	    (thread_policy_t)&ext_policy,
+	    THREAD_EXTENDED_POLICY_COUNT);
+	if (kret != KERN_SUCCESS) {
+		printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
+		    __func__, __LINE__, kret);
 	}
-
-#endif
 
         thread_deallocate(thread);
 
