@@ -107,13 +107,15 @@ spl_thread_create(
 	if (policy.importance > 9)
 		policy.importance = 9;
 
-	kern_return_t pol_prec_kret = thread_policy_set(thread,
-	    THREAD_PRECEDENCE_POLICY,
-	    (thread_policy_t)&policy,
-	    THREAD_PRECEDENCE_POLICY_COUNT);
-	if (pol_prec_kret != KERN_SUCCESS) {
-		printf("SPL: %s:%d: ERROR failed to set thread precedence to %d ret %d\n",
-		    __func__, __LINE__, pri - minclsyspri, pol_prec_kret);
+	if (policy.importance != 0) {
+		kern_return_t pol_prec_kret = thread_policy_set(thread,
+		    THREAD_PRECEDENCE_POLICY,
+		    (thread_policy_t)&policy,
+		    THREAD_PRECEDENCE_POLICY_COUNT);
+		if (pol_prec_kret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: ERROR failed to set thread precedence to %d ret %d\n",
+			    __func__, __LINE__, pri - minclsyspri, pol_prec_kret);
+		}
 	}
 
 	/* set TIMESHARE policy on our threads; busiest
