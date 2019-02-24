@@ -160,6 +160,7 @@ spl_thread_create(
 			latency_qos.thread_latency_qos_tier = latency_low;
 
 		if (pri < maxclsyspri) {
+#if 0
 			kern_return_t qoskret = thread_policy_set(thread,
 			    THREAD_THROUGHPUT_QOS_POLICY,
 			    (thread_policy_t)&throughput_qos,
@@ -180,6 +181,7 @@ spl_thread_create(
 				    __func__, __LINE__,
 				    qoskret, latency_qos.thread_latency_qos_tier);
 			}
+#endif
 
 			/* set TIMESHARE policy on our threads; busiest
 			 * threads should decay to avoid hurting GUI
