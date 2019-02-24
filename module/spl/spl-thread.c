@@ -98,18 +98,16 @@ spl_thread_create(
 	 * #define MINCLSYSPRI     60
 	 */
 
-	policy.importance = (pri - defclsyspri);
+	/* scale the importance to illumos clsyspri */
 
+	integer_t tier_importance = (pri - defclsyspri);
 
-#if 0
-	/* scale policy.importance down so we aren't fighting
-	 * with hw driver threads (mainly networking) or vm activity,
-	 * which run at base priorities 92-97
-	 */
-	if (policy.importance > 9)
-		policy.importance = 9;
+	if (tier_importance < 0)
+		tier_importance = 0;
+	if (tier_importance > 14)
+		tier_importance = 14;
 
-#endif
+	policy.importance = tier_importance;
 
 	if (policy.importance != 0) {
 		kern_return_t pol_prec_kret = thread_policy_set(thread,
