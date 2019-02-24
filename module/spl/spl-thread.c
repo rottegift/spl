@@ -126,6 +126,7 @@ spl_thread_create(
 	 *             we can be maint for defclsyspri and lower
 	 */
 
+#if 0
 	const thread_throughput_qos_t tput_high = THROUGHPUT_QOS_TIER_1;
 	const thread_throughput_qos_t tput_normal = THROUGHPUT_QOS_TIER_3;
 	const thread_throughput_qos_t tput_low = THROUGHPUT_QOS_TIER_4;
@@ -137,7 +138,6 @@ spl_thread_create(
 	else
 		throughput_qos.thread_throughput_qos_tier = tput_low;
 
-#if 0
 	/* sysdc latency is 3
 	 * so we want to be a better QOS than that for normal threads,
 	 * and less than that for the lowest-priority ones
@@ -153,8 +153,6 @@ spl_thread_create(
 		latency_qos.thread_latency_qos_tier = latency_normal;
 	else
 		latency_qos.thread_latency_qos_tier = latency_low;
-#endif
-
 
 	kern_return_t qoskret = thread_policy_set(thread,
 	    THREAD_THROUGHPUT_QOS_POLICY,
@@ -166,7 +164,6 @@ spl_thread_create(
 		    __func__, __LINE__, qoskret, throughput_qos.thread_throughput_qos_tier);
 	}
 
-#if 0
 	qoskret = thread_policy_set(thread,
 	    THREAD_LATENCY_QOS_POLICY,
 	    (thread_policy_t)&latency_qos,
