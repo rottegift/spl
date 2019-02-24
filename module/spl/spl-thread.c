@@ -118,24 +118,6 @@ spl_thread_create(
 		}
 	}
 
-	/* set TIMESHARE policy on our threads; busiest
-	 * threads should decay to avoid hurting GUI
-	 * performance. Don't do this for maxclsyspri
-	 * so as to avoid lock priority inversion problems
-	 */
-
-	if (pri < maxclsyspri) {
-		thread_extended_policy_data_t ext_policy = { .timeshare = TRUE };
-		kern_return_t kret = thread_policy_set(thread,
-		    THREAD_EXTENDED_POLICY,
-		    (thread_policy_t)&ext_policy,
-		    THREAD_EXTENDED_POLICY_COUNT);
-		if (kret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
-			    __func__, __LINE__, kret);
-		}
-	}
-
 	/* TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
 	 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
 	 */
@@ -190,6 +172,24 @@ spl_thread_create(
 		    " latency policy retval: %d latency policy %x\n",
 		    __func__, __LINE__,
 		    qoskret, latency_qos.thread_latency_qos_tier);
+	}
+
+	/* set TIMESHARE policy on our threads; busiest
+	 * threads should decay to avoid hurting GUI
+	 * performance. Don't do this for maxclsyspri
+	 * so as to avoid lock priority inversion problems
+	 */
+
+	if (pri < maxclsyspri) {
+		thread_extended_policy_data_t ext_policy = { .timeshare = TRUE };
+		kern_return_t kret = thread_policy_set(thread,
+		    THREAD_EXTENDED_POLICY,
+		    (thread_policy_t)&ext_policy,
+		    THREAD_EXTENDED_POLICY_COUNT);
+		if (kret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
+			    __func__, __LINE__, kret);
+		}
 	}
 
         thread_deallocate(thread);
