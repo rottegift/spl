@@ -109,8 +109,8 @@ spl_thread_create(
 
 	integer_t tier_importance = (pri - minclsyspri);
 
-	if (tier_importance < 0)
-		tier_importance = 0;
+	if (tier_importance < 1)
+		tier_importance = 1;
 	if (tier_importance > 14)
 		tier_importance = 14;
 
