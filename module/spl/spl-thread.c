@@ -125,6 +125,8 @@ spl_thread_create(
 			printf("SPL: %s:%d: ERROR failed to set thread precedence to %d ret %d\n",
 			    __func__, __LINE__, pri - minclsyspri, pol_prec_kret);
 		}
+	}
+
 		/* TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
 		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
 		 */
@@ -138,7 +140,7 @@ spl_thread_create(
 		thread_throughput_qos_policy_data_t throughput_qos = { 0 };
 		if (pri >= maxclsyspri)
 			throughput_qos.thread_throughput_qos_tier = tput_high;
-		else if (pri > defclsyspri)
+		else if (pri >= defclsyspri)
 			throughput_qos.thread_throughput_qos_tier = tput_normal;
 		else
 			throughput_qos.thread_throughput_qos_tier = tput_low;
@@ -148,9 +150,9 @@ spl_thread_create(
 		 * and less than that for the lowest-priority ones
 		 */
 
-		const thread_latency_qos_t latency_high = LATENCY_QOS_TIER_0;
-		const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_1;
-		const thread_latency_qos_t latency_low = LATENCY_QOS_TIER_1;
+		const thread_latency_qos_t latency_high = LATENCY_QOS_TIER_1;
+		const thread_latency_qos_t latency_normal = LATENCY_QOS_TIER_3;
+		const thread_latency_qos_t latency_low = LATENCY_QOS_TIER_4;
 		thread_latency_qos_policy_data_t latency_qos = { 0 };
 		if (pri >= maxclsyspri)
 			latency_qos.thread_latency_qos_tier = latency_high;
@@ -160,7 +162,6 @@ spl_thread_create(
 			latency_qos.thread_latency_qos_tier = latency_low;
 
 		if (pri < maxclsyspri) {
-#if 0
 			kern_return_t qoskret = thread_policy_set(thread,
 			    THREAD_THROUGHPUT_QOS_POLICY,
 			    (thread_policy_t)&throughput_qos,
@@ -181,7 +182,7 @@ spl_thread_create(
 				    __func__, __LINE__,
 				    qoskret, latency_qos.thread_latency_qos_tier);
 			}
-#endif
+#if 0
 
 			/* set TIMESHARE policy on our threads; busiest
 			 * threads should decay to avoid hurting GUI
@@ -197,8 +198,8 @@ spl_thread_create(
 				printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
 				    __func__, __LINE__, kret);
 			}
+#endif
 		}
-	}
 
         thread_deallocate(thread);
 
