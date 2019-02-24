@@ -159,40 +159,42 @@ spl_thread_create(
 		else
 			latency_qos.thread_latency_qos_tier = latency_low;
 
-		kern_return_t qoskret = thread_policy_set(thread,
-		    THREAD_THROUGHPUT_QOS_POLICY,
-		    (thread_policy_t)&throughput_qos,
-		    THREAD_THROUGHPUT_QOS_POLICY_COUNT);
-		if (qoskret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d "
-			    " (THREAD_THROUGHPUT_QOS_POLICY %x)",
-			    __func__, __LINE__, qoskret, throughput_qos.thread_throughput_qos_tier);
-		}
+		if (pri < maxclsyspri) {
+			kern_return_t qoskret = thread_policy_set(thread,
+			    THREAD_THROUGHPUT_QOS_POLICY,
+			    (thread_policy_t)&throughput_qos,
+			    THREAD_THROUGHPUT_QOS_POLICY_COUNT);
+			if (qoskret != KERN_SUCCESS) {
+				printf("SPL: %s:%d: WARNING failed to set thread throughput policy retval: %d "
+				    " (THREAD_THROUGHPUT_QOS_POLICY %x)",
+				    __func__, __LINE__, qoskret, throughput_qos.thread_throughput_qos_tier);
+			}
 
-		qoskret = thread_policy_set(thread,
-		    THREAD_LATENCY_QOS_POLICY,
-		    (thread_policy_t)&latency_qos,
-		    THREAD_LATENCY_QOS_POLICY_COUNT);
-		if (qoskret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set thread"
-			    " latency policy retval: %d latency policy %x\n",
-			    __func__, __LINE__,
-			    qoskret, latency_qos.thread_latency_qos_tier);
-		}
+			qoskret = thread_policy_set(thread,
+			    THREAD_LATENCY_QOS_POLICY,
+			    (thread_policy_t)&latency_qos,
+			    THREAD_LATENCY_QOS_POLICY_COUNT);
+			if (qoskret != KERN_SUCCESS) {
+				printf("SPL: %s:%d: WARNING failed to set thread"
+				    " latency policy retval: %d latency policy %x\n",
+				    __func__, __LINE__,
+				    qoskret, latency_qos.thread_latency_qos_tier);
+			}
 
-		/* set TIMESHARE policy on our threads; busiest
-		 * threads should decay to avoid hurting GUI
-		 * performance.
-		 */
+			/* set TIMESHARE policy on our threads; busiest
+			 * threads should decay to avoid hurting GUI
+			 * performance.
+			 */
 
-		thread_extended_policy_data_t ext_policy = { .timeshare = TRUE };
-		kern_return_t kret = thread_policy_set(thread,
-		    THREAD_EXTENDED_POLICY,
-		    (thread_policy_t)&ext_policy,
-		    THREAD_EXTENDED_POLICY_COUNT);
-		if (kret != KERN_SUCCESS) {
-			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
-			    __func__, __LINE__, kret);
+			thread_extended_policy_data_t ext_policy = { .timeshare = TRUE };
+			kern_return_t kret = thread_policy_set(thread,
+			    THREAD_EXTENDED_POLICY,
+			    (thread_policy_t)&ext_policy,
+			    THREAD_EXTENDED_POLICY_COUNT);
+			if (kret != KERN_SUCCESS) {
+				printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d\n",
+				    __func__, __LINE__, kret);
+			}
 		}
 	}
 
