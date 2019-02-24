@@ -1766,8 +1766,9 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 			    __func__, __LINE__, qosp.thread_througput_qos_tier, tq->tq_name);
 		}
 
+#if 0
 		if (tq->tq_flags & TASKQ_DC_BATCH) {
-			const thread_latency_qos_t batch_latency = LATENCY_QOS_TIER_2;
+			const thread_latency_qos_t batch_latency = LATENCY_QOS_TIER_3;
 			thread_latency_qos_policy_data_t lqosp = { 0 };
 			lqosp.thread_latency_qos_tier = batch_latency;
 			kern_return_t lqoskret = thread_policy_set(current_thread(),
@@ -1788,6 +1789,7 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 				    tq->tq_name);
 			}
 		}
+#endif
 
 		/* Passivate I/Os for this thread */
 		throttle_set_thread_io_policy(IOPOL_PASSIVE); // default is IOPOL_IMPORTANT
