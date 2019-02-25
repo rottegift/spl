@@ -1725,7 +1725,7 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		 * (meaning BASEPRI_KERNEL, meaning pri 81)
 		 * is fine.
 		 */
-		prec.importance = 14;
+		prec.importance = 0;
 		if (tq->tq_DC <= 50)
 			prec.importance--;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
