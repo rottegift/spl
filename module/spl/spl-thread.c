@@ -107,16 +107,14 @@ spl_thread_create(
 	 * and will hang the system.
 	 */
 
-	integer_t tier_importance = (pri - minclsyspri);
+	integer_t tier_importance = (pri - defclsyspri); // min: -1, def: 0, max: 14
 
-	if (tier_importance < 1)
-		tier_importance = 1;
 	if (tier_importance > 14)
 		tier_importance = 14;
 
 	policy.importance = tier_importance;
 
-	if (policy.importance > 0) {
+	if (policy.importance > 0) { // don't manipulate defclsyspri and below
 		kern_return_t pol_prec_kret = thread_policy_set(thread,
 		    THREAD_PRECEDENCE_POLICY,
 		    (thread_policy_t)&policy,
