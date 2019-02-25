@@ -1748,8 +1748,8 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		 * TIERs: 0 is USER_INTERACTIVE, 1 is USER_INITIATED, 2 is LEGACY,
 		 *        3 is UTILITY, 4 is BACKGROUND, 5 is MAINTENANCE
 		 */
-		const thread_throughput_qos_t sysdc_throughput = THROUGHPUT_QOS_TIER_2;
-		const thread_throughput_qos_t batch_throughput = THROUGHPUT_QOS_TIER_3;
+		const thread_throughput_qos_t sysdc_throughput = THROUGHPUT_QOS_TIER_1;
+		const thread_throughput_qos_t batch_throughput = THROUGHPUT_QOS_TIER_2;
 		thread_throughput_qos_policy_data_t qosp = { 0 };
 		qosp.thread_throughput_qos_tier = sysdc_throughput;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
