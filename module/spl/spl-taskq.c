@@ -1807,6 +1807,27 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		}
 	}
 }
+
+static void
+taskq_thread_enter_timeshare_maybe(taskq_t *tq)
+{
+	if (tq->tq_flags & TASKQ_TIMESHARE) {
+		/* set the TIMESHARE property on this thread */
+		thread_extended_policy_data_t policy = { .timeshare = TRUE };
+		kern_return_t kret = thread_policy_set(current_thread(),
+		    THREAD_EXTENDED_POLICY,
+		    (thread_policy_t)&policy,
+		    THREAD_EXTENDED_POLICY_COUNT);
+		if (kret != KERN_SUCCESS) {
+			printf("SPL: %s:%d: WARNING failed to set timeshare policy retval: %d, %s\n",
+			    __func__, __LINE__, kret, tq->tq_name);
+		} else {
+			dprintf("SPL: %s:%d: SUCCESS setting timeshare policy, %s\n", __func__, __LINE__,
+			    tq->tq_name);
+		}
+	}
+}
+
 #endif // __APPLE__
 
 /*
@@ -1839,6 +1860,8 @@ taskq_thread(void *arg)
 	}
 #else
 	taskq_sysdc_thread_enter_emulate_maybe(tq);
+
+	taskq_thread_enter_timeshare_maybe(tq);
 
         CALLB_CPR_INIT(&cprinfo, &tq->tq_lock, callb_generic_cpr,
                                    tq->tq_name);
@@ -2230,6 +2253,9 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 
 	/* Cannot have DC_BATCH without DUTY_CYCLE */
 	ASSERT((flags & (TASKQ_DUTY_CYCLE|TASKQ_DC_BATCH)) != TASKQ_DC_BATCH);
+
+	/* Cannot have DC_BATCH or DUTY_CYCLE with TIMESHARE */
+	IMPLY((flags & (TASKQ_DUTY_CYCLE|TASKQ_DC_BATCH)), !(flags & TASKQ_TIMESHARE));
 
 	ASSERT(proc != NULL);
 

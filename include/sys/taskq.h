@@ -53,6 +53,9 @@ struct proc;
 #define	TASKQ_DYNAMIC		0x0004	/* Use dynamic thread scheduling */
 #define	TASKQ_THREADS_CPU_PCT	0x0008	/* number of threads as % of ncpu */
 #define	TASKQ_DC_BATCH		0x0010	/* Taskq uses SDC in batch mode */
+#ifdef __APPLE__
+#define TASKQ_TIMESHARE         0x0010  /* Special MacOS thread deprioritiztion */
+#endif
 
 /*
  * Flags for taskq_dispatch. TQ_SLEEP/TQ_NOSLEEP should be same as
