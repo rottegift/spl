@@ -135,7 +135,7 @@ int spl_mutex_subsystem_init(void)
 				offsetof(struct leak, mutex_leak_node));
 	lck_mtx_init((lck_mtx_t *)&mutex_list_mutex.m_lock, zfs_mutex_group, zfs_lock_attr);
 
-	(void)thread_create(NULL, 0, spl_wdlist_check, 0, 0, 0, 0, 92);
+	(void)thread_create(NULL, 0, spl_wdlist_check, 0, 0, 0, 0, maxclsyspri);
 #endif
 	return 0;
 }
