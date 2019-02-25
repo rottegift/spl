@@ -5281,7 +5281,7 @@ spl_kmem_thread_init(void)
 							  300, INT_MAX, TASKQ_PREPOPULATE);
 
 	spl_free_thread_exit = FALSE;
-	(void) thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0, 92);
+	(void) thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0, 95);
 	(void) cv_init(&spl_free_thread_cv, NULL, CV_DEFAULT, NULL);
 }
 
