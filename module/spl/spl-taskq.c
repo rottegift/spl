@@ -1699,32 +1699,25 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 		 * exceeds the Duty Cycle threshold.
 		 *
 		 * Approximate this by
-		 * [a] setting a thread_cpu_limit percentage,
-		 * [b] setting the thread precedence
-		 * slightly higher than normal,
-		 * [c] setting the thread throughput and latency policies
-		 * just less than USER_INTERACTIVE, and
+		 * [a] setting the thread precedence
+		 *     slightly higher than normal,
+		 * [b] setting a thread_cpu_limit percentage,
+		 * [c] setting the thread throughput policy
+		 *     just less than USER_INTERACTIVE, and
 		 * [d] turning on the
-		 * TIMESHARE policy, which adjusts the thread
-		 * priority based on cpu usage.
+		 *     TIMESHARE policy, which adjusts the thread
+		 *     priority based on cpu usage.
 		 */
-
-		taskq_thread_set_cpulimit(tq);
 
 		thread_precedence_policy_data_t prec = { 0 };
+
 		/*
-		 * maxclsyspri importance is clamped to 9
-		 * in spl_thread_create, which makes a thread
-		 * base priority of BASEPRI_KERNEL + 9 = 90.
-		 * Setting TIMESHARE extended attribute causes
-		 * a decay to lower priority under load.
-		 *
-		 * We want reasonably high throughput QOS,
-		 * but not as high as USER_INTERACTIVE.
-		 *
-		 * We can live with lower latency QOS.
+		 * Sysdc should run at high priority until it hits
+		 * cpulimits, or unless there is higher priority (userland gui)
+		 * stuff waiting to do CPU
 		 */
-		prec.importance = 3;
+
+		prec.importance = 14; // increment above base prirority 81
 		if (tq->tq_DC <= 50)
 			prec.importance--;
 		if (tq->tq_flags & TASKQ_DC_BATCH)
@@ -1742,6 +1735,8 @@ taskq_sysdc_thread_enter_emulate_maybe(taskq_t *tq)
 			dprintf("SPL: %s:%d: SUCCESS setting thread precedence %x, %s\n", __func__, __LINE__,
 			    prec.importance, tq->tq_name);
 		}
+
+ 		taskq_thread_set_cpulimit(tq);
 
 #if 0
 		/*
