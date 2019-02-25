@@ -5275,7 +5275,7 @@ spl_kmem_thread_init(void)
 	kmem_move_init();
 
 	// Initialize the spl_free locks
-	mutex_init(&spl_free_thread_lock, "spl_free_thead_lock", MUTEX_DEFAULT, NULL);
+	mutex_init(&spl_free_thread_lock, "spl_free_thread_lock", MUTEX_DEFAULT, NULL);
 
 	kmem_taskq = taskq_create("kmem_taskq", 1, minclsyspri,
 							  300, INT_MAX, TASKQ_PREPOPULATE);
