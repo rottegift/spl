@@ -46,7 +46,7 @@ extern "C" {
 static inline int
 highbit64(unsigned long long i)
 {
-    register int h = 1;
+    int h = 1;
 
     if (i == 0)
         return (0);
@@ -74,7 +74,7 @@ highbit64(unsigned long long i)
 static inline int
 highbit(unsigned long long i)
 {
-    register int h = 1;
+    int h = 1;
 
     if (i == 0)
         return (0);
@@ -107,11 +107,11 @@ highbit(unsigned long long i)
 static inline int
 lowbit(unsigned long long i)
 {
-	register int h = 1;
-		
+	int h = 1;
+
 	if (i == 0)
 		return (0);
-		
+
 	if (!(i & 0xffffffff)) {
 		h += 32; i >>= 32;
 	}
@@ -132,7 +132,7 @@ lowbit(unsigned long long i)
 	}
 	return (h);
 }
-	
+
 static inline int
 isdigit(char c)
 {
