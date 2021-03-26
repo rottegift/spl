@@ -177,15 +177,16 @@ typedef void 	*ldi_ident_t;
 #define biodone(bp) buf_biodone(bp)
 
 #define ddi_ffs ffs
-static inline long ddi_fls(long mask) {      \
-    /*Algorithm courtesy of Steve Chessin.*/ \
-    while (mask) {                           \
-		long nx;                             \
-		if ((nx = (mask & (mask - 1))) == 0) \
+static inline long ddi_fls(long mask) {			 \
+	/*Algorithm courtesy of Steve Chessin.*/	 \
+	while (mask) {					 \
+		long nx;				 \
+		if ((nx = (mask & (mask - 1))) == 0) {	 \
 			break;                           \
-		mask = nx;                           \
-	}                                        \
-	return (ffs(mask));                      \
+		}					 \
+		mask = nx;				 \
+	}						 \
+	return (ffs(mask));				 \
 }
 
 #define getminor(X) minor((X))
