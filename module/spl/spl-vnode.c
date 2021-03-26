@@ -689,11 +689,17 @@ int spl_decmpfs_file_is_compressed(struct vnode *vp, struct decmpfs_cnode *cp)
 void decmpfs_cnode_init(struct decmpfs_cnode *cp);
 void spl_decmpfs_cnode_init(struct decmpfs_cnode *cp)
 {
+#if defined (MAC_OS_X_VERSION_10_12) && \
+	(MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12)
 	decmpfs_cnode_init(cp);
+#endif
 }
 
 void decmpfs_cnode_destroy(struct decmpfs_cnode *cp);
 void spl_decmpfs_cnode_destroy(struct decmpfs_cnode *cp)
 {
+#if defined (MAC_OS_X_VERSION_10_12) && \
+	(MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12)
 	decmpfs_cnode_destroy(cp);
+#endif
 }
