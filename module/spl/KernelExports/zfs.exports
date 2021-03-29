@@ -2,7 +2,6 @@ _cpu_number
 _fp_lookup
 _fd_rdwr
 _hostname
-_kernel_memory_allocate
 _virtual_space_start
 _virtual_space_end
 _vm_page_free_wanted
